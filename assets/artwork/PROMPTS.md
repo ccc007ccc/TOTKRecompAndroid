@@ -1,15 +1,16 @@
-# Wilderness artwork — v1
+# 启动器美术：第一版历史设计
 
-Created with the built-in image generation tool. Original launcher artwork; no imported game assets. These source images are design deliverables and have not yet been wired into the launcher or Android resources.
+本目录保留上游通过图像生成工具制作的美术素材。第一版强调原创的荒野、古代文明和新生主题，
+不使用导入的游戏资源；上游当时没有把第一版接入启动器。当前项目不在本次文档更新中重新生成或替换图像。
 
-## Icon — wilderness-icon-v1.png
+## 设计要点
 
-Use case: logo-brand.
-Asset type: original Android adventure game launcher app icon, square 1024x1024, full bleed background (no rounded corners; Android applies its own mask).
-Primary request: Create a refined original icon suggesting vast wilderness, forgotten civilization and a new beginning. A single strong emblem: a small warm ivory seed-shaped crystal levitating inside a broken ancient bronze circular arch, with two simple sage-green leaves growing from its base and a restrained cyan inner glow. Deep midnight teal background with subtle stone grain, muted antique gold edging. The composition must be bold, clean and legible at 48px; central symbol fills the middle 62% with generous safe margin, near-symmetric silhouette, elegant hand-painted cel-shaded fantasy finish, minimal small details. Premium finished game app identity. No scene miniature, no lettering, no words, no initials, no watermark. Original imagery only: do not depict any recognizable existing game character, logo, triangular crest, eye symbol, sword, shield, or specific game artifact. The mood is quiet discovery and wild nature returning to ancient technology.
+`wilderness-icon-v1.png` 是 1024×1024 方形满底图标：暖象牙色种子水晶、破损青铜圆拱、鼠尾草绿叶片、
+少量青色光，深蓝绿色背景；中央图形留出 Android 裁切安全区，不含文字或现成游戏标志。
 
-## Background — wilderness-background-v1.png
+`wilderness-background-v1.png` 是 16:9 荒野背景：草原、河谷、远山、瀑布和古代圆拱，清晨暖金色光线，
+左侧保留平静偏暗区域放菜单，视觉重点偏右，无 UI、水印和人物。
 
-Use case: stylized-concept.
-Asset type: original landscape background artwork for an adventure game launcher, panoramic 16:9, high resolution, single finished painting, no UI and no text.
-Primary request: Evoke the wonder of exploring an immense open wilderness, the quiet ruins of an ancient civilization and a bright new dawn, with wholly original geography and architecture. Broad grassy plateau in the foreground, wind combing tall sage-green grass and tiny white wildflowers. On the right third, a weathered broken circular stone arch with subtle bronze inlays and tiny traces of turquoise luminescence, partly reclaimed by vines, echoing an ancient seed sanctuary. Beyond: immense verdant valley, winding river, layered blue mountains, thin waterfalls and scattered abstract monoliths, delicate distant birds. Warm pale gold sunrise at the horizon against a soft cyan sky with long cream clouds. Painterly cel-shaded landscape with confident large shapes, atmospheric depth, beautiful restrained detailing, mature game concept art, elegant and tranquil, not photorealistic. Colors: deep teal foreground shadows, muted jade and sage grass, distant powder blue, ivory and antique gold light. Composition intended as a launcher backdrop: left third and center-left remain relatively calm and darker, with simple grass and atmospheric valley for overlaid white menu text; visual focal point on right third; avoid a harsh central sun or bright details behind the menu. The image must stand on its own as beautiful artwork. No recognizable characters, no branded logos, no lettering, no triangular crest, no eye motif, no recognizable existing game landmarks, no swords, no castles copied from existing games, no watermark.
+素材名与历史来源保留，不能将美术提案当作 TOTK 新功能或渲染验收。完整生成提示词见下方上游原文。
+
+[完整上游历史原文](https://github.com/mamcjr/BOTWRecompAndroid/blob/ef7a3062432f33457155020b40595b81c9827a41/assets/artwork/PROMPTS.md)。原始内容也保留在 Git 历史中。

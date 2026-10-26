@@ -1,14 +1,9 @@
-# Companion ZeppOS
+# Zepp 手表伴侣状态
 
-A implementação atual está em [companion/zepp](../companion/zepp/README.md).
+`companion/zepp/` 保留上游 BOTW 地图实验，**尚未适配《王国之泪》**。
+原生读取器使用 BOTW 1.0.0 的指令特征和结构偏移，不能将其位置、任务和地图读取用于 TOTK 1.4.3。
 
-A versão 0.2.0 mantém o mapa no Amazfit GTR 4 New e recebe coordenadas, direção de Link, pinos/carimbos e indicadores da missão selecionada. A coroa controla quatro níveis de zoom; o toque move o mapa e o botão **Centrar Link** retoma o acompanhamento.
+上游在 Amazfit GTR 4 New 上的地图与生命周期测试属于历史结果，本分支没有手表验收结论。
+不要依据旧说明导出 BOTW 地图、部署旧地图包或宣称 TOTK 手表功能可用。
 
-```text
-Leitura de estado no runtime → HTTP autenticado em loopback
-    → Side Service do Zepp no mesmo Android → Bluetooth → mapa local no relógio
-```
-
-O alvo é deviceSource 9437441, 480×480 e API 1.0, conforme o catálogo instalado do Zeus. A ponte nativa está em `runtime/watch_map.c`; o servidor e a ativação ficam em `WatchMapServer.java`. Somente a revisão Switch 1.0.0 validada é aceita. Dados extraídos do dump local ficam fora do Git.
-
-O README contém instruções de exportação, instalação, controles, protocolo, verificações realizadas e limites. O protótipo anterior de captura de minimapa fica disponível como diagnóstico legado.
+代码范围和原始资料见 [伴侣说明](../companion/zepp/README.md)；当前主要工作见 [状态](STATUS.md)。

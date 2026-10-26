@@ -1,15 +1,18 @@
-# Great Plateau / Triforce — v2
+# 启动器美术：第二版历史设计
 
-Created with the built-in image generation tool following the user's request for explicit BOTW references. The Android build uses the Triforce artwork for its application icon. The launcher uses the Great Plateau artwork on all platforms, including the initial setup screen; distribution scripts bundle the background. Applied without compiling or testing, as requested.
+这些素材由上游按其用户要求生成，用于 BOTW 风格启动器。本分支继承素材和文件名，
+它们不是从游戏包提取的资源，也不表示本项目仍以 BOTW 为目标。
+本次更新只调整文档，没有重新生成美术或改变素材接入。
 
-## great-plateau-background-v2.png
+## 设计要点
 
-Use case: stylized-concept.
-Asset type: finished landscape artwork for a Breath of the Wild fan-project launcher background, widescreen 16:9, no text or UI.
-Primary request: An evocative panoramic view of Hyrule as seen looking out from the edge of the Great Plateau in The Legend of Zelda: Breath of the Wild. Make it recognizable through the landscape: windblown green grass and a rocky ledge in the foreground, the broad rolling fields of central Hyrule stretching into the distance, the silhouette of Hyrule Castle near the middle distance with a very subtle trace of dark rose malice, Death Mountain with a faint red volcanic glow on the far right horizon, distant blue mountain ranges, scattered ancient ruins, a winding river and a distant slender Sheikah tower. No characters. Peaceful early morning with warm golden light and long soft clouds, an expansive sense of freedom and discovery. Beautiful hand-painted cel-shaded game concept art, gentle watercolor-like atmosphere, clear large landscape shapes and carefully chosen fine details, not photorealistic and not a screenshot. Natural fresh greens, deep teal shadows, misty blue distance and warm ivory sunlight. Composition: low foreground ledge and dark quiet grasses along the lower left, calm relatively uncluttered left third for launcher menu text; rich panorama and major landmarks across the middle and right. No large foreground arch, no invented portal, no giant emblem. No text, title, logo, lettering, frame, watermark, HUD or interface. An original painted interpretation of the iconic view from the Great Plateau.
+`great-plateau-background-v2.png`：16:9 手绘风格的初始台地远景，包含草地岩沿、远处城堡和火山、河流与古代建筑，
+清晨金色光线；左下较暗，方便叠放菜单，不含人物、文字或 UI。
 
-## triforce-icon-v2.png
+`triforce-icon-v2.png`：深蓝绿色石质背景，中央三枚同尺寸金色正三角形组成大三角，中央保留倒三角空隙；
+边缘简洁，对称布局，适应 Android 图标裁切，不含文字、边框或其他符号。
 
-Use case: logo-brand.
-Asset type: premium Android app icon artwork for a Zelda fan project, square full-bleed image. No rounded corner frame; the operating system supplies the mask.
-Primary request: The iconic Triforce: EXACTLY THREE equal upright equilateral solid gold triangles, one at the top, one at the lower left and one at the lower right, arranged edge-to-edge into one larger upright equilateral triangle with a clean inverted triangular empty opening at its center. Precise iconic geometry, perfectly symmetrical. Three triangles only, all pointing upwards. Use rich warm gold with restrained bevels and beautiful brushed-metal highlights, slightly aged but polished, no ornate engravings or elaborate surface patterns. Center the complete emblem within the middle 60 percent of the square so it fits circular Android masks. Deep dark petroleum teal stone-like background, very subtle ambient teal glow behind the emblem, strong simple silhouette, exceptional readability at tiny icon sizes. Elegant, understated, crisp graphic design with dimensional painted metallic finish. No text, letters, titles, sword, wings, eye, additional triangle, border, foliage, characters, watermark or other symbols. The final image should look like a clean finished app icon, not a product mockup or a photo.
+上游记录第二版接入过图标和启动器背景，该历史记录不是本次编译或美术验收结果。
+完整提示词与原始接入说明见下方上游原文；品牌及许可证说明见 [项目首页](../../README.md)。
+
+[完整上游历史原文](https://github.com/mamcjr/BOTWRecompAndroid/blob/ef7a3062432f33457155020b40595b81c9827a41/assets/artwork/PROMPTS-v2.md)。原始内容也保留在 Git 历史中。

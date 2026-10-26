@@ -1,66 +1,61 @@
 # TOTKRecompAndroid
 
-面向 Android ARM64 的《塞尔达传说：王国之泪》静态重编译适配，基于本仓库原有的 BOTWRecompAndroid 运行时。当前固定输入为 **Switch 本体 + 1.4.3 更新**（程序 ID `0100F2C0115B6000`）。
+面向 Android ARM64 的《塞尔达传说：王国之泪》静态重编译实验移植，当前适配 **Nintendo Switch 1.4.3**。
 
-适配仍处于启动验证阶段，不能把生成代码或 APK 构建成功理解为已经可玩。实机结果与剩余问题记录在 [移植记录](docs/TOTK-PORT.md)。
+本仓库是 **[mamcjr/BOTWRecompAndroid](https://github.com/mamcjr/BOTWRecompAndroid) 的 Fork**，现已更名为
+[ccc007ccc/TOTKRecompAndroid](https://github.com/ccc007ccc/TOTKRecompAndroid)。我们沿用上游的重编译器、
+Android 应用框架和 Vulkan 运行时，开发目标改为《王国之泪》。上游《旷野之息》的兼容性、版本号和性能记录
+不代表本分支的结果。项目文档默认中文，来源与同步记录见 [上游关系](docs/UPSTREAM.md)。
 
-程序、资源、密钥和生成代码均不随仓库分发。`tools/totk.py` 核对四个模块的完整 Build ID 和 NPDM 标题；运行时还会核对 ExeFS 与 `totkgame.so` 的模块身份。其他游戏或混用更新版本会被拒绝。
+## 当前状态
 
-## 构建
+已在一加 13（Adreno 830）进入“海拉鲁城堡的地下”，显示人物、场景材质和中文游戏 UI。
+用户已确认人物模型恢复正常；使用 Banner Turnip 27 A8xx 与采样补偿后，瘴气棋盘格消失。
 
-SteamOS 宿主只作文件管理，构建在 Distrobox **dev** 内完成。默认 SDK/NDK 位于 `/home/deck/Code/Toolchains/`；可以用 `ANDROID_HOME`、`ANDROID_NDK` 覆盖。工作目录是项目内的 `.work/totk-port/`，编译器、Python 和 Java 的临时目录也指向这里。
+**适配仍未完成**：火把光晕在画面左上四分之一区域被截断，场景仍会大面积变暗或缺失。
+音频、存档事务、输入全流程、长时间运行及性能仍需验收。当前调试游戏库使用 `-O0`，不能作为性能基准。
+最新结论见 [状态与已知问题](docs/STATUS.md)，完整实验见 [适配记录](docs/TOTK-PORT.md)。
+
+## 构建与运行
+
+需要自己的游戏本体、1.4.3 更新及密钥。仓库和 APK 均不包含游戏程序、资源或密钥。
+四个 NSO 模块的完整 Build ID 与 NPDM 标题 ID 会被核对；目前不宣称支持其他游戏版本。
+
+SteamOS 宿主上的编译、依赖安装、生成器和测试统一在 Distrobox `dev` 中运行：
 
 ```bash
 bash android/build_totk.sh
 ```
 
-APK 输出在 `android/botwrecompandroid/app/build/outputs/apk/debug/app-debug.apk`。安装包名为 `com.totkrecomp.android`；Java/JNI 源目录名称保留以减少迁移改动。需要网络下载固定版本的开源构建依赖。APK 不包含游戏代码。
+该脚本构建运行时 APK。首次准备游戏还需提取输入、生成并编译 `totkgame.so`、部署到手机，
+完整步骤见 [构建与部署](docs/BUILD.md)。之后只修改运行时通常只需重建 APK。
 
-## 准备自己的游戏
+| 项目 | 当前值 |
+| --- | --- |
+| 游戏 | 《王国之泪》Switch 1.4.3，程序 ID `0100F2C0115B6000` |
+| 应用 | `com.totkrecomp.android`，Android 11+、ARM64 |
+| 游戏库 | `totkgame.so`，四模块 ABI 2 |
+| APK | `android/botwrecompandroid/app/build/outputs/apk/debug/app-debug.apk` |
+| 本机工作数据 | `.work/totk-port/`，不进入 Git |
+| 手机数据 | `Android/data/com.totkrecomp.android/files/` |
 
-以下命令在 `distrobox enter dev` 后、项目根目录执行。`android/dev_env.sh` 设置工具链、Python 和项目内临时目录。NSP 提取使用本机 hactool 1.5.4；通过 `--hactool` 指定路径。
+`android/botwrecompandroid/`、Java/JNI 类名及 `LARECOMP_*` 环境变量保留上游技术名称，
+不代表应用仍以 BOTW 为目标。部分继承界面和工具还没有完成 TOTK 适配，以文档列明的流程为准。
 
-```bash
-source android/dev_env.sh
-export ANDROID_SERIAL=3be2985e
-"$PYTHON" tools/pull_totk.py \
-  '/storage/emulated/0/Games/TotK/[APP][0100F2C0115B6000][1.0.0][US][16.0.0].nsp' \
-  .work/totk-port/base --serial "$ANDROID_SERIAL"
-"$PYTHON" tools/pull_totk.py \
-  '/storage/emulated/0/Games/TotK/[UPD][0100F2C0115B6800][1.4.3][US][21.2.0].nsp' \
-  .work/totk-port/update --serial "$ANDROID_SERIAL"
-"$PYTHON" tools/prepare_totk.py \
-  --base .work/totk-port/base --update .work/totk-port/update \
-  --keys .work/private/prod.keys --hactool .work/hactool/hactool \
-  --output .work/totk-port/game
-```
+## 文档与参与
 
-设备序列号用 `adb devices -l` 确认。`prod.keys` 使用自己设备上的文件；准备工具从自己的 NSP ticket 读取标题密钥，兼容副本在结束时清理，不改动原密钥。手机 `Games/TotK/` 的原始文件只读。
+- [文档索引](docs/README.md)：构建、架构、测试、已知问题及历史资料。
+- [贡献指南](CONTRIBUTING.md)：修改范围、验证要求和问题反馈。
+- [问题反馈](https://github.com/ccc007ccc/TOTKRecompAndroid/issues)：请附设备、驱动、复现步骤和日志。
 
-提取结果为 `game/exefs/`、合并后的 `game/romfs.bin`、独立视频 `game/romfs/` 和输入清单。流式读取 NSP 避免在电脑额外保存一份本体 NSP，但仍需要容纳约 16 GiB NCA、约 16 GiB RomFS 和构建产物的空间。
+## 来源与致谢
 
-```bash
-GAMELIB_GEN="$PWD/.work/totk-port/generated" \
-GAMELIB_OUT="$PWD/.work/totk-port/out" \
-bash android/build_gamelib.sh .work/totk-port/game/exefs
+感谢 [mamcjr/BOTWRecompAndroid](https://github.com/mamcjr/BOTWRecompAndroid) 提供直接上游，
+[peiikai/LASRecomp](https://github.com/peiikai/LASRecomp) 提供重编译器与原始运行时，
+[mamcjr/LASRecompAndroid](https://github.com/mamcjr/LASRecompAndroid) 提供 Android 移植基础。
+本次适配还参考本地 `TotK-Native` 的四模块装载、NVN 和服务实现，以及
+[Ryujinx Neo 的 Turnip gather 修正](https://github.com/Sunshinin11/Ryujinx_Neo/commit/734fe55f8f7e2d2ae69449374476e360521e4d51)。
+完整依赖和继承致谢见 [来源记录](docs/UPSTREAM.md)。
 
-"$PYTHON" tools/deploy_totk.py .work/totk-port/game \
-  --library .work/totk-port/out --serial "$ANDROID_SERIAL" \
-  --apk android/botwrecompandroid/app/build/outputs/apk/debug/app-debug.apk --launch
-```
-
-部署通过正常 APK / Activity / JNI 启动，不在手机 `/data/local/tmp` 放辅助程序。运行数据位于 `Android/data/com.totkrecomp.android/files/`，与其他应用的存档分开。尚未打包端侧编译器；本流程在电脑生成游戏库。
-
-## 验证与清理
-
-```bash
-source android/dev_env.sh
-"$PYTHON" tools/test_totk.py
-"$PYTHON" tools/test_exclusive_pair.py
-"$PYTHON" tools/test_local_branches.py
-"$PYTHON" tools/totk.py .work/totk-port/game/exefs
-```
-
-`.work/` 全部被 Git 忽略，包含本机私有输入和日志。完成部署后可删除 `.work/totk-port/base/`、`update/`、`generated/` 与 `out/gamelib-build/` 释放空间；保留 `game/`、`out/totkgame.so*` 与日志便于后续复现。不要把密钥、游戏数据或派生代码加入 Git。
-
-历史 BOTW 文档和尚未适配的实验工具保留在 `docs/`、`tools/` 中；它们的旧版本号、地址和性能结论不适用于 TotK。
+仓库保留原有 [MIT 许可证](LICENSE) 及第三方组件各自的许可证与版权声明。
+这些许可证不授权分发任天堂的游戏、字体或其他资源。本项目不是任天堂官方产品。

@@ -12,8 +12,9 @@ from pathlib import Path
 root = Path(__file__).resolve().parents[1]
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--cc', default='cc')
+p.add_argument('--out', type=Path, default=root / '.work' / 'totk-port' / 'romfs-build-tests')
 args = p.parse_args()
-out = root / 'build' / 'romfs-build-tests'
+out = args.out.resolve()
 out.mkdir(parents=True, exist_ok=True)
 
 # the previous builder, for the byte-for-byte reference

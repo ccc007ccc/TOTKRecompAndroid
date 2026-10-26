@@ -1,62 +1,35 @@
-# Contributing to BOTWRecompAndroid
+# 参与 TOTKRecompAndroid
 
-Thanks for wanting to help! Bug reports, testing on different hardware and code contributions are all welcome.
+本分支开发《王国之泪》Switch 1.4.3 的 Android ARM64 移植。直接上游是
+[mamcjr/BOTWRecompAndroid](https://github.com/mamcjr/BOTWRecompAndroid)。
+请先阅读 [状态](docs/STATUS.md)、[架构](docs/ARCHITECTURE.md) 与 [上游关系](docs/UPSTREAM.md)。
 
-> [!NOTE]
-> This project is developed mostly with AI (see the README). Contributions written by hand, with AI assistance or
-> anything in between are equally welcome - what matters is that a change works, is tested, and follows the rules
-> below.
+## 提交内容
 
-## The one hard rule: no Nintendo files
+源代码、合成输入测试和文档可以提交。手写代码与 AI 辅助代码遵循相同验证要求。
+文档默认中文；代码注释沿用所在文件风格，解释约束、原因和可验证的行为。
 
-Nothing owned by Nintendo may ever be committed or attached to an issue or pull request:
+不要提交游戏包、NSO/NCA、RomFS、密钥、从游戏生成的 C/着色器、字体、纹理、音频或存档。
+实机原始缓冲与回放材料留在被忽略的 `.work/totk-port/`。问题报告可以附必要截图、短视频和不含私有数据的日志。
 
-- no copies of the game in any form
-- no dumps (`Dump/`), extracted game files (`extracted/`), generated code (`generated*/`) or fonts (`.bfttf` / Switch
-  `.ttf`)
-- no game assets of any kind: textures, models, music, text, map files - also not "just one file for testing"
+## 开发与验证
 
-Pull requests that include Nintendo files can't be merged. Screenshots and short clips of the game in bug reports are
-fine.
+SteamOS 宿主不可变，编译、依赖安装、生成器与测试使用 `distrobox enter dev`。
+从项目根目录加载 `android/dev_env.sh`，临时数据留在项目内，工具链默认位于 `/home/deck/Code/Toolchains/`。
+具体命令见 [构建](docs/BUILD.md) 与 [测试](docs/TESTING.md)。
 
-## Reporting bugs
+- 保留四模块身份检查、应用数据隔离和已确认的人物修复。
+- 不把 BOTW/LAS 的地址、版本或定点补丁直接用于 TOTK。
+- 实现变更运行相关检查；图形修复提供实机或独立回放证据，说明覆盖范围。
+- 编译通过、少量正常帧和用户确认是不同证据。保留负结果与用户反馈。
+- 先从源码和已有抓取定位，必要时才重启；已启用诊断的进程可用 F9 再次抓帧。
+- 每轮记录 APK/提交、驱动、环境变量、场景和有效帧范围。诊断回读不能用于性能测试。
+- 属于一次启动的状态需随游戏重启清理，参照 `RT_ON_RESET` 与后端重置入口。
 
-Open a [GitHub issue](https://github.com/mamcjr/BOTWRecompAndroid/issues). Please include the Android device, OS version, GPU and driver, what you did, what happened, and logcat output (tag `BOTWRecompAndroid`).
+## 问题与合并请求
 
-## Building
+在 [本仓库 Issues](https://github.com/ccc007ccc/TOTKRecompAndroid/issues) 报告设备、Android 版本、GPU/驱动、
+游戏版本、复现步骤、预期与实际结果。Android 日志标签是 `TOTKRecompAndroid`。
 
-Android is the only application target. The plan and phase notes are in [docs/BOTW-PORT.md](docs/BOTW-PORT.md) (Portuguese).
-Build the APK with `cd android/botwrecompandroid && ./gradlew assembleDebug` (Windows: `gradlew.bat assembleDebug`).
-Check your dump with `cd tools && python botw_dump.py`. Build its game library with
-`android/build_gamelib.sh Dump/01007EF00011E000/exefs`.
-
-## Project layout
-
-- `tools/gen.py` - the recompiler: translates the game's executables into C (`generated/`, never committed).
-  `tools/patches.py` holds code patches applied during generation; every patch site checks the original instruction
-  word, so a wrong address fails loudly instead of silently.
-- `runtime/` - the host side:
-  - `kernel.c`, `loader.c`, `services/` - the Switch OS replacement
-  - `hle/` - host implementations of SDK functions (input, movies, display, fonts) and the game hooks (`game.c`)
-  - `nvn/` - the graphics layer: command recording (`cmdbuf.c`), the Vulkan (`vulkan/`) backend, the shader translator (`maxwell/translate.c`)
-  - `ui/` - the ImGui overlay menu and the start screen
-- `android/` - the Android app (Gradle), its dependencies and the game code build for the phone.
-
-## Testing your change
-
-- Build the Android APK. For rendering changes, report the device, Vulkan driver and scene used for testing.
-- Test in game, and look at the result: a fix isn't verified until you've seen it work.
-- Many debug hooks are documented where they're defined - grep for `getenv("LARECOMP_` (the engine's prefix, kept
-  from LAS Recomp). Give test runs a scratch save folder (`LARECOMP_SAVE_DIR`) so your own saves stay untouched.
-- State that belongs to one boot of the game must be reset when the game reboots in place: use an `RT_ON_RESET` hook
-  (see `runtime/hle.h`).
-
-## Code style
-
-- Match the surrounding code: its naming, structure and comment density. Comments explain *why* (what the game does,
-  what an address is, which bug showed the problem), not what the next line does.
-- Engine changes that aren't about BOTW should stay easy to bring back to LAS Recomp (and the other way round).
-
-## Pull requests
-
-- Keep each pull request focused on one change; small is easier to review.
+合并请求写明具体问题、最终行为、测试和未验证部分，保留来源、版权与许可证。
+同步上游后检查游戏版本、资源校验、界面文案与渲染计数器；没有文本冲突不代表已经适配 TOTK。
