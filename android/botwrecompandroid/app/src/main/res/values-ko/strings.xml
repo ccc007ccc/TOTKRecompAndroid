@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="shortcut_watch_map">시계 지도</string>
+    <string name="shortcut_watch_map_long">시계 미니맵 설정</string>
+    <string name="shortcut_system_driver">시스템 드라이버</string>
+    <string name="shortcut_system_driver_long">시스템 드라이버로 시작</string>
+    <string name="shortcut_pick_driver">드라이버 선택</string>
+    <string name="shortcut_pick_driver_long">Vulkan 드라이버 선택 (.zip)</string>
+    <string name="driver_not_a_package">드라이버 패키지 (.zip 또는 .so)가 아닙니다: 드라이버는 바뀌지 않았습니다.</string>
+    <string name="driver_error_title">그래픽 드라이버 오류</string>
+    <string name="driver_install">드라이버 설치</string>
+    <string name="driver_system">시스템 드라이버 사용</string>
+    <string name="driver_close">닫기</string>
+    <string name="driver_error_intro">그래픽 드라이버가 게임을 실행하지 못했습니다. GPU용 Turnip 드라이버 (.zip)로 대개 해결됩니다: 드라이버 설치를 누르세요.\n\n자세한 내용:</string>
+</resources>

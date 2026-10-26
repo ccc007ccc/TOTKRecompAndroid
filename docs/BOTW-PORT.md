@@ -660,7 +660,12 @@ Pedidos ainda não começados, o mais recente no fim.
     do jogo como faltando.
   - Quem pediu lembrou que um dos projetos LAS faz isso. O LASRecompAndroid não faz; falta conferir o
     LASRecomp-Android-Plus (Nycolazs).
-- **Controles de toque estilo FPS** (pedido no Reddit, 2026-10-24): movimento e câmera pelas duas metades da tela,
+- **Controles de toque estilo FPS** (pedido no Reddit, 2026-10-24) - feito e aprovado pelo usuário no POCO (2026-10-25): na aba
+  Controles, "Câmera por arrasto" (`drag_frame`: inclinação total a 80% da altura da tela por segundo vezes a
+  sensibilidade, suavizada, começando depois de 15% para passar a zona morta do jogo; usa a metade direita inteira),
+  "Analógicos só ao tocar" e "Áreas maiores dos analógicos" (cada metade da tela). Ajustar no POCO: a curva e a zona
+  morta do arrasto, e se a câmera fica com atraso. O pedido original:
+  movimento e câmera pelas duas metades da tela,
   para deixar a tela mais limpa. Hoje (`runtime/ui/touch_controls.mm`) os dois analógicos já flutuam: o esquerdo nasce
   onde o dedo toca em `x < 45%` da largura e abaixo de 30% da altura, e o direito (câmera) em `x > 50%`, abaixo de 25%,
   fora dos botões. Mas os dois ficam desenhados no lugar de descanso mesmo sem toque, e a câmera é um analógico: o dedo
@@ -673,7 +678,8 @@ Pedidos ainda não começados, o mais recente no fim.
     sempre visíveis / só ao tocar).
   - **Áreas maiores:** cada metade inteira da tela, com os botões ainda na frente.
 - **Resolução dinâmica do jogo só no modo Dinâmica** (sugestão do usuário, 2026-10-25; há mods do BOTW que a
-  desligam): o próprio jogo baixa a resolução da cena quando o quadro pesa (1600x900, 1440x810... no log `[post]
+  desligam) - feito em 625f8c3: os contadores de GPU do jogo ficam congelados (a cena presa em 1600x900;
+  `LARECOMP_GAME_DYNRES=1` devolve a do jogo), e Resolução interna > Dinâmica é a nossa, pelo tempo de GPU. O próprio jogo baixa a resolução da cena quando o quadro pesa (1600x900, 1440x810... no log `[post]
   scene`), e as folhas escuras do aspecto livre aparecem justamente nesses degraus; trocas de tamanho dos alvos também
   são candidatas a outros bugs. Ideia: com a Resolução interna num valor fixo, prender a escala do jogo no máximo, e
   deixar a dinâmica só quando a opção estiver em Dinâmica. Caminhos:
@@ -681,6 +687,20 @@ Pedidos ainda não começados, o mais recente no fim.
     ele fica na escala mínima), então devolver tempos curtos pode prendê-la no máximo sem mexer no código do jogo.
   - Ou como os mods fazem (patch no exefs que trava a escala): conferir os endereços deles nas três versões.
   - Medir o custo: a escala dinâmica é o que segura os 30 fps nos lugares pesados; sem ela, menos fps lá.
+- **Menus do app nos idiomas do jogo** (pedido do usuário, 2026-10-25) - feito, falta conferir no celular: uma
+  tabela por idioma (`runtime/ui/i18n_<idioma>.inc`: es, fr, de, it, nl, ru, ja, ko, zh_hans, zh_hant, além do pt),
+  escolhida pelo idioma do celular (`settings_menu_language`; `LARECOMP_HOST_LANG=ja` para testar); russo, japonês,
+  coreano e chinês com os glifos que a tabela usa, vindos das fontes do próprio Android (NotoSansCJK, Roboto) e
+  mesclados na Baloo 2 (`i18n_merge_fonts`); os textos do lado Java em `res/values-<idioma>`. Conferir no POCO:
+  altura e alinhamento dos glifos mesclados (escala 0,6 da Baloo, a ajustar), largura dos textos mais longos
+  (alemão, russo) nas linhas do menu, e que o NotoSansCJK existe no HyperOS.
+- **Build do código do jogo mais leve** (issues #18 e #25, 2026-10-25): numa tablet de 12 GB (1.6.0) o app fechou
+  após ~20 min de build, na tela, sem erro no log; num Nubia Z60 Ultra (16 GB) o build demorou demais, puxou 11 W e
+  esquentou, e reabrir o app começa tudo de novo. Hoje são `min(núcleos, RAM em GB - 2)` compiladores de uma vez
+  (`launcher.mm build_game_code`: 8 nos dois). Falta:
+  - Começar um compilador novo só com memória livre (MemAvailable) e menos de uma vez num celular quente.
+  - Continuar de onde parou: manter os objetos já compilados entre aberturas do app.
+  - Registrar no log por que o Android fechou o app da última vez (`ApplicationExitInfo`: LOW_MEMORY etc.).
 
 ## Regras
 

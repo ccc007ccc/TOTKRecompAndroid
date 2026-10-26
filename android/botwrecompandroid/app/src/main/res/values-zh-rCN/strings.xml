@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="shortcut_watch_map">手表地图</string>
+    <string name="shortcut_watch_map_long">设置手表小地图</string>
+    <string name="shortcut_system_driver">系统驱动</string>
+    <string name="shortcut_system_driver_long">使用系统驱动启动</string>
+    <string name="shortcut_pick_driver">选择驱动</string>
+    <string name="shortcut_pick_driver_long">选择 Vulkan 驱动（.zip）</string>
+    <string name="driver_not_a_package">不是驱动包（.zip 或 .so）：驱动未更改。</string>
+    <string name="driver_error_title">图形驱动错误</string>
+    <string name="driver_install">安装驱动</string>
+    <string name="driver_system">使用系统驱动</string>
+    <string name="driver_close">关闭</string>
+    <string name="driver_error_intro">图形驱动无法运行游戏。为你的 GPU 安装 Turnip 驱动（.zip）通常可以解决：点按“安装驱动”。\n\n详细信息：</string>
+</resources>

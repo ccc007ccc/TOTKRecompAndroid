@@ -277,6 +277,23 @@ static void set_failure(int k) {
     if (k >= 1 && k <= 6) set_job(head[k], true, hint[k]);
 }
 
+// The romfs/ found against the exefs/ beside it (romfs_check_set): false = it doesn't go with it, the failure set (the
+// versions only in its detail: the hints are translated whole)
+static bool romfs_check_result(int r, const char *why, int nfiles, const char *version_txt) {
+    if (r == ROMFS_SET_OTHER_VERSION) {
+        set_job("Wrong version of the game", true,
+                "The game data (romfs) and the game code (exefs) are from different versions. Choose a folder where both "
+                "come from the same version.");
+    } else if (r == ROMFS_SET_MISSING) {
+        set_failure(FAIL_MISSING);
+    } else {
+        if (nfiles >= 0) fprintf(stderr, "[launcher] romfs: %d files, Version.txt %.16s\n", nfiles, version_txt[0] ? version_txt : "-");
+        return true;
+    }
+    set_job_detail(why);
+    return false;
+}
+
 static bool is_dir(const std::string &p) {
     struct stat st;
     return stat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
@@ -375,6 +392,9 @@ static void *extract_thread(void *) {
         int v = main_version(exefs + "/main");
         char vr[1024];
         if (v <= 0 || !rt_version_root(v, vr, sizeof vr)) { set_failure(FAIL_VERSION); goto done; }
+        char why[256] = "";
+        int r = romfs_check_dir(v, romfs.c_str(), why, sizeof why);
+        if (!romfs_check_result(r, why, -1, "")) goto done;  // (before an earlier setup is removed)
         mkdir(vr, 0755);
         dest = std::string(vr) + "/extracted";
     }
@@ -531,6 +551,31 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_botwrecompandroid_BOTWRecompAndroi
     return env->NewStringUTF(dest.c_str());
 }
 
+// The picked romfs/'s files (relative paths) and its System/Version.txt's first bytes against the picked exefs/'s
+// version, before nativeImportBegin: a folder that can't be used leaves an earlier setup alone. false = the failure is
+// set (nativeImportDone(6) follows)
+extern "C" JNIEXPORT jboolean JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeCheckRomfs(JNIEnv *env, jclass, jint version,
+                                                                                                         jobjectArray paths, jstring version_txt) {
+    int n = env->GetArrayLength(paths);
+    std::vector<std::string> keep(n);
+    std::vector<const char *> p(n);
+    for (int i = 0; i < n; i++) {
+        jstring s = (jstring)env->GetObjectArrayElement(paths, i);
+        const char *c = env->GetStringUTFChars(s, NULL);
+        keep[i] = c ? c : "";
+        if (c) env->ReleaseStringUTFChars(s, c);
+        env->DeleteLocalRef(s);
+        p[i] = keep[i].c_str();
+    }
+    const char *t = version_txt ? env->GetStringUTFChars(version_txt, NULL) : NULL;
+    std::string txt = t ? t : "";
+    if (t) env->ReleaseStringUTFChars(version_txt, t);
+    char why[256] = "";
+    int r = romfs_check_set(version, p.data(), n, txt.c_str(), why, sizeof why);
+    while (!txt.empty() && (txt.back() == '\n' || txt.back() == '\r' || txt.back() == ' ')) txt.pop_back();
+    return romfs_check_result(r, why, n, txt.c_str());
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeImportProgress(JNIEnv *, jclass, jlong done, jlong total) {
     g_total = (unsigned long long)total;  // (exefs/ copied, then the data image read straight from romfs/: one pass)
     g_done = (unsigned long long)done;
@@ -633,7 +678,8 @@ static void android_prune_loose(void) {  // (start screen, game files ready)
     if (pthread_create(&t, NULL, prune_thread, NULL) == 0) pthread_detach(t);
 }
 
-// 0 copied, 1 cancelled, 2 no game files found, 3 game packages instead of files, 4 another version, 5 copy failed
+// 0 copied, 1 cancelled, 2 no game files found, 3 game packages instead of files, 4 another version, 5 copy failed,
+// 6 the romfs/ doesn't go with the exefs/ (nativeCheckRomfs set the failure)
 extern "C" JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeImportDone(JNIEnv *, jclass, jint result) {
     if (result == 0) {
         g_android_imported = true;
@@ -648,7 +694,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidAc
     std::string detail = g_fail_detail;
     g_fail_detail.clear();
     pthread_mutex_unlock(&g_lock);
-    if (result == 1) return;
+    if (result == 1 || result == 6) return;
     set_failure(result == 2 ? FAIL_NOT_FOUND : result == 3 ? FAIL_UNUSABLE : result == 4 ? FAIL_VERSION : FAIL_COPY);
     if (result == 5 && detail.rfind("can't read ", 0) == 0)  // (not the free space: issue #17 read it as 30 GB asked for)
         set_job("Setup didn't finish", true,
@@ -1389,11 +1435,20 @@ extern "C" void launcher_run(const char *root) {
     for (const char *p : fonts) {
         if (g_font_menu || !*p || !file_exists(p)) continue;
         bool b2 = p == own.c_str() || getenv("LARECOMP_LAUNCHER_FONT");
+        // (each followed by the menu language's other letters, if it needs any: ui/i18n.mm - not the title's, the
+        // app's name)
         g_font_small = io.Fonts->AddFontFromFileTTF(p, 30 * (b2 ? 1.75f : 1), NULL, ranges);
+        i18n_merge_fonts(io.Fonts, 30 * (b2 ? 1.75f : 1));
         g_font_menu = io.Fonts->AddFontFromFileTTF(p, 52 * (b2 ? 1.85f : 1), NULL, ranges);
+        i18n_merge_fonts(io.Fonts, 52 * (b2 ? 1.85f : 1));
         g_font_title = io.Fonts->AddFontFromFileTTF(p, 92 * (b2 ? 2.3f : 1), NULL, ranges);
     }
     if (!g_font_menu) g_font_small = g_font_menu = g_font_title = io.Fonts->AddFontDefault();
+    if (!io.Fonts->Build()) {  // (a font ImGui couldn't read left the atlas empty: its upload crashed - ImGui's own font)
+        fprintf(stderr, "[ui] the start screen's fonts didn't build: ImGui's default font instead\n");
+        io.Fonts->Clear();
+        g_font_small = g_font_menu = g_font_title = io.Fonts->AddFontDefault();
+    }
     ImGuiStyle &st = ImGui::GetStyle();
     st.Colors[ImGuiCol_Header] = ImVec4(0, 0, 0, 0);
     st.Colors[ImGuiCol_HeaderHovered] = ImVec4(1, 1, 1, 0.08f);

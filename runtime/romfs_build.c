@@ -132,6 +132,68 @@ uint64_t romfs_dir_bytes(const char *dir) {
     return n;
 }
 
+// The whole romfs/ of each version this app runs (dumps that boot), and files the game can't start without, named
+// when they're among the missing. Players brought 1.0.0's game code over 43,573 files (issue #22: an update's or the
+// DLC's mixed in; it froze at the tower's movie) and a romfs one file short (issue #23: the game stopped loading
+// Actor/ActorInfo.product.sbyml) - both set up fine before, then failed in the game.
+static const struct { int version, files; const char *name; } k_whole[] = {
+    {100, 39678, "1.0.0"}, {160, 41052, "1.6.0"}, {182, 41056, "1.8.2"}};
+static const char *const k_key_files[] = {"Actor/ActorInfo.product.sbyml", "Pack/Bootup.pack", "Pack/TitleBG.pack",
+                                         "System/Version.txt"};
+
+int romfs_check_set(int version, const char *const *paths, int n, const char *version_txt, char *why, size_t why_size) {
+    const char *name = NULL;
+    int whole = 0;
+    for (size_t i = 0; i < sizeof k_whole / sizeof *k_whole; i++)
+        if (k_whole[i].version == version) name = k_whole[i].name, whole = k_whole[i].files;
+    if (!name) return ROMFS_SET_OK;
+    // Version.txt's first word ("1.8.2"; a byte order mark, spaces and line ends left out)
+    const char *s = version_txt ? version_txt : "";
+    if (!strncmp(s, "\xEF\xBB\xBF", 3)) s += 3;
+    while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
+    char said[32];
+    size_t k = 0;
+    while (s[k] && s[k] != ' ' && s[k] != '\t' && s[k] != '\r' && s[k] != '\n' && k < sizeof said - 1) said[k] = s[k], k++;
+    said[k] = 0;
+    if (said[0] && strcmp(said, name)) {
+        snprintf(why, why_size, "romfs/System/Version.txt says %s, exefs/main is %s", said, name);
+        return ROMFS_SET_OTHER_VERSION;
+    }
+    if (n >= whole) return ROMFS_SET_OK;
+    char absent[256] = "";
+    for (size_t i = 0; i < sizeof k_key_files / sizeof *k_key_files; i++) {
+        bool found = false;
+        for (int j = 0; j < n && !found; j++) found = !strcmp(paths[j], k_key_files[i]);
+        size_t used = strlen(absent);
+        if (!found) snprintf(absent + used, sizeof absent - used, "%s%s", used ? ", " : "", k_key_files[i]);
+    }
+    snprintf(why, why_size, "romfs/ has %d files, a whole %s has %d: %d missing%s%s", n, name, whole, whole - n,
+             absent[0] ? ", among them " : "", absent);
+    return ROMFS_SET_MISSING;
+}
+
+int romfs_check_dir(int version, const char *dir, char *why, size_t why_size) {
+    Dir *t = scan(dir, "", NULL, 0);
+    if (!t) return ROMFS_SET_OK;  // (an unreadable folder: the image build says so)
+    Lists l = {0};
+    flatten(t, &l);
+    const char **paths = malloc(sizeof *paths * (size_t)(l.nf ? l.nf : 1));
+    size_t skip = strlen(dir) + 1;  // (scan's paths: dir/rel)
+    for (int i = 0; i < l.nf; i++) paths[i] = l.files[i]->path + skip;
+    char txt[64] = "", p[4096];
+    snprintf(p, sizeof p, "%s/System/Version.txt", dir);
+    FILE *f = fopen(p, "rb");
+    if (f) {
+        txt[fread(txt, 1, sizeof txt - 1, f)] = 0;
+        fclose(f);
+    }
+    int r = romfs_check_set(version, paths, l.nf, txt, why, why_size);
+    free(paths);
+    free(l.dirs), free(l.files);
+    free_tree(t);
+    return r;
+}
+
 // Where the file data comes from (romfs_build: paths on disk; romfs_build_entries: descriptors from a callback), and
 // which files also get a loose copy under keep_dir.
 typedef struct {

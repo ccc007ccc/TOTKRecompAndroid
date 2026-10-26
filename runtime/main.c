@@ -149,6 +149,7 @@ __attribute__((section(".rst$z"), used)) static const ResetFn __stop_resets[1];
 void backend_reset(void);             // renderer: GPU idle, game textures and address-keyed caches dropped
 void backend_guest_memory_reset(void);  // renderer: guest memory was replaced (re-wrap the heap)
 void backend_clear_window(void);      // a black frame while the game is down
+void audio_stop(void);                // services/audio.c: its threads read guest memory the renderer's reset may free
 
 static void reboot_idle(void) {  // (main thread, while guest threads stop) keep the window alive
     SDL_Event e;
@@ -159,6 +160,7 @@ static void reboot_idle(void) {  // (main thread, while guest threads stop) keep
 static void teardown(void) {
     uint64_t t0 = plat_now_ns();
     kernel_stop_threads(reboot_idle);
+    audio_stop();
     backend_clear_window();
     backend_reset();
     const ResetFn *start = __start_resets, *stop = __stop_resets;

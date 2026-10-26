@@ -51,6 +51,11 @@ typedef struct {
 #define TOUCH_NCTL 19  // (ui/touch_controls.mm: LAS's 12, then the right stick, L3 / R3 and the d-pad)
     float touch_pos[TOUCH_NCTL][2];  // each on-screen control's place, a share of the screen (negative: default)
     float touch_scale, touch_opacity;
+    // FPS-style touch play (ui/touch_controls.mm): the camera by dragging a finger (its speed tilts the right stick)
+    // instead of holding a stick, at touch_drag_sens; the sticks drawn only while a finger holds them; each stick's
+    // area a whole half of the screen
+    bool touch_drag_camera, touch_sticks_hidden, touch_half_areas;
+    float touch_drag_sens;
 #endif
     int language;        // LANG_AUTO or an index into g_language_codes: the game's text language
     bool aspect_asked;   // the start screen's one-time "authentic 16:9 or unlocked?" question was answered
@@ -69,5 +74,8 @@ void settings_reset_defaults(void);
 const char *settings_language(void);
 // That code's name for the menu ("Spanish")
 const char *settings_language_name(void);
-// Android: the phone's language is Portuguese (the menus' own text: ui/i18n.mm). LARECOMP_HOST_LANG=pt|en (tests)
-bool settings_host_portuguese(void);
+// Android: the language of the menus' own text (ui/i18n.mm), from the phone's first preferred language: "pt", "es", "fr",
+// "de", "it", "nl", "ru", "ja", "ko", "zh-Hans", "zh-Hant" (the game's languages), else "en". LARECOMP_HOST_LANG=<code>
+// (tests). Elsewhere "en".
+const char *settings_menu_language(void);
+bool settings_host_portuguese(void);  // (settings_menu_language is "pt")

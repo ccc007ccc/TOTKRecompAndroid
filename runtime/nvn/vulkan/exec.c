@@ -207,6 +207,15 @@ static _Atomic bool pace_slow;
 static uint64_t stat_pace_over;
 static _Atomic int pace_on = -1;
 
+// The last presented frame's GPU busy time in ms, -1 unknown (Video > Internal resolution > Dynamic: output_scale.c)
+double vk_frame_gpu_ms(void) {
+#ifdef __ANDROID__
+    return g_pace_gpu_ms > 0 ? g_pace_gpu_ms : -1;
+#else
+    return -1;
+#endif
+}
+
 void vk_pace_frame(void) {
     {   // (write-backs of passes the GPU has finished since: the game may read them this frame)
         uint64_t v = 0;
@@ -6748,9 +6757,19 @@ static void exec_list(uint64_t handle, int depth) {
             static uint32_t seen;
             if (type < 32 && !(seen & (1u << type))) { seen |= 1u << type; LOG("[nvn] ReportCounter type %u\n", type); }
             int mode = vk_counter_mode();
+            // The game's own dynamic resolution (its 3D scene 1600x900 down to 1280x720 in 5% steps) goes by the GPU
+            // time these show, and nothing else (its 20 fps step uses its CPU stopwatch: SavageWindRecomp's notes).
+            // Its size changes reallocate the scaled targets every few frames (the dark leaves came at those steps):
+            // the game is shown no GPU time - every counter of a presented frame the same - and stays at 1600x900;
+            // Video > Internal resolution > Dynamic is ours (output_scale.c). The GPU timestamps of our submissions
+            // stay (ADPF, the pacer). LARECOMP_GAME_DYNRES=1: the game's own, as before (POCO F7 Ultra, the Great
+            // Plateau, 100 s: 105 of 991 frames at 1280x720 and 8 changes with it, none without, the same fps).
+            static int game_dynres = -1;
+            if (game_dynres < 0) game_dynres = getenv("LARECOMP_GAME_DYNRES") && atoi(getenv("LARECOMP_GAME_DYNRES")) != 0;
+            bool frozen = mode == 1 || !game_dynres;
             static uint64_t frame_seen = ~0ull, frame_ts;
             extern uint64_t vk_frame_counter(void);
-            if (mode == 1 && vk_frame_counter() != frame_seen) { frame_seen = vk_frame_counter(); frame_ts = ns_to_gpu_ticks(plat_now_ns()); }
+            if (frozen && vk_frame_counter() != frame_seen) { frame_seen = vk_frame_counter(); frame_ts = ns_to_gpu_ticks(plat_now_ns()); }
             if (!out) break;
             if ((uint64_t)(uintptr_t)out < GUEST_LO || (uint64_t)(uintptr_t)out >= GUEST_HI) {  // (not guest memory)
                 static int bad;
@@ -6765,9 +6784,9 @@ static void exec_list(uint64_t handle, int depth) {
             static uint64_t samples_n;
             if (samples < 0) samples = !getenv("LARECOMP_SAMPLES_PASSED") || atoi(getenv("LARECOMP_SAMPLES_PASSED")) != 0;
             out[0] = type == 1 && samples ? (samples_n += 1u << 20) : 0;
-            out[1] = mode == 1 ? frame_ts : mode == 3 ? SDL_GetTicksNS() : ns_to_gpu_ticks(plat_now_ns());  // (3 legacy: ns, the old bug)
+            out[1] = frozen ? frame_ts : mode == 3 ? SDL_GetTicksNS() : ns_to_gpu_ticks(plat_now_ns());  // (3 legacy: ns, the old bug)
             static uint64_t *prev_out;  // (frame pacing: the pair's start)
-            if (mode == 0 || mode == 2) out[1] = pace_end_counter(prev_out, out, out[1]);
+            if (!frozen && (mode == 0 || mode == 2)) out[1] = pace_end_counter(prev_out, out, out[1]);
             prev_out = out;
             {   // (test) LARECOMP_TEST_COUNTER_DELAY_MS=<ms>: stall the host after a frame's first counter - a slow CPU
                 // (LARECOMP_TEST_SLOW_AT=<frame>:<count>: only those presented frames, 40 ms unless the delay is set:
@@ -6785,7 +6804,7 @@ static void exec_list(uint64_t handle, int depth) {
                     SDL_DelayPrecise((Uint64)(delay * 1e6));
                 }
             }
-            if (mode == 2 && type == 0) {  // (type 0: timestamp)
+            if (mode == 2 && type == 0 && !frozen) {  // (type 0: timestamp)
                 VkCommandBuffer cb = vk_cmd();  // (first: may begin the buffer, which resets the slot's queries)
                 CounterQ *q = &cq[cur_sub];
                 pthread_mutex_lock(&cq_lock);

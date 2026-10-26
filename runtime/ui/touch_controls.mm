@@ -5,6 +5,8 @@
 // (g_touch_buttons, g_touch_lx / ly, g_touch_rx / ry). Both sticks float: the left one starts where a finger lands in
 // the left part of the screen, the right one (BOTW's camera) where it lands on the right, off the buttons. With the
 // menu or the name entry up, touches stay mouse clicks for the menu. The Android back button opens the menu too.
+// FPS-style options (Controls tab): the camera by dragging (drag_frame), the sticks drawn only while touched, and each
+// stick's area a whole half of the screen.
 // The layout is the player's (the Controls tab, ui/controls_ui.mm): each control's place (g_settings.touch_pos, a
 // share of the screen; negative: the default), their size and opacity. Editing it (touch_edit_begin) closes the menu
 // and lets the controls be dragged; a bar on the screen saves, resets or cancels.
@@ -138,10 +140,13 @@ static int hit(float x, float y, int *k) {  // the control under (x, y) (*k: its
         *k = -1;
         return C_NONE;
     }
+    // (Larger areas: each a whole half of the screen, the buttons still in front; the drag camera has no stick of its own
+    // to stay near, so it takes the whole right half too)
+    bool half = g_settings.touch_half_areas, right_half = half || g_settings.touch_drag_camera;
     *k = K_STICK;
-    if (x < disp_w * 0.45f && y > disp_h * 0.30f) return C_STICK;
+    if (half ? x < disp_w * 0.5f : x < disp_w * 0.45f && y > disp_h * 0.30f) return C_STICK;
     *k = K_RSTICK;
-    if (x > disp_w * 0.50f && y > disp_h * 0.25f) return C_RSTICK;  // (the camera: any free spot on the right)
+    if (right_half ? x >= disp_w * 0.5f : x > disp_w * 0.50f && y > disp_h * 0.25f) return C_RSTICK;  // (the camera)
     *k = -1;
     return C_NONE;
 }
@@ -155,9 +160,35 @@ static void stick_update(int s) {  // (t_lock held)
     else g_touch_lx = x, g_touch_ly = y;
 }
 
+// The camera by dragging (g_settings.touch_drag_camera; FPS-style, a Reddit request): the finger's speed, not where it
+// is, tilts the right stick - the camera turns while the finger moves and stops with it. Its travel since the last frame
+// (drag_dx / dy, pixels) becomes the tilt once a frame (drag_frame): a full tilt at 80% of the screen's height a second
+// (times touch_drag_sens), a little smoothed (touch events and frames come at different rates), and past the stick's
+// first 15% (the game's dead zone: slow drags would turn nothing).
+static float drag_dx, drag_dy, drag_vx, drag_vy;
+static uint64_t drag_last_ns;
+
+static bool drag_camera(void) { return g_settings.touch_drag_camera && !editing; }
+
+static void drag_frame(void) {  // (t_lock held) once a presented frame
+    uint64_t now = SDL_GetTicksNS();
+    double dt = drag_last_ns ? (double)(now - drag_last_ns) / 1e9 : 0;
+    drag_last_ns = now;
+    if (!drag_camera() || !stick[1].on) { drag_vx = drag_vy = drag_dx = drag_dy = 0; return; }
+    if (dt <= 0 || dt > 0.25) dt = 1.0 / 30;
+    float sens = g_settings.touch_drag_sens > 0.1f ? g_settings.touch_drag_sens : 1.0f;
+    float full = disp_h * 0.8f / sens;  // (pixels a second for a full tilt)
+    float vx = (float)(drag_dx / dt) / full, vy = (float)(-drag_dy / dt) / full;
+    drag_dx = drag_dy = 0;
+    drag_vx = 0.5f * drag_vx + 0.5f * vx, drag_vy = 0.5f * drag_vy + 0.5f * vy;
+    float m = sqrtf(drag_vx * drag_vx + drag_vy * drag_vy), out = m < 0.01f ? 0 : fminf(1.0f, 0.15f + 0.85f * m);
+    float k = m > 0 ? out / m : 0;
+    g_touch_rx = (int32_t)(drag_vx * k * 32767), g_touch_ry = (int32_t)(drag_vy * k * 32767);
+}
+
 static void stick_release(int s) {  // (t_lock held)
     stick[s].on = false;
-    if (s) g_touch_rx = 0, g_touch_ry = 0;
+    if (s) g_touch_rx = 0, g_touch_ry = 0, drag_dx = drag_dy = drag_vx = drag_vy = 0;
     else g_touch_lx = 0, g_touch_ly = 0;
 }
 
@@ -276,12 +307,21 @@ extern "C" bool touch_controls_event(const SDL_Event *e) {
         fingers[nfingers] = {e->tfinger.fingerID, ctl, x, y, cx - x, cy - y};
         if (editing && k >= 0 && ctl != C_NONE && (ctl < C_DONE || ctl == C_RSTICK)) fingers[nfingers].ctl = 200 + k;  // (dragging layout entry k)
         nfingers++;
-        if (!editing && s >= 0) { stick[s].on = true; stick[s].cx = stick[s].kx = x, stick[s].cy = stick[s].ky = y; stick_update(s); }
+        if (!editing && s >= 0) {
+            stick[s].on = true;
+            stick[s].cx = stick[s].kx = x, stick[s].cy = stick[s].ky = y;
+            if (s == 1 && drag_camera()) drag_dx = drag_dy = drag_vx = drag_vy = 0;
+            else stick_update(s);
+        }
         if (ctl == C_MENU && !editing) act = C_MENU;
         if (ctl >= C_DONE && ctl <= C_CANCEL) act = ctl;
     } else if (e->type == SDL_EVENT_FINGER_MOTION && f >= 0) {
+        float px = fingers[f].x, py = fingers[f].y;
         fingers[f].x = x, fingers[f].y = y;
-        if (fingers[f].ctl >= 200) {  // (editing) the control follows the finger, kept on the screen
+        if (fingers[f].ctl == C_RSTICK && drag_camera()) {  // (its travel: drag_frame turns it into the tilt)
+            drag_dx += x - px, drag_dy += y - py;
+            stick[1].kx = x, stick[1].ky = y;
+        } else if (fingers[f].ctl >= 200) {  // (editing) the control follows the finger, kept on the screen
             int k = fingers[f].ctl - 200;
             float nx = (x + fingers[f].dx) / disp_w, ny = (y + fingers[f].dy) / disp_h;
             edit_pos[k][0] = nx < 0.02f ? 0.02f : nx > 0.98f ? 0.98f : nx;
@@ -358,6 +398,9 @@ static void sheikah_eye(ImDrawList *dl, ImVec2 p, float r, ImU32 color) {
 extern "C" void touch_controls_draw(ImVec2 display, ImFont *font) {
     disp_w = display.x, disp_h = display.y;
     last_draw_ms = SDL_GetTicks();
+    pthread_mutex_lock(&t_lock);
+    drag_frame();
+    pthread_mutex_unlock(&t_lock);
     if (!touch_controls_visible()) return;
     load_touch_skin();
     ImDrawList *dl = ImGui::GetForegroundDrawList();
@@ -409,11 +452,14 @@ extern "C" void touch_controls_draw(ImVec2 display, ImFont *font) {
             dl->AddText(font, fs, ImVec2(c[i].x - ts.x / 2, c[i].y - ts.y / 2), tx, c[i].label);
         }
     }
-    // the sticks: where each started (or its resting place) and the knob
+    // the sticks: where each started (or its resting place) and the knob - none for the drag camera, and only while a
+    // finger holds them with "only while touched" (but always while editing the layout: they're dragged into place)
     float R = stick_radius();
     for (int s = 0; s < 2; s++) {
+        if (s == 1 && drag_camera()) continue;
         pthread_mutex_lock(&t_lock);
         bool on = stick[s].on;
+        if (g_settings.touch_sticks_hidden && !on && !editing) { pthread_mutex_unlock(&t_lock); continue; }
         float rx, ry;
         pos_of(s ? K_RSTICK : K_STICK, &rx, &ry);
         float cx = on ? stick[s].cx : rx, cy = on ? stick[s].cy : ry, kx = on ? stick[s].kx : cx, ky = on ? stick[s].ky : cy;

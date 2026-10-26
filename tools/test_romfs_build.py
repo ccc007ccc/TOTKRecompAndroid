@@ -35,6 +35,9 @@ for rel, size in files.items():
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_bytes(hashlib.sha256(rel.encode()).digest() * (size // 32 + 1))
     os.truncate(f, size)
+versioned = out / 'game_v' / 'System' / 'Version.txt'  # (romfs_check_dir: a romfs/ of another version)
+versioned.parent.mkdir(parents=True, exist_ok=True)
+versioned.write_bytes(b'1.6.0\n')
 entries = sorted(files)  # (the order the activity lists them in doesn't matter: shuffle it a little)
 entries = entries[1::2] + entries[::2]
 
@@ -71,6 +74,44 @@ static bool keep(const char *rel) {
     size_t n = strlen(rel);
     return (n > 5 && !strcmp(rel + n - 5, ".webm")) || !strcmp(rel, "region_common/ui/Game.arc");
 }
+// romfs_check_set / romfs_check_dir: the setup's check of a romfs/ against its exefs/'s version (n files: the key
+// files first, the rest filler; dropped: a key file left out)
+static const char *keys[] = {"Actor/ActorInfo.product.sbyml", "Pack/Bootup.pack", "Pack/TitleBG.pack", "System/Version.txt"};
+static int set_check(int version, int n, int dropped, const char *txt, int want, const char *want_why) {
+    const char **p = malloc(sizeof *p * (size_t)n);
+    int k = 0;
+    for (int i = 0; i < 4 && k < n; i++) if (i != dropped) p[k++] = keys[i];
+    while (k < n) p[k++] = "Model/filler.sbfres";
+    char why[256] = "";
+    int r = romfs_check_set(version, p, n, txt, why, sizeof why);
+    free(p);
+    if (r != want || (want_why && !strstr(why, want_why))) {
+        printf("check %d, %d files, \"%s\": %d (%s), wanted %d (%s)\n", version, n, txt, r, why, want, want_why ? want_why : "");
+        return 1;
+    }
+    return 0;
+}
+static int set_checks(const char *game) {
+    int bad = 0;
+    bad += set_check(182, 41056, -1, "1.8.2", ROMFS_SET_OK, NULL);
+    bad += set_check(182, 41056, -1, "1.0.0", ROMFS_SET_OTHER_VERSION, "Version.txt says 1.0.0, exefs/main is 1.8.2");
+    bad += set_check(100, 39678, -1, "\xEF\xBB\xBF 1.0.0\r\n", ROMFS_SET_OK, NULL);  // (a byte order mark, a line end)
+    bad += set_check(100, 39677, 0, "1.0.0", ROMFS_SET_MISSING, "39677 files, a whole 1.0.0 has 39678: 1 missing, among them Actor/ActorInfo.product.sbyml");
+    bad += set_check(100, 43573, -1, "1.0.0", ROMFS_SET_OK, NULL);  // (more files: mods)
+    bad += set_check(160, 41051, 3, "", ROMFS_SET_MISSING, "among them System/Version.txt");  // (no Version.txt)
+    bad += set_check(0, 5, -1, "1.2.3", ROMFS_SET_OK, NULL);  // (a version without counts)
+    char why[256] = "", dir[1024];
+    if (romfs_check_dir(100, game, why, sizeof why) != ROMFS_SET_MISSING || !strstr(why, "romfs/ has 9 files")) {
+        printf("check_dir: %s\n", why);  // (the image's files: hidden ones left out)
+        bad++;
+    }
+    snprintf(dir, sizeof dir, "%s_v", game);
+    if (romfs_check_dir(182, dir, why, sizeof why) != ROMFS_SET_OTHER_VERSION || !strstr(why, "says 1.6.0")) {
+        printf("check_dir version: %s\n", why);
+        bad++;
+    }
+    return bad;
+}
 int main(int argc, char **argv) {
     base = argv[1];
     char why[256] = "";
@@ -90,7 +131,7 @@ int main(int argc, char **argv) {
     if (romfs_build_entries(e, n, open_fd, e, shortp, argv[5], keep, NULL, why, sizeof why)) { printf("short file accepted\n"); return 1; }
     e[0].size -= 2;  // and longer than listed
     if (romfs_build_entries(e, n, open_fd, e, shortp, argv[5], keep, NULL, why, sizeof why)) { printf("long file accepted\n"); return 1; }
-    return 0;
+    return set_checks(argv[1]) ? 1 : 0;
 }
 '''
 (out / 'harness.c').write_text('#include <stdlib.h>\n' + harness)
@@ -115,4 +156,5 @@ assert (keep_dir / 'region_common/movie/title.webm').read_bytes() == (game / 're
 # (the flaky build's: the short and long ones stop at a.bin, before it)
 assert (keep_dir / 'region_common/ui/Game.arc').read_bytes() == (game / 'region_common/ui/Game.arc').read_bytes()
 print('6 romfs image checks passed: folder build unchanged, entry list identical, a failed read tried again, short and '
-      'long files rejected, loose copies as picked')
+      'long files rejected, loose copies as picked; 9 setup checks: other version, missing files, more files, Version.txt '
+      'trimmed, a folder on disk')

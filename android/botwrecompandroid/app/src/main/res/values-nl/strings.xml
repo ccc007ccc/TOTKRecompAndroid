@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="shortcut_watch_map">Kaart op het horloge</string>
+    <string name="shortcut_watch_map_long">De minikaart op het horloge instellen</string>
+    <string name="shortcut_system_driver">Driver van het systeem</string>
+    <string name="shortcut_system_driver_long">Starten met de driver van het systeem</string>
+    <string name="shortcut_pick_driver">Driver kiezen</string>
+    <string name="shortcut_pick_driver_long">Een Vulkan-driver kiezen (.zip)</string>
+    <string name="driver_not_a_package">Geen driverpakket (.zip of .so): de driver is niet gewijzigd.</string>
+    <string name="driver_error_title">Fout in de grafische driver</string>
+    <string name="driver_install">Een driver installeren</string>
+    <string name="driver_system">Driver van het systeem gebruiken</string>
+    <string name="driver_close">Sluiten</string>
+    <string name="driver_error_intro">De grafische driver kon het spel niet uitvoeren. Een Turnip-driver voor je GPU (.zip) lost het meestal op: tik op Een driver installeren.\n\nDetails:</string>
+</resources>

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="shortcut_watch_map">Mapa en el reloj</string>
+    <string name="shortcut_watch_map_long">Configurar el minimapa del reloj</string>
+    <string name="shortcut_system_driver">Driver del sistema</string>
+    <string name="shortcut_system_driver_long">Abrir con el driver del sistema</string>
+    <string name="shortcut_pick_driver">Elegir driver</string>
+    <string name="shortcut_pick_driver_long">Elegir un driver Vulkan (.zip)</string>
+    <string name="driver_not_a_package">No es un paquete de driver (.zip o .so): el driver no cambió.</string>
+    <string name="driver_error_title">Error del driver gráfico</string>
+    <string name="driver_install">Instalar un driver</string>
+    <string name="driver_system">Usar el driver del sistema</string>
+    <string name="driver_close">Cerrar</string>
+    <string name="driver_error_intro">El driver gráfico no pudo ejecutar el juego. Un driver Turnip para tu GPU (.zip) suele solucionarlo: toca Instalar un driver.\n\nDetalles:</string>
+</resources>

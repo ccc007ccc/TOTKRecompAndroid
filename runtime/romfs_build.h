@@ -33,6 +33,15 @@ bool romfs_image_ok(const char *path, char *why, size_t why_size);
 // Bytes of file data under dir (the image is about this plus its tables).
 uint64_t romfs_dir_bytes(const char *dir);
 
+// Whether a romfs/ goes with the game code beside it (version: exefs/main's, 100 / 160 / 182), from its files'
+// relative paths and the first bytes of its System/Version.txt ("" without one): ROMFS_SET_OK; ROMFS_SET_OTHER_VERSION
+// - Version.txt names another version; ROMFS_SET_MISSING - fewer files than that version's whole romfs. More files
+// pass (mods). why: what was found, for the setup's failure line.
+enum { ROMFS_SET_OK, ROMFS_SET_OTHER_VERSION, ROMFS_SET_MISSING };
+int romfs_check_set(int version, const char *const *paths, int n, const char *version_txt, char *why, size_t why_size);
+// The same for a folder on disk (its files as the image takes them: hidden ones left out)
+int romfs_check_dir(int version, const char *dir, char *why, size_t why_size);
+
 // Copies the folder tree src to dst (hard links where the file system allows: no second copy of 6 GB). progress as
 // above. false = failed.
 bool romfs_copy_tree(const char *src, const char *dst, void (*progress)(uint64_t done, uint64_t total));

@@ -1185,7 +1185,11 @@ static void audout_close(Service *s) {
     LOG("[audout] closed\n");
 }
 
-RT_ON_RESET(audio_reset) {
+// Stops and frees every renderer / audio out of this boot. runtime/main.c teardown calls it before the renderer's
+// reset: their threads read the voices' samples from guest memory, which on Adreno 8xx is GPU memory that reset frees
+// (vulkan/exec.c vk_exec_reset) - Quit > Return to start crashed in adpcm_next (POCO F7 Ultra, 2026-10-25). The reset
+// hook below finds nothing left then.
+void audio_stop(void) {
     int n = 0;
     for (int i = 0; i < 8; i++) {
         Renderer *r = g_rens[i];
@@ -1202,8 +1206,9 @@ RT_ON_RESET(audio_reset) {
         }
         if (g_outs[i]) { audout_free(g_outs[i]); g_outs[i] = NULL; n++; }
     }
-    LOG("[audio] reboot: %d outputs closed\n", n);
+    if (n) LOG("[audio] reboot: %d outputs closed\n", n);
 }
+RT_ON_RESET(audio_reset) { audio_stop(); }
 
 // Buffers are copied into an SDL stream and released once the stream has drained below its target, so the
 // stream plays the role of the hardware queue. Without a device, buffers are released in real time.

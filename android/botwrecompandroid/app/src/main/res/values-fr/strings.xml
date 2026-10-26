@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="shortcut_watch_map">Carte sur la montre</string>
+    <string name="shortcut_watch_map_long">Configurer la mini-carte de la montre</string>
+    <string name="shortcut_system_driver">Pilote du système</string>
+    <string name="shortcut_system_driver_long">Démarrer avec le pilote du système</string>
+    <string name="shortcut_pick_driver">Choisir un pilote</string>
+    <string name="shortcut_pick_driver_long">Choisir un pilote Vulkan (.zip)</string>
+    <string name="driver_not_a_package">Ce n\'est pas un paquet de pilote (.zip ou .so) : le pilote n\'a pas changé.</string>
+    <string name="driver_error_title">Erreur du pilote graphique</string>
+    <string name="driver_install">Installer un pilote</string>
+    <string name="driver_system">Utiliser le pilote du système</string>
+    <string name="driver_close">Fermer</string>
+    <string name="driver_error_intro">Le pilote graphique n\'a pas pu lancer le jeu. Un pilote Turnip pour votre GPU (.zip) règle souvent le problème : touchez Installer un pilote.\n\nDétails :</string>
+</resources>

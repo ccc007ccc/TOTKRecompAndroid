@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="shortcut_watch_map">Karte auf der Uhr</string>
+    <string name="shortcut_watch_map_long">Minikarte der Uhr einrichten</string>
+    <string name="shortcut_system_driver">Treiber des Systems</string>
+    <string name="shortcut_system_driver_long">Mit dem Treiber des Systems starten</string>
+    <string name="shortcut_pick_driver">Treiber wählen</string>
+    <string name="shortcut_pick_driver_long">Einen Vulkan-Treiber wählen (.zip)</string>
+    <string name="driver_not_a_package">Kein Treiberpaket (.zip oder .so): Der Treiber wurde nicht geändert.</string>
+    <string name="driver_error_title">Fehler im Grafiktreiber</string>
+    <string name="driver_install">Treiber installieren</string>
+    <string name="driver_system">Treiber des Systems verwenden</string>
+    <string name="driver_close">Schließen</string>
+    <string name="driver_error_intro">Der Grafiktreiber konnte das Spiel nicht ausführen. Ein Turnip-Treiber für deine GPU (.zip) löst das meist: Tippe auf Treiber installieren.\n\nDetails:</string>
+</resources>

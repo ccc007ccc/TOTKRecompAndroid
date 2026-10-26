@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="shortcut_watch_map">時計のマップ</string>
+    <string name="shortcut_watch_map_long">時計のミニマップを設定</string>
+    <string name="shortcut_system_driver">システムのドライバー</string>
+    <string name="shortcut_system_driver_long">システムのドライバーで起動</string>
+    <string name="shortcut_pick_driver">ドライバーを選ぶ</string>
+    <string name="shortcut_pick_driver_long">Vulkan ドライバー (.zip) を選ぶ</string>
+    <string name="driver_not_a_package">ドライバーのパッケージ (.zip または .so) ではありません: ドライバーは変更されていません。</string>
+    <string name="driver_error_title">グラフィックドライバーのエラー</string>
+    <string name="driver_install">ドライバーをインストール</string>
+    <string name="driver_system">システムのドライバーを使う</string>
+    <string name="driver_close">閉じる</string>
+    <string name="driver_error_intro">グラフィックドライバーでゲームを実行できませんでした。GPU 用の Turnip ドライバー (.zip) でたいてい解決します:「ドライバーをインストール」をタップしてください。\n\n詳細:</string>
+</resources>

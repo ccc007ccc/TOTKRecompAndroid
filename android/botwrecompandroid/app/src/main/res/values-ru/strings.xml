@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="shortcut_watch_map">Карта на часах</string>
+    <string name="shortcut_watch_map_long">Настроить мини-карту на часах</string>
+    <string name="shortcut_system_driver">Системный драйвер</string>
+    <string name="shortcut_system_driver_long">Запустить с системным драйвером</string>
+    <string name="shortcut_pick_driver">Выбрать драйвер</string>
+    <string name="shortcut_pick_driver_long">Выбрать драйвер Vulkan (.zip)</string>
+    <string name="driver_not_a_package">Это не пакет драйвера (.zip или .so): драйвер не изменён.</string>
+    <string name="driver_error_title">Ошибка графического драйвера</string>
+    <string name="driver_install">Установить драйвер</string>
+    <string name="driver_system">Использовать системный драйвер</string>
+    <string name="driver_close">Закрыть</string>
+    <string name="driver_error_intro">Графический драйвер не смог запустить игру. Обычно помогает драйвер Turnip для вашего GPU (.zip): нажмите «Установить драйвер».\n\nПодробности:</string>
+</resources>

@@ -186,6 +186,8 @@ bool plat_reserve_guest(uint64_t lo, uint64_t hi) {
         }
         g_guest_lo = base;
         fprintf(stderr, "[android] guest window %#llx-%#llx\n", (unsigned long long)base, (unsigned long long)(base + hi - lo));
+        const char *last = getenv("LARECOMP_LAST_EXIT");  // (the activity: ApplicationExitInfo)
+        if (last && *last) fprintf(stderr, "[android] the last run ended: %s\n", last);
         return true;
     }
     void *p = mmap((void *)(uintptr_t)lo, hi - lo, PROT_READ | PROT_WRITE,

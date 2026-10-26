@@ -679,6 +679,26 @@ static Service *open_host_fs(const char *sub) {
             LOG("[fs] save %s started as a copy of %s\n", fs->root, from);
         }
     }
+    {   // LARECOMP_SAVE_REPLACE=<save folder>: this save becomes a copy of that one's, the one it was kept beside it as
+        // <save>.before-replace[-n] (a test save made the player's own: adb can't write the app's folders on Android)
+        // (once a run: the game opens its save again and again)
+        static bool replaced;
+        const char *from_dir = getenv("LARECOMP_SAVE_REPLACE");
+        char from[1200], keep[1300];
+        struct stat sb;
+        snprintf(from, sizeof from, "%s/%s", from_dir ? from_dir : "", sub);
+        if (from_dir && *from_dir && !replaced && !stat(from, &sb) && S_ISDIR(sb.st_mode)) {
+            replaced = true;
+            snprintf(keep, sizeof keep, "%s.before-replace", fs->root);
+            for (int n = 2; !stat(keep, &sb) && n < 100; n++) snprintf(keep, sizeof keep, "%s.before-replace-%d", fs->root, n);
+            if (stat(fs->root, &sb) || !rename(fs->root, keep)) {
+                copy_tree(from, fs->root);
+                LOG("[fs] save %s replaced by a copy of %s (the one before: %s)\n", fs->root, from, keep);
+            } else {
+                LOG("[fs] save %s not replaced: can't move it aside (errno %d)\n", fs->root, errno);
+            }
+        }
+    }
     char cmd[1200];
     snprintf(cmd, sizeof cmd, "%s", fs->root);
     for (char *q = cmd + 1; *q; q++)

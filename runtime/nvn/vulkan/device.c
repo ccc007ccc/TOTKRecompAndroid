@@ -1285,8 +1285,9 @@ void backend_present(NvnTexture *t) {
         extern void widescreen_set_factor(float f);
         extern bool widescreen_allowed(void);
         // render scale + placement in the window: runtime/nvn/output_scale.c (Video tab "Internal resolution");
-        // no GPU timer here (-1): dynamic resolution goes by the frame time
+        // Dynamic goes by the frame time and, on Android, the GPU's busy time per frame (exec.c; elsewhere -1)
         OutScale os;
+        extern double vk_frame_gpu_ms(void);
         extern void widescreen_set_shape(float f);  // (the window's: the game's cameras widen from the start)
         widescreen_set_shape((float)((dw / dh) / (16.0 / 9.0)));
         {
@@ -1295,7 +1296,7 @@ void backend_present(NvnTexture *t) {
                 LOG("[widescreen] frame %llu: window %.0f x %.0f\n", (unsigned long long)total_frames, dw, dh);
             last_dw = dw, last_dh = dh;
         }
-        output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, -1, &os);
+        output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, vk_frame_gpu_ms(), &os);
 #ifdef __ANDROID__
         static int matrix_trace = -1;
         static uint64_t matrix_last;

@@ -74,6 +74,7 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
     private static native void nativeImportDone(int result);
     private static native void nativeImportDetail(String what);  // (a failure's cause, shown under it)
     private native String nativeBuildRomfs(String[] paths, long[] sizes);
+    private static native boolean nativeCheckRomfs(int version, String[] paths, String versionTxt);
     private static native void nativeDriverPicked(String name);
     private static native void nativeModImportDone(String message);
     private static native void nativeLogFolderPicked(String name);
@@ -97,6 +98,7 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
             copyIfChanged(new File(games, "totkgame.so"), new File(res, "totkgame.so"));
             copyIfChanged(new File(games, "totkgame.so.id"), new File(res, "totkgame.so.id"));
             setenv("LARECOMP_NATIVE_LIB_DIR", getApplicationInfo().nativeLibraryDir);
+            setenv("LARECOMP_LAST_EXIT", lastExit());
             File gen = new File(getFilesDir(), "gen");
             unpackGen(gen);
             setenv("LARECOMP_GEN_DIR", gen.getAbsolutePath());
@@ -600,6 +602,13 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
             romfsFiles.clear();
             romfsPaths.clear();
             listFiles(tree, romfs, "");
+            int vt = romfsPaths.indexOf("System/Version.txt");  // (its version against the exefs/'s, and its file count)
+            if (!nativeCheckRomfs(version, romfsPaths.toArray(new String[0]), vt >= 0 ? readText(tree, romfsFiles.get(vt)) : "")) {
+                romfsFiles.clear();
+                romfsPaths.clear();
+                nativeImportDone(6);
+                return;
+            }
             long romfsBytes = 0;
             for (Doc d : romfsFiles) romfsBytes = Math.addExact(romfsBytes, d.size);
             String name = DocumentsContract.getTreeDocumentId(tree);
@@ -741,6 +750,27 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
             copy(in, dst);
         }
         Log.i(TAG, "copied " + src + " -> " + dst);
+    }
+
+    // How the previous run ended (ApplicationExitInfo), for the log: a setup that vanished with nothing in the log was
+    // the system closing the app - for memory or something else (issue #18). "" when unknown.
+    private static final String[] EXIT_REASONS = {"unknown", "exit self", "signaled", "low memory", "crash", "native crash",
+            "not responding", "initialization failure", "permission change", "excessive resource usage", "user requested",
+            "user stopped", "dependency died", "other", "freezer", "package state change", "package updated"};
+
+    private String lastExit() {
+        try {
+            android.app.ActivityManager am = (android.app.ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+            List<android.app.ApplicationExitInfo> l = am.getHistoricalProcessExitReasons(getPackageName(), 0, 1);
+            if (l.isEmpty()) return "";
+            android.app.ApplicationExitInfo e = l.get(0);
+            int r = e.getReason();
+            return String.format(java.util.Locale.ROOT, "%s (reason %d, status %d) at %tF %<tT, pss %d MB, rss %d MB: %s",
+                    r >= 0 && r < EXIT_REASONS.length ? EXIT_REASONS[r] : "?", r, e.getStatus(), e.getTimestamp(),
+                    e.getPss() / 1024, e.getRss() / 1024, e.getDescription());
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     private static void setenv(String name, String value) throws ErrnoException {
