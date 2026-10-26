@@ -22,7 +22,7 @@ static shaderc_shader_kind kind_of(int stage) {
 // GLSL compile (the driver's pipeline cache only covers the step after this one).
 #ifndef __ANDROID__  // (Android: shader_cache.h vk_shader_source_hash, which also keys LARECOMP_VK_OPT)
 static uint64_t src_hash(const char *src, int stage) {
-    uint64_t h = (0xcbf29ce484222325ull ^ (uint64_t)stage) + 3;  // + version of the post-processing (no_contraction)
+    uint64_t h = (0xcbf29ce484222325ull ^ (uint64_t)stage) + 4;  // + version of the post-processing (no_contraction)
     for (const char *p = src; *p; p++) { h ^= (uint8_t)*p; h *= 0x100000001B3ull; }
     return h;
 }
@@ -61,10 +61,21 @@ static void cache_store(uint64_t h, const uint32_t *spv, size_t nwords) {
     if (!ok || rename(tmp, path) != 0) remove(tmp);  // (another thread may have stored it first)
 }
 
-// Vertex shaders: every float add/sub/mul/div/fma gets NoContraction, so no compiler fuses or splits them. Depth
-// pre-pass and colour pass are different shaders computing the same position, and the colour pass tests EQUAL:
-// any difference in fusing leaves holes (foliage flickered black). GLSL's `precise gl_Position` only covers what
-// glslang traces back from the position, which the translated register code defeats.
+// Position and explicit fragment depth must use the same arithmetic. TOTK also encodes material classes in depth:
+// a fragment shader writes the class, then a lighting vertex shader computes it again for an EQUAL test. Allowing
+// contraction only in the fragment stage changes water's D16 class from 39192 to 39193 on Adreno, rejecting its
+// entire lighting pass. GLSL's precise qualifier cannot trace through the translated integer register/bitcast code.
+static bool writes_fragment_depth(const uint32_t *spv, size_t nwords) {
+    // OpExecutionMode DepthReplacing: inspect the compiled entry point, not source text or a game shader address.
+    for (size_t i = 5; i < nwords;) {
+        uint32_t wc = spv[i] >> 16, op = spv[i] & 0xFFFF;
+        if (!wc || wc > nwords - i) return false;
+        if (op == 16 && wc >= 3 && spv[i + 2] == 12) return true;
+        i += wc;
+    }
+    return false;
+}
+
 static bool float_arith(const uint32_t *w, uint32_t wc, uint32_t op) {
     switch (op) {
     case 127: case 129: case 131: case 133: case 136:  // FNegate FAdd FSub FMul FDiv
@@ -155,7 +166,8 @@ uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t 
         out = malloc(n);
         memcpy(out, shaderc_result_get_bytes(r), n);
         *nwords = n / 4;
-        if (stage == STAGE_VERTEX) out = no_contraction(out, nwords);
+        if (stage == STAGE_VERTEX || (stage == STAGE_FRAGMENT && writes_fragment_depth(out, *nwords)))
+            out = no_contraction(out, nwords);
         if (!nocache) cache_store(h, out, *nwords);
     }
     shaderc_result_release(r);

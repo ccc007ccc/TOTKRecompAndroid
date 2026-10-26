@@ -42,7 +42,7 @@ int check(void) {
     spv[5] = 0x00020011;
     if (vk_shader_cache_framed(spv, 9)) return 12;
     if (vk_shader_cache_framed(spv, 16u*1024*1024/4+1)) return 13;
-    if (vk_shader_source_hash("",0,false) != 0xcff29ce484222325ull) return 14;
+    if (vk_shader_source_hash("",0,false) != 0xcef29ce484222325ull) return 14;
     uint64_t normal = vk_shader_source_hash("void main(){}",0,false);
     if (normal == vk_shader_source_hash("void main(){}",0,true)) return 15;
     if (normal == vk_shader_source_hash("void main(){}",1,false)) return 16;

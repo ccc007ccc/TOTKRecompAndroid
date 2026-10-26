@@ -55,6 +55,21 @@ Android 可通过 `adb -s "$ANDROID_SERIAL" shell input keyevent KEYCODE_F9` 发
 插入着色器诊断也可能改变驱动优化。独立回放通过只证明相同输入下的结果，不能证明游戏中的绑定与同步均正确。
 私有 GPU 数据、生成着色器和回放文件不要提交 Git。
 
+深度精度回归通过正式 shaderc 编译路径检查顶点和显式片元深度、普通颜色片元、缓存及重复处理：
+
+```bash
+mkdir -p .work/totk-port/shader-depth-tests
+clang -O1 -g -fsanitize=address,undefined -ffunction-sections -fdata-sections \
+  -Iandroid/deps/out/include tools/test_shader_depth_precision.c -Wl,--gc-sections \
+  -lshaderc_shared -lpthread -lvulkan -o .work/totk-port/shader-depth-tests/test-depth
+.work/totk-port/shader-depth-tests/test-depth "$PWD/.work/totk-port/shader-depth-tests"
+for s in .work/totk-port/shader-depth-tests/*.spv; do spirv-val --target-env vulkan1.3 "$s"; done
+```
+
+还需在目标 GPU 验证片元写深度、顶点重算深度的 EQUAL 绘制。run46 在同一版 Banner Turnip 上
+测试全部 256 个编码值；修复前 D16 有 12 个不匹配（包含水面），正式修复生成的模块全部通过。
+这些是合成编码值数量，不是游戏中缺失材质或效果的数量。
+
 
 条件清除协议使用真实命令记录器，验证记录后更新计数值、仅清除一次、忽略时间戳与 64 位比较。使用 Clang 编译：
 

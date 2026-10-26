@@ -60,6 +60,23 @@ Readback changes timing. Deferred capture reduces per-pass CPU waits but is not 
 Shader instrumentation can also alter driver optimization. A successful independent replay verifies those inputs, not every live binding or synchronization dependency.
 Keep private GPU inputs, generated shader sources and replay data out of Git.
 
+The depth-precision regression uses the production shaderc path to check vertex and explicit fragment depth,
+ordinary color fragments, caching and repeated processing:
+
+```bash
+mkdir -p .work/totk-port/shader-depth-tests
+clang -O1 -g -fsanitize=address,undefined -ffunction-sections -fdata-sections \
+  -Iandroid/deps/out/include tools/test_shader_depth_precision.c -Wl,--gc-sections \
+  -lshaderc_shared -lpthread -lvulkan -o .work/totk-port/shader-depth-tests/test-depth
+.work/totk-port/shader-depth-tests/test-depth "$PWD/.work/totk-port/shader-depth-tests"
+for s in .work/totk-port/shader-depth-tests/*.spv; do spirv-val --target-env vulkan1.3 "$s"; done
+```
+
+Also verify depth-EQUAL draws on the target GPU, with a fragment shader writing depth and a vertex shader recomputing it.
+Run46 tested all 256 encoded values using the same Banner Turnip build. Before the fix, 12 D16 values failed,
+including water; modules produced by the fixed compiler passed every value. These are synthetic encoded values,
+not a count of missing game materials or effects.
+
 
 The conditional-clear regression uses the real command recorder and checks execution-time values, one-time clearing, ignored timestamps and 64-bit comparisons. Build it with Clang:
 
