@@ -1,6 +1,6 @@
 // The menu's Mods page (Android; LASRecompAndroid's): the game mods in mods/ (runtime/mods.c), each on or off, its own
 // note (its .txt: the authors, the credits) as the description, and Import a mod folder
-// (BOTWRecompAndroidActivity.importMod: the Android folder picker; the folder is copied into this game version's
+// (TOTKRecompAndroidActivity.importMod: the Android folder picker; the folder is copied into this game version's
 // mods/). On or off applies when the game starts again.
 #ifdef __ANDROID__
 #include <SDL3/SDL.h>

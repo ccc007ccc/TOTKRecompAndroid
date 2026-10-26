@@ -1,92 +1,66 @@
-# BOTWRecompAndroid
+# TOTKRecompAndroid
 
-**English** | [Português](README.pt-BR.md)
+面向 Android ARM64 的《塞尔达传说：王国之泪》静态重编译适配，基于本仓库原有的 BOTWRecompAndroid 运行时。当前固定输入为 **Switch 本体 + 1.4.3 更新**（程序 ID `0100F2C0115B6000`）。
 
-A static recompilation of *The Legend of Zelda: Breath of the Wild* (Nintendo Switch, versions **1.0.0, 1.6.0 and
-1.8.2**) for Android. This is **not emulation**: the game's ARM64 code becomes C compiled for your phone, and its
-graphics (NVN) are translated to Vulkan.
+适配仍处于启动验证阶段，不能把生成代码或 APK 构建成功理解为已经可玩。实机结果与剩余问题记录在 [移植记录](docs/TOTK-PORT.md)。
 
-It is built on the engine of **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by peiikai (a recompilation of
-*Link's Awakening*) and its Android port, **[LASRecompAndroid](https://github.com/mamcjr/LASRecompAndroid)**.
+程序、资源、密钥和生成代码均不随仓库分发。`tools/totk.py` 核对四个模块的完整 Build ID 和 NPDM 标题；运行时还会核对 ExeFS 与 `totkgame.so` 的模块身份。其他游戏或混用更新版本会被拒绝。
 
-> [!WARNING]
-> **Beta.** Tested on one phone only (POCO F7 Ultra, Adreno 830, Mesa Turnip driver). Expect bugs. The plan and the
-> state of each phase are in [docs/BOTW-PORT.md](docs/BOTW-PORT.md) (in Portuguese).
+## 构建
 
-## Supported platform
-
-Android is the only application target. Desktop ports and packaging were discontinued on 2026-10-22.
-Windows, Linux or macOS may still be used as development hosts with the Android SDK/NDK.
-
-## Status
-
-- **Playable** from the title screen into the world, with saves, on the POCO F7 Ultra: 1.0.0 and 1.6.0 at 30 fps,
-  1.8.2 at 30 or up to 60 (about 40-47 fps in the open world with a Turnip driver).
-- **1.8.2** has Brazilian Portuguese, widescreen (Video > Aspect ratio "Unlocked": the view widens, the HUD goes to
-  the screen's edges) and SavageWindRecomp's frame pacing.
-- **Video:** internal resolution, AMD FSR 1 / Snapdragon GSR 1 upscaling, output resolution, SMAA.
-- **App:** game files set up from the phone (each version in its own folder, switched on the Game Files page), touch
-  controls, controllers, mods, menus in English and Portuguese, Vulkan driver choice (Turnip via adrenotools) and
-  driver compatibility options.
-- **Known gaps:** setting the game up on the phone compiles the game code there, and that has not been timed or
-  tested with BOTW yet (expect a long wait and a hot phone); GPUs other than Adreno 8xx take slower, safer paths;
-  thumbnails of saves made in the app are black; the audio still uses a simplified mixer.
-
-> [!IMPORTANT]
-> Like LAS Recomp, this project is made almost entirely with AI (Claude, by Anthropic, through Claude Code), directed,
-> tested and reviewed by a human.
-
-> [!NOTE]
-> **No game files are included.** You need your own legally obtained dump of *Breath of the Wild* 1.0.0, 1.6.0 or
-> 1.8.2 (`exefs` and `romfs`, extracted). Instructions on how to obtain it will not be provided.
-
-## Installing (beta)
-
-1. Download the APK from [Releases](https://github.com/mamcjr/BOTWRecompAndroid/releases) and install it (Android 11+,
-   arm64, Vulkan; about 30 GB free per game version).
-2. Open it, go to **Set up game files** and choose the folder with your `exefs` and `romfs`. The version is told from
-   the files. The app copies what it needs and builds the game code on the phone.
-3. On Adreno phones, a Mesa Turnip driver (Settings > Files > Vulkan driver) runs the game much faster than the
-   system driver. If the app stops at start with "Vulkan driver is too old", long-press the app icon and choose
-   **Choose driver** to pick one before the game starts.
-
-## Testing on Android (developers)
-
-With the Android SDK / NDK, a phone on adb and your dump in `Dump/`:
+SteamOS 宿主只作文件管理，构建在 Distrobox **dev** 内完成。默认 SDK/NDK 位于 `/home/deck/Code/Toolchains/`；可以用 `ANDROID_HOME`、`ANDROID_NDK` 覆盖。工作目录是项目内的 `.work/totk-port/`，编译器、Python 和 Java 的临时目录也指向这里。
 
 ```bash
-cd android/botwrecompandroid && ./gradlew assembleDebug    # the app
-android/build_gamelib.sh Dump/01007EF00011E000/exefs  # the game code (about an hour)
-android/push_game.sh Dump/01007EF00011E000           # game files and game code onto the phone
-android/run_boot.sh 120                               # start the game, log to android/out/boot.log
+bash android/build_totk.sh
 ```
 
-## Credits
+APK 输出在 `android/botwrecompandroid/app/build/outputs/apk/debug/app-debug.apk`。安装包名为 `com.totkrecomp.android`；Java/JNI 源目录名称保留以减少迁移改动。需要网络下载固定版本的开源构建依赖。APK 不包含游戏代码。
 
-- [peiikai](https://github.com/peiikai) for [LAS Recomp](https://github.com/peiikai/LASRecomp), the recompiler and
-  runtime this project starts from (MIT, see [LICENSE](LICENSE)). The original README is kept in [docs/las/](docs/las/).
-- [LASRecompAndroid](https://github.com/mamcjr/LASRecompAndroid), its Android port: the app, the phone-side game code
-  build, touch controls, mods, driver compatibility and the Portuguese menus.
-- [Revivedx](https://github.com/Revivedx) for [SavageWindRecomp](https://github.com/Revivedx/SavageWindRecomp) (MIT),
-  the reference for 1.8.2: frame pacing, internal resolution, the SDK 20 kernel fixes, setjmp.
-- [Nycolazs](https://github.com/Nycolazs) for LASRecomp-Android-Plus (MIT): Vulkan driver compatibility.
-- The [zeldaret/botw](https://github.com/zeldaret/botw) decompilation and [open-ead/sead](https://github.com/open-ead/sead),
-  for what is known about the game's code.
-- Dusklight's launcher, the start screen's style.
-- Upscaling and anti-aliasing: [AMD FidelityFX FSR 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR) (MIT),
-  [Qualcomm Snapdragon GSR](https://github.com/SnapdragonStudios/snapdragon-gsr) (BSD-3-Clause),
-  [SMAA](https://github.com/iryoku/smaa) (MIT).
-- Libraries: [SDL](https://libsdl.org) (zlib), [Dear ImGui](https://github.com/ocornut/imgui) (MIT),
-  [libadrenotools](https://github.com/bylaws/libadrenotools) (BSD-2-Clause), [volk](https://github.com/zeux/volk) (MIT),
-  [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) (MIT),
-  [shaderc](https://github.com/google/shaderc) (Apache 2.0), [FFmpeg](https://ffmpeg.org) (LGPL),
-  [LZ4](https://github.com/lz4/lz4) (BSD-2-Clause), [Capstone](https://www.capstone-engine.org) (BSD-3-Clause),
-  [Unicorn](https://www.unicorn-engine.org) (GPLv2, built from its source by `android/deps/build_unicorn.sh`),
-  [Python](https://www.python.org) (PSF) and [Zig](https://ziglang.org) (MIT) for the phone-side build.
-- [Mesa](https://www.mesa3d.org)'s Turnip driver (MIT), which players load themselves.
-- Fonts: [Baloo 2](https://github.com/EkType/Baloo2) (OFL), DejaVu Sans (Bitstream Vera license). The Android robot
-  is reproduced or modified from work created and shared by Google (CC BY 3.0).
-- Made with [Claude Code](https://claude.com/claude-code) (Anthropic).
+## 准备自己的游戏
 
-*The Legend of Zelda* and *Breath of the Wild* are trademarks of Nintendo. This project is not affiliated with or
-endorsed by Nintendo.
+以下命令在 `distrobox enter dev` 后、项目根目录执行。`android/dev_env.sh` 设置工具链、Python 和项目内临时目录。NSP 提取使用本机 hactool 1.5.4；通过 `--hactool` 指定路径。
+
+```bash
+source android/dev_env.sh
+export ANDROID_SERIAL=3be2985e
+"$PYTHON" tools/pull_totk.py \
+  '/storage/emulated/0/Games/TotK/[APP][0100F2C0115B6000][1.0.0][US][16.0.0].nsp' \
+  .work/totk-port/base --serial "$ANDROID_SERIAL"
+"$PYTHON" tools/pull_totk.py \
+  '/storage/emulated/0/Games/TotK/[UPD][0100F2C0115B6800][1.4.3][US][21.2.0].nsp' \
+  .work/totk-port/update --serial "$ANDROID_SERIAL"
+"$PYTHON" tools/prepare_totk.py \
+  --base .work/totk-port/base --update .work/totk-port/update \
+  --keys .work/private/prod.keys --hactool .work/hactool/hactool \
+  --output .work/totk-port/game
+```
+
+设备序列号用 `adb devices -l` 确认。`prod.keys` 使用自己设备上的文件；准备工具从自己的 NSP ticket 读取标题密钥，兼容副本在结束时清理，不改动原密钥。手机 `Games/TotK/` 的原始文件只读。
+
+提取结果为 `game/exefs/`、合并后的 `game/romfs.bin`、独立视频 `game/romfs/` 和输入清单。流式读取 NSP 避免在电脑额外保存一份本体 NSP，但仍需要容纳约 16 GiB NCA、约 16 GiB RomFS 和构建产物的空间。
+
+```bash
+GAMELIB_GEN="$PWD/.work/totk-port/generated" \
+GAMELIB_OUT="$PWD/.work/totk-port/out" \
+bash android/build_gamelib.sh .work/totk-port/game/exefs
+
+"$PYTHON" tools/deploy_totk.py .work/totk-port/game \
+  --library .work/totk-port/out --serial "$ANDROID_SERIAL" \
+  --apk android/botwrecompandroid/app/build/outputs/apk/debug/app-debug.apk --launch
+```
+
+部署通过正常 APK / Activity / JNI 启动，不在手机 `/data/local/tmp` 放辅助程序。运行数据位于 `Android/data/com.totkrecomp.android/files/`，与其他应用的存档分开。尚未打包端侧编译器；本流程在电脑生成游戏库。
+
+## 验证与清理
+
+```bash
+source android/dev_env.sh
+"$PYTHON" tools/test_totk.py
+"$PYTHON" tools/test_exclusive_pair.py
+"$PYTHON" tools/test_local_branches.py
+"$PYTHON" tools/totk.py .work/totk-port/game/exefs
+```
+
+`.work/` 全部被 Git 忽略，包含本机私有输入和日志。完成部署后可删除 `.work/totk-port/base/`、`update/`、`generated/` 与 `out/gamelib-build/` 释放空间；保留 `game/`、`out/totkgame.so*` 与日志便于后续复现。不要把密钥、游戏数据或派生代码加入 Git。
+
+历史 BOTW 文档和尚未适配的实验工具保留在 `docs/`、`tools/` 中；它们的旧版本号、地址和性能结论不适用于 TotK。

@@ -75,7 +75,7 @@ def hx(v):
 # Android (gen.py --dyn-base): the guest window starts wherever the process has room (android/common/guest_window.h)
 # instead of at CANON. Addresses the code derives from its own pc (ADR / ADRP, literal loads, return addresses, branch
 # and dispatch targets) are then emitted as GB + offset, GB being the window's actual start (a local of every function
-# that uses it, from botwgame_gb). Off, the output is exactly what it was.
+# that uses it, from totkgame_gb). Off, the output is exactly what it was.
 CANON = 0x7000000000    # GUEST_LO (runtime/rt.h)
 WINDOW = 0x320000000    # GUEST_HI - GUEST_LO
 DYN_BASE = False
@@ -405,7 +405,17 @@ class Lifter:
         nbits = 8 << size
         addr = XS(rn)
         if o1:
-            raise Unsupported('exclusive pair / CAS')
+            if o2 or size < 2:
+                raise Unsupported('CAS / CASP')
+            rt2 = bits(w, 10, 5)
+            width = 32 if size == 2 else 64
+            if L:
+                typ = 'uint64_t' if width == 32 else '__uint128_t'
+                return Insn('op', f'{{ {typ} pair = ldxp{width}(c, {addr}); '
+                            f'{set_reg(size == 3, rt, f"(uint{width}_t)pair")} '
+                            f'{set_reg(size == 3, rt2, f"(uint{width}_t)(pair >> {width})")} }}')
+            return Insn('op', f'{{ uint32_t st = stxp{width}(c, {addr}, {X(rt)}, {X(rt2)}); '
+                        f'{set_reg(0, rs, "st")} }}')
         if o2 == 0:
             if L:
                 return Insn('op', set_reg(1, rt, f'ldx{nbits}(c, {addr})'))

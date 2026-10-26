@@ -1,12 +1,13 @@
-# GAMELIB_ID for Android (runtime/gamelib.h): a hash of the generator,
+# GAMELIB_ID for Android (runtime/gamelib.h runtime/game_profile.h): a hash of the generator,
 # the headers the generated code is compiled against, and its flags. Included by the app's CMakeLists.txt
-# (libmain.so checks it) and android/gamelib/CMakeLists.txt (botwgame.so carries it), so the two always agree.
+# (libmain.so checks it) and android/gamelib/CMakeLists.txt (totkgame.so carries it), so the two always agree.
 # Needs R (the repository). Sets GAMELIB_ID and GAMELIB_FLAGS (the generated code's compile flags, as a list).
-# -O2 for the developer-built Android game library:
-set(GAMELIB_FLAGS -O2 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -fPIC)
+# Match the on-device builder: TotK's large generated functions make -O2
+# prohibitively expensive during bring-up. Giant jump-table functions use -O0.
+set(GAMELIB_FLAGS -O1 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -fPIC)
 set(_gamelib_srcs tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools/passes.py tools/patches.py
     tools/simd_c.py tools/gamelib_entry.c runtime/hle/hle_symbols.txt
-    runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h)
+    runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h runtime/game_profile.h)
 set(_id_text "")
 foreach(f ${_gamelib_srcs})
     file(READ ${R}/${f} _t)

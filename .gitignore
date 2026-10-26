@@ -21,3 +21,6 @@ tools/venv/
 venv/
 __pycache__/
 .DS_Store
+
+# Local porting inputs, private keys, build scratch and device evidence.
+/.work/

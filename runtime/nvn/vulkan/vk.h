@@ -95,7 +95,12 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
 typedef struct { VkBuffer buf; uint64_t off; void *ptr; } VkSpan;
 VkSpan vk_transient(uint64_t size, uint64_t align);
 VkSpan vk_transient_copy(const void *data, uint64_t size, uint64_t align);
-VkSpan vk_readback(uint64_t size);  // host-cached GPU -> CPU staging (read right after the copy completes)
+// Shared, CPU-read-only staging. After recording copies, vk_readback_wait makes
+// them visible to the CPU. A caller submitting itself uses barrier, wait, invalidate.
+VkSpan vk_readback(uint64_t size);
+void vk_readback_barrier(VkCommandBuffer cb);
+void vk_readback_invalidate(void);  // only after the copy's submission has completed
+void vk_readback_wait(void);       // barrier + submit/wait + cache invalidation
 VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout);
 
 // ---- textures (textures.c)
@@ -109,6 +114,7 @@ typedef struct TexBackend {
     VkImageAspectFlags aspect;
     bool gpu_owned, uploaded, dynamic;
     uint64_t data_hash, sample_hash, checked_frame, full_frame;
+    uint64_t cpu_write_epoch;
     uint32_t wgen;  // page write tracking generation at the last upload check (textures.c)
     bool scalable, presented;
     uint8_t rs_group;  // RS_*: which output scale its allocation follows (textures.c)

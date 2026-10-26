@@ -23,14 +23,19 @@ class Nso:
         raw = open(path, 'rb').read()
         assert raw[:4] == b'NSO0', path
         flags = struct.unpack_from('<I', raw, 0xC)[0]
-        self.build_id = raw[0x40:0x60].rstrip(b'\0').hex()
+        self.build_id = raw[0x40:0x60].hex()
         segs = []
         for i in range(3):
             file_off, mem_off, dec_size = struct.unpack_from('<III', raw, 0x10 + i * 0x10)
             comp_size = struct.unpack_from('<I', raw, 0x60 + i * 4)[0]
-            data = raw[file_off:file_off + comp_size]
+            stored_size = comp_size if flags & (1 << i) else dec_size
+            data = raw[file_off:file_off + stored_size]
+            if len(data) != stored_size:
+                raise ValueError(f'{path}: truncated NSO segment {i}')
             if flags & (1 << i):
                 data = lz4.block.decompress(data, uncompressed_size=dec_size)
+            if len(data) != dec_size:
+                raise ValueError(f'{path}: wrong NSO segment {i} size')
             segs.append((mem_off, data))
         self.bss_size = struct.unpack_from('<I', raw, 0x3C)[0]
         self.text = (segs[0][0], len(segs[0][1]))

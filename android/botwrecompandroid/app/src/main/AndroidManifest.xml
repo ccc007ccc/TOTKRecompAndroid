@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- After SDL3's android-project template (3.4.16), with BOTWRecompAndroid's activity. -->
+<!-- After SDL3's android-project template (3.4.16), with TOTKRecompAndroid's activity. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-feature android:name="android.hardware.vulkan.version" android:version="0x403000" android:required="true" />
@@ -13,9 +13,10 @@
     <uses-permission android:name="android.permission.INTERNET" />
 
     <application
-        android:label="BOTWRecompAndroid"
+        android:label="TOTKRecompAndroid"
         android:icon="@mipmap/ic_launcher"
         android:allowBackup="false"
+        android:appCategory="game"
         android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
         android:enableOnBackInvokedCallback="false"
         android:hardwareAccelerated="true">

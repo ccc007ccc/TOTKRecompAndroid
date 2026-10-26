@@ -1,4 +1,4 @@
-// Where BOTWRecompAndroid keeps its files (runtime/paths.c).
+// Where TOTKRecompAndroid keeps its files (runtime/paths.c).
 //
 // Data root: everything the app writes or the user brings - extracted/ (game files), save/,
 // cache/ (shaders / pipelines), fonts/ (imported), larecomp.ini. rt_paths_init() picks it and makes it the
@@ -11,10 +11,8 @@
 //      Linux: $XDG_DATA_HOME/botwrecompandroid (~/.local/share/botwrecompandroid)
 //      Android: the app's external files folder (Android/data/<package>/files)
 //
-// Game versions: that root is v1.0.0's. v1.6.0 and v1.8.2 each run in a folder of their own inside it, v160 / v182
-// (game files, saves, settings - android/run_ver.sh's test runs use the same ones): the one the start screen chose
-// (game_version.txt in the root) becomes the data root instead. Its settings start as a copy of 1.0.0's, its saves too
-// (services/fs.c, LARECOMP_SAVE_SEED).
+// Game version: the verified TotK 1.4.3 inputs live in this application's own
+// extracted/ directory. Saves and caches are separate from BotW and TotK-Native.
 //
 // Resources: files that ship with the app (helper programs, the window icon) - next to the executable (the
 // Windows folder, the .app's Contents/MacOS), in the .app's Contents/Resources, or in the source tree.
@@ -36,14 +34,12 @@ bool rt_dev_mode(void);           // dev / portable mode (rule 2 above): e.g. a 
 // starting directory or the executable's parent; NULL = shipped builds only). Absolute path in out; false = none.
 bool rt_resource(const char *name, const char *dev_rel, char *out, size_t n);
 
-// Game versions (100, 160, 182: rt.h game_version_of_build)
+// Game version (143: game_profile.h)
 int rt_game_version(void);                                // the one whose folder is the data root
 bool rt_select_game_version(int v);                       // the one the next start runs (the app restarts into it)
 bool rt_version_root(int v, char *out, size_t n);         // its folder (absolute)
 int rt_game_dir_version(const char *game_dir);            // whose extracted/ folder game_dir is; 0: none
-// Where its game code library is loaded from: 1.6.0's / 1.8.2's own (Android: <internal files>/v160|v182, as external
-// storage is mounted noexec; elsewhere their extracted/). false for 1.0.0, whose library is looked for as before
-// (runtime/gamelib.c: next to the executable, then extracted/).
+// Android copies the game library into internal files/res (external storage is noexec).
 bool rt_version_game_lib(int v, char *out, size_t n);
 
 // The only way the app deletes game files. Removes the named entry of game_dir (an extracted/ folder) only if

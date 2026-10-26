@@ -1,4 +1,4 @@
-// BOTWRecompAndroid Android probe (docs/las/ANDROID-PORT.md, Fase 0): where the guest window can go in an app process, and what
+// TOTKRecompAndroid Android probe (docs/las/ANDROID-PORT.md, Fase 0): where the guest window can go in an app process, and what
 // the Vulkan drivers (system, Turnip through adrenotools) offer the backend. JNI entry points for MainActivity.
 #include <dlfcn.h>
 #include <errno.h>

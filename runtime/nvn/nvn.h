@@ -31,12 +31,14 @@ typedef struct NvnTexture {
     uint64_t pool_offset;
     void *backend;  // renderer-side texture
     uint64_t debug_id;
+    uint64_t cpu_write_epoch;  // release/acquire publication for explicit CPU texture writes
     char label[64];
     unsigned refs;  // owners + descriptor slots + deferred releases (objects.c, g_live_lock)
     unsigned owners;  // guest objects initialized to this texture (objects.c); none left: finalized
     bool finalized;
     struct NvnTexture *next, *prev, *hnext;  // (hnext: objects.c's description hash)
 } NvnTexture;
+void nvn_texture_cpu_written(uint64_t addr, uint64_t size);
 
 typedef struct {
     uint32_t min_filter, mag_filter, wrap[3], compare_mode, compare_func, reduction;
@@ -71,6 +73,7 @@ typedef struct NvnDescPool {
 
 typedef struct NvnShaderStage {
     uint32_t stage;           // NVNshaderStage
+    uint32_t entry_offset;    // control +0x708: SPH at 0x30, compute instructions at 0x100
     uint64_t code_addr;       // GPU (== CPU) address of the code
     const uint8_t *control;   // control section
     uint32_t const_offset, const_size;  // compiler constants (bound as c1), within the code blob

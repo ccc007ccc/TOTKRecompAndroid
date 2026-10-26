@@ -154,6 +154,7 @@ static Service *new_am_storage(const void *data, uint64_t size) {
 }
 
 extern const uint8_t g_user_id[16];
+#include "fs.h"
 
 static void application_functions(Service *s, IpcReq *req, IpcResp *resp) {
     (void)s;
@@ -180,8 +181,19 @@ static void application_functions(Service *s, IpcReq *req, IpcResp *resp) {
         break;
     }
     case 23:  // GetDisplayVersion
-        memcpy(resp->data, g_game_version == 182 ? "1.8.2" : g_game_version == 160 ? "1.6.0" : "1.0.0", 6);
+        memcpy(resp->data, TOTK_VERSION_STRING, 6);
         resp_size(resp, 0x10);
+        break;
+    case 27:  // CreateCacheStorage(u16 index, s64 size, s64 journal) -> media, required space
+        if (req->data_size < 24) { resp->result = MAKE_RESULT(2, 6001); break; }
+        resp->result = fs_create_cache_storage(IN(uint16_t, 0), IN(int64_t, 8), IN(int64_t, 16));
+        if (!resp->result) {
+            OUT(uint32_t, 0) = 1;  // internal storage
+            OUT(uint64_t, 8) = 0;  // no additional space is needed
+            resp_size(resp, 16);
+        }
+        LOG("[am] CreateCacheStorage index=%u size=%lld journal=%lld result=%#x\n",
+            IN(uint16_t, 0), (long long)IN(int64_t, 8), (long long)IN(int64_t, 16), resp->result);
         break;
     case 40: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;  // NotifyRunning
     case 130: case 140: resp->copy_handles[resp->ncopy++] = new_event(); break;

@@ -5,17 +5,22 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 #include "../mods.h"
 #include "../hle.h"
 #include "../ipc.h"
 #include "../romfs_build.h"
+#include "fs.h"
 
 #define FS_PATH_NOT_FOUND MAKE_RESULT(2, 1)
 #define FS_PATH_EXISTS MAKE_RESULT(2, 2)
 #define FS_TARGET_LOCKED MAKE_RESULT(2, 7)
 #define FS_NOT_EMPTY MAKE_RESULT(2, 8)
+#define FS_TARGET_NOT_FOUND MAKE_RESULT(2, 1002)
+#define FS_INVALID_ARGUMENT MAKE_RESULT(2, 6001)
+#define FS_UNSUPPORTED MAKE_RESULT(2, 6300)
 
 const char *g_save_dir = "save";
 static int romfs_fd = -1;
@@ -410,9 +415,31 @@ static Service *open_romfs_storage(void) {
 }
 
 // ------------------------------------------------------------------ host-directory filesystem
-typedef struct { char root[1024]; } HostFs;
+typedef struct HostFs { char root[1024]; bool read_only; struct HostFs *next; } HostFs;
 typedef struct { int fd; char path[1100]; } HostFile;
 typedef struct { DIR *d; char path[1024]; int mode; } HostDir;
+static HostFs *save_mounts;
+static pthread_mutex_t save_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool temporary_cleared;
+RT_ON_RESET(save_mount_reset) { save_mounts = NULL; temporary_cleared = false; }
+
+static void host_file_close(Service *s) {
+    HostFile *f = s->state;
+    if (f) { close(f->fd); free(f); s->state = NULL; }
+}
+static void host_dir_close(Service *s) {
+    HostDir *d = s->state;
+    if (d) { closedir(d->d); free(d); s->state = NULL; }
+}
+static void save_mount_close(Service *s) {
+    HostFs *fs = s->state;
+    if (!fs) return;
+    pthread_mutex_lock(&save_lock);
+    for (HostFs **p = &save_mounts; *p; p = &(*p)->next)
+        if (*p == fs) { *p = fs->next; break; }
+    pthread_mutex_unlock(&save_lock);
+    free(fs); s->state = NULL;
+}
 
 static const char *in_path(IpcReq *req, int i) {
     if (i < req->nx) return (const char *)(uintptr_t)req->x[i].addr;
@@ -519,14 +546,17 @@ static void directory(Service *s, IpcReq *req, IpcResp *resp) {
 }
 
 static int rm_rf(const char *p, bool keep_root) {
+    struct stat sb;
+    if (lstat(p, &sb)) return -1;
+    if (!S_ISDIR(sb.st_mode)) return unlink(p);
     DIR *d = opendir(p);
-    if (!d) return unlink(p);
+    if (!d) return -1;
     struct dirent *e;
     while ((e = readdir(d))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
         char c[2048];
         snprintf(c, sizeof c, "%s/%s", p, e->d_name);
-        rm_rf(c, false);
+        if (rm_rf(c, false)) { int error = errno; closedir(d); errno = error; return -1; }
     }
     closedir(d);
     return keep_root ? 0 : rmdir(p);
@@ -535,6 +565,21 @@ static int rm_rf(const char *p, bool keep_root) {
 static void filesystem(Service *s, IpcReq *req, IpcResp *resp) {
     HostFs *fs = s->state;
     char p[2048], p2[2048];
+    // Guest paths must stay within the mounted filesystem, including cache metadata isolation.
+    for (int i = 0; i < 2; i++) {
+        const char *path = in_path(req, i);
+        for (const char *q = path; *q;) {
+            while (*q == '/') q++;
+            const char *part = q;
+            while (*q && *q != '/') q++;
+            if (q - part == 2 && !memcmp(part, "..", 2)) { resp->result = FS_INVALID_ARGUMENT; return; }
+        }
+    }
+    if (fs->read_only && (req->cmd <= 6 || req->cmd == 13 ||
+                         (req->cmd == 8 && (IN(uint32_t, 0) & 2)))) {
+        resp->result = FS_UNSUPPORTED;
+        return;
+    }
     host_path(fs, in_path(req, 0), p, sizeof p);
     switch (req->cmd) {
     case 0: {  // CreateFile(option, size)
@@ -566,7 +611,9 @@ static void filesystem(Service *s, IpcReq *req, IpcResp *resp) {
         HostFile *f = calloc(1, sizeof *f);
         f->fd = fd;
         strlcpy(f->path, p, sizeof f->path);
-        ipc_return_object(resp, service_new("IFile", file, f));
+        Service *opened = service_new("IFile", file, f);
+        opened->on_close = host_file_close;
+        ipc_return_object(resp, opened);
         break;
     }
     case 9: {  // OpenDirectory(mode)
@@ -576,7 +623,9 @@ static void filesystem(Service *s, IpcReq *req, IpcResp *resp) {
         hd->d = d;
         hd->mode = (int)IN(uint32_t, 0);
         snprintf(hd->path, sizeof hd->path, "%s", p);
-        ipc_return_object(resp, service_new("IDirectory", directory, hd));
+        Service *opened = service_new("IDirectory", directory, hd);
+        opened->on_close = host_dir_close;
+        ipc_return_object(resp, opened);
         break;
     }
     case 10: break;  // Commit
@@ -639,20 +688,264 @@ static Service *open_host_fs(const char *sub) {
     return service_new("IFileSystem", filesystem, fs);
 }
 
+// SaveDataAttribute's type is at +0x20 (not the system-save id at +0x18).
+// Metadata lives beside files/, outside the filesystem visible to the guest.
+typedef struct {
+    uint64_t app, uid[2], system;
+    uint8_t type, rank;
+    uint16_t index;
+    uint8_t reserved[0x1c];
+} SaveAttribute;
+typedef struct {
+    char magic[8];
+    SaveAttribute attr;
+    int64_t size, journal;
+    uint8_t space, reserved[7];
+} SaveMeta;
+enum { SAVE_ACCOUNT = 1, SAVE_DEVICE = 3, SAVE_TEMPORARY = 4, SAVE_CACHE = 5 };
+_Static_assert(sizeof(SaveAttribute) == 0x40, "save attribute ABI");
+_Static_assert(offsetof(SaveAttribute, type) == 0x20, "save type offset");
+_Static_assert(sizeof(SaveMeta) == 0x60, "host metadata format");
+typedef struct { uint8_t bytes[0x60]; } SaveInfo;
+typedef struct { SaveInfo *entries; size_t count, cursor; } SaveReader;
+
+static void save_root(char *out, size_t cap) {
+    const char *base = getenv("LARECOMP_SAVE_DIR");
+    snprintf(out, cap, "%s/stores", base && *base ? base : g_save_dir);
+}
+static bool save_attribute(SaveAttribute *a, const void *data) {
+    memcpy(a, data, sizeof *a);
+    memset(a->reserved, 0, sizeof a->reserved);
+    if (!a->app) a->app = TOTK_TITLE_ID;
+    return a->rank <= 1 &&
+           (a->type == SAVE_ACCOUNT || a->type == SAVE_DEVICE || a->type == SAVE_TEMPORARY || a->type == SAVE_CACHE);
+}
+static void save_key(char *out, size_t cap, const SaveMeta *m) {
+    const SaveAttribute *a = &m->attr;
+    snprintf(out, cap, "%u_%u_%u_%u_%016llx_%016llx%016llx_%016llx", m->space,
+             a->type, a->rank, a->index, (unsigned long long)a->app,
+             (unsigned long long)a->uid[1], (unsigned long long)a->uid[0], (unsigned long long)a->system);
+}
+static void save_path(char *out, size_t cap, const SaveMeta *m) {
+    char root[1100], key[128];
+    save_root(root, sizeof root); save_key(key, sizeof key, m);
+    snprintf(out, cap, "%s/%s", root, key);
+}
+static uint32_t save_load(SaveMeta *m) {
+    char path[1400], base[1300]; save_path(base, sizeof base, m);
+    snprintf(path, sizeof path, "%s/metadata", base);
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return errno_result();
+    SaveMeta loaded;
+    ssize_t n = read(fd, &loaded, sizeof loaded);
+    close(fd);
+    if (n != sizeof loaded || memcmp(loaded.magic, "TKSTORE1", 8) ||
+        memcmp(&loaded.attr, &m->attr, sizeof m->attr) || loaded.space != m->space ||
+        loaded.size < 0 || loaded.journal < 0) return MAKE_RESULT(2, 4000);
+    *m = loaded;
+    return 0;
+}
+static int save_mkdirs(const char *path) {
+    char copy[1400];
+    if (strlcpy(copy, path, sizeof copy) >= sizeof copy) { errno = ENAMETOOLONG; return -1; }
+    for (char *q = copy + 1; ; q++) {
+        if (*q && *q != '/') continue;
+        char c = *q; *q = 0;
+        if (mkdir(copy, 0755) && errno != EEXIST) return -1;
+        *q = c;
+        if (!c) return 0;
+    }
+}
+static uint32_t save_create(SaveMeta *m) {
+    char root[1100], base[1300], stage[1400], path[1500];
+    save_root(root, sizeof root); save_path(base, sizeof base, m);
+    if (m->size < 0 || m->journal < 0) return MAKE_RESULT(2, 6062);
+    if (save_mkdirs(root)) return errno_result();
+    struct stat sb;
+    if (!lstat(base, &sb)) return FS_PATH_EXISTS;
+    if (errno != ENOENT) return errno_result();
+    struct statvfs space;
+    if (statvfs(root, &space)) return errno_result();
+    uint64_t total = (uint64_t)m->size + (uint64_t)m->journal;
+    if (total > (uint64_t)space.f_bavail * space.f_frsize) return MAKE_RESULT(2, 30);
+    snprintf(stage, sizeof stage, "%s/.creating-XXXXXX", root);
+    if (!mkdtemp(stage)) return errno_result();
+    snprintf(path, sizeof path, "%s/files", stage);
+    uint32_t result = 0;
+    if (mkdir(path, 0755)) result = errno_result();
+    memcpy(m->magic, "TKSTORE1", 8);
+    snprintf(path, sizeof path, "%s/metadata", stage);
+    int fd = result ? -1 : open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (!result && fd < 0) result = errno_result();
+    if (fd >= 0) {
+        if (write(fd, m, sizeof *m) != sizeof *m || fsync(fd)) result = MAKE_RESULT(2, 4000);
+        close(fd);
+    }
+    if (!result && rename(stage, base)) result = errno_result();
+    if (result) rm_rf(stage, false);
+    else LOG("[fs] created storage type=%u index=%u size=%lld journal=%lld\n",
+             m->attr.type, m->attr.index, (long long)m->size, (long long)m->journal);
+    return result;
+}
+uint32_t fs_create_cache_storage(uint16_t index, int64_t size, int64_t journal) {
+    SaveMeta m = {.attr = {.app = TOTK_TITLE_ID, .type = SAVE_CACHE, .index = index},
+                  .space = 1, .size = size, .journal = journal};
+    pthread_mutex_lock(&save_lock);
+    uint32_t result = save_create(&m);
+    pthread_mutex_unlock(&save_lock);
+    return result;
+}
+static uint64_t save_id(const SaveMeta *m) {
+    // Stable host id; the complete attribute, not this hash, selects the storage path.
+    uint64_t id = 14695981039346656037ull;
+    const uint8_t *p = (const uint8_t *)&m->attr;
+    for (size_t i = 0; i < sizeof m->attr; i++) id = (id ^ p[i]) * 1099511628211ull;
+    return (id ^ m->space) * 1099511628211ull;
+}
+static SaveInfo save_info(const SaveMeta *m) {
+    SaveInfo info = {0};
+    uint64_t id = save_id(m), size = (uint64_t)m->size + (uint64_t)m->journal;
+    memcpy(info.bytes, &id, 8);
+    info.bytes[8] = m->space; info.bytes[9] = m->attr.type;
+    memcpy(info.bytes + 0x10, m->attr.uid, 16);
+    memcpy(info.bytes + 0x20, &m->attr.system, 8);
+    memcpy(info.bytes + 0x28, &m->attr.app, 8);
+    memcpy(info.bytes + 0x30, &size, 8);
+    memcpy(info.bytes + 0x38, &m->attr.index, 2);
+    info.bytes[0x3a] = m->attr.rank;
+    return info;
+}
+static void save_reader_close(Service *s) {
+    SaveReader *r = s->state;
+    if (r) { free(r->entries); free(r); s->state = NULL; }
+}
+static void save_reader(Service *s, IpcReq *req, IpcResp *resp) {
+    if (req->cmd) { resp->result = FS_UNSUPPORTED; return; }
+    SaveReader *r = s->state;
+    IpcBuf *b = out_buf(req, 0);
+    if (!b || (b->size && !b->addr)) { resp->result = FS_INVALID_ARGUMENT; return; }
+    pthread_mutex_lock(&save_lock);
+    size_t n = b->size / sizeof(SaveInfo);
+    if (n > r->count - r->cursor) n = r->count - r->cursor;
+    if (n) {
+        plat_write_prepare(b->addr, n * sizeof(SaveInfo));
+        memcpy((void *)(uintptr_t)b->addr, r->entries + r->cursor, n * sizeof(SaveInfo));
+        r->cursor += n;
+    }
+    OUT(int64_t, 0) = (int64_t)n; resp_size(resp, 8);
+    pthread_mutex_unlock(&save_lock);
+}
+static int save_info_compare(const void *a, const void *b) {
+    uint16_t x, y;
+    memcpy(&x, ((const SaveInfo *)a)->bytes + 0x38, 2);
+    memcpy(&y, ((const SaveInfo *)b)->bytes + 0x38, 2);
+    return x < y ? -1 : x > y;
+}
+static uint32_t save_open_reader(IpcResp *resp) {
+    char root[1100]; save_root(root, sizeof root);
+    DIR *dir = opendir(root);
+    if (!dir && errno != ENOENT) return errno_result();
+    SaveReader *r = calloc(1, sizeof *r);
+    if (!r) { if (dir) closedir(dir); return MAKE_RESULT(2, 4000); }
+    struct dirent *e;
+    uint32_t result = 0;
+    while (dir && (e = readdir(dir))) {
+        if (e->d_name[0] == '.') continue;
+        char path[1500]; snprintf(path, sizeof path, "%s/%s/metadata", root, e->d_name);
+        int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (fd < 0) { result = errno_result(); break; }
+        SaveMeta m;
+        ssize_t n = read(fd, &m, sizeof m); close(fd);
+        if (n != sizeof m || memcmp(m.magic, "TKSTORE1", 8)) { result = MAKE_RESULT(2, 4000); break; }
+        if (m.attr.type != SAVE_CACHE || m.attr.app != TOTK_TITLE_ID) continue;
+        SaveMeta checked = m;
+        if ((result = save_load(&checked))) break;
+        SaveInfo *entries = realloc(r->entries, (r->count + 1) * sizeof *entries);
+        if (!entries) { result = MAKE_RESULT(2, 4000); break; }
+        r->entries = entries; r->entries[r->count++] = save_info(&m);
+    }
+    if (dir) closedir(dir);
+    if (result) { free(r->entries); free(r); return result; }
+    if (r->count > 1) qsort(r->entries, r->count, sizeof *r->entries, save_info_compare);
+    Service *reader = service_new("ISaveDataInfoReader", save_reader, r);
+    reader->on_close = save_reader_close;
+    ipc_return_object(resp, reader);
+    LOG("[fs] opened cache storage list: %zu entries\n", r->count);
+    return 0;
+}
+static bool fsp_save(IpcReq *req, IpcResp *resp) {
+    bool create = req->cmd == 22, mount = req->cmd == 51 || req->cmd == 53;
+    bool cache = req->cmd == 33 || req->cmd == 34;
+    if (!create && !mount && !cache && req->cmd != 62) return false;
+    SaveMeta m = {0};
+    size_t needed = create ? 0x90 : mount ? 0x48 : cache ? 2 : 0;
+    if (req->data_size < needed) { resp->result = FS_INVALID_ARGUMENT; return true; }
+    if (create || mount) {
+        if (!save_attribute(&m.attr, req->data + (mount ? 8 : 0))) {
+            LOG("[fs] unsupported save attribute cmd=%u app=%016llx type=%u rank=%u index=%u\n",
+                req->cmd, (unsigned long long)m.attr.app, m.attr.type, m.attr.rank, m.attr.index);
+            resp->result = FS_UNSUPPORTED; return true;
+        }
+        // TotK probes BOTW's saves for horse transfer. No other application's save was imported.
+        if (m.attr.app != TOTK_TITLE_ID) {
+            resp->result = mount ? FS_TARGET_NOT_FOUND : FS_UNSUPPORTED;
+            LOG("[fs] other application save %016llx is unavailable\n", (unsigned long long)m.attr.app);
+            return true;
+        }
+        m.space = IN(uint8_t, mount ? 0 : 0x64);
+        if (create) { m.size = IN(int64_t, 0x40); m.journal = IN(int64_t, 0x48); }
+    } else if (cache) {
+        m.attr.app = TOTK_TITLE_ID; m.attr.type = SAVE_CACHE;
+        m.attr.index = IN(uint16_t, 0); m.space = 1;
+    }
+    pthread_mutex_lock(&save_lock);
+    if (req->cmd == 62) resp->result = save_open_reader(resp);
+    else if (create) resp->result = save_create(&m);
+    else {
+        resp->result = save_load(&m);
+        // Account/device/temporary storage is provisioned on first use by this standalone app.
+        // Cache storage must be explicitly created, or the SDK's cache initialization is skipped.
+        if (mount && req->cmd == 51 && m.attr.type != SAVE_CACHE && resp->result == FS_PATH_NOT_FOUND)
+            resp->result = save_create(&m);
+        if (!resp->result && mount && m.attr.type == SAVE_TEMPORARY && !temporary_cleared) {
+            char base[1300], files[1400]; save_path(base, sizeof base, &m);
+            snprintf(files, sizeof files, "%s/files", base);
+            if (rm_rf(files, true)) resp->result = errno_result();
+            else temporary_cleared = true;
+        }
+        if (!resp->result && mount) {
+            char key[128], sub[160]; save_key(key, sizeof key, &m);
+            snprintf(sub, sizeof sub, "stores/%s/files", key);
+            Service *fs = open_host_fs(sub);
+            ((HostFs *)fs->state)->read_only = req->cmd == 53;
+            ((HostFs *)fs->state)->next = save_mounts;
+            save_mounts = fs->state;
+            fs->on_close = save_mount_close;
+            ipc_return_object(resp, fs);
+        } else if (!resp->result && req->cmd == 34) {
+            OUT(int64_t, 0) = m.size; OUT(int64_t, 8) = m.journal; resp_size(resp, 16);
+        } else if (!resp->result && req->cmd == 33) {
+            char path[1300]; save_path(path, sizeof path, &m);
+            char files[1400]; snprintf(files, sizeof files, "%s/files", path);
+            for (HostFs *fs = save_mounts; fs; fs = fs->next)
+                if (!strcmp(fs->root, files)) { resp->result = FS_TARGET_LOCKED; break; }
+            if (!resp->result && rm_rf(path, false)) resp->result = errno_result();
+        }
+    }
+    pthread_mutex_unlock(&save_lock);
+    if (mount && resp->result == FS_PATH_NOT_FOUND) resp->result = FS_TARGET_NOT_FOUND;
+    if (resp->result) LOG("[fs] save cmd=%u type=%u index=%u result=%#x\n",
+                          req->cmd, m.attr.type, m.attr.index, resp->result);
+    return true;
+}
+
 // ------------------------------------------------------------------ fsp-srv
 SERVICE("fsp-srv", fsp_srv) {
     (void)s;
+    if (fsp_save(req, resp)) return;
     switch (req->cmd) {
     case 1: break;  // SetCurrentProcess
     case 18: ipc_return_object(resp, open_host_fs("sdcard")); break;
-    case 22: break;  // CreateSaveDataFileSystem
-    case 51: case 53: {  // OpenSaveDataFileSystem(space, attribute)
-        uint8_t type = IN(uint8_t, 0x8 + 0x18);  // attribute.type
-        char sub[64];
-        snprintf(sub, sizeof sub, "save_%u", type);
-        ipc_return_object(resp, open_host_fs(sub));
-        break;
-    }
     case 200: ipc_return_object(resp, open_romfs_storage()); break;  // OpenDataStorageByCurrentProcess
     case 202:  // OpenDataStorageByDataId (system data archives)
         LOG("[fs] OpenDataStorageByDataId %llx (not available)\n", IN(uint64_t, 8));

@@ -1,4 +1,4 @@
-// BOTWRecompAndroid entry: load modules, set up the kernel, run nn::init::Start on the main thread.
+// TOTKRecompAndroid entry: load modules, set up the kernel, run nn::init::Start on the main thread.
 #include <SDL3/SDL.h>
 #ifdef __ANDROID__
 #include <SDL3/SDL_main.h>  // (main() becomes SDL_main, which SDLActivity runs)
@@ -34,17 +34,24 @@ static void module_init(Cpu *c, Module *m) {
 }
 
 static void rtld_init_sdk(Cpu *c) { module_init(c, &g_modules[1]); }
-static void rtld_init_main(Cpu *c) { module_init(c, &g_modules[0]); }
+static void rtld_init_main(Cpu *c) {
+    module_init(c, &g_modules[2]);  // multimedia before the game, as TotK rtld does
+    module_init(c, &g_modules[0]);
+    module_init(c, &g_modules[3]);
+}
 
 // Newer SDKs (BOTW 1.8.2's) also take x4, called if nnMain returns, before nninitFinalizeSdkModule and nnosQuickExit:
 // the finalizers of what x3 set up - DT_FINI, else the fini_array backwards (SavageWindRecomp, MIT)
 static void rtld_fini_main(Cpu *c) {
-    Module *m = &g_modules[0];
-    LOG("nnMain returned: fini %s\n", m->name);
-    if (m->fini) { guest_call(c, m->fini); return; }
-    for (uint64_t i = m->fini_array_sz / 8; i-- > 0;) {
-        uint64_t fn = ((uint64_t *)m->fini_array)[i];
-        if (fn) guest_call(c, fn);
+    const int order[] = {3, 0, 2};  // reverse of the non-SDK initialization order
+    for (unsigned i = 0; i < sizeof order / sizeof *order; i++) {
+        Module *m = &g_modules[order[i]];
+        LOG("nnMain returned: fini %s\n", m->name);
+        if (m->fini) { guest_call(c, m->fini); continue; }
+        for (uint64_t j = m->fini_array_sz / 8; j-- > 0;) {
+            uint64_t fn = ((uint64_t *)m->fini_array)[j];
+            if (fn) guest_call(c, fn);
+        }
     }
 }
 
@@ -183,12 +190,14 @@ static void boot(const char *root) {
 
     uint32_t stack_size = 0x100000;
     int prio = 44;
+    kernel_set_system_resource_size(0);
     FILE *f = fopen(npdm_path, "rb");
     if (f) {
         uint8_t meta[0x80];
         if (fread(meta, 1, sizeof meta, f) == sizeof meta && !memcmp(meta, "META", 4)) {
             prio = meta[0xE];
             stack_size = *(uint32_t *)(meta + 0x1C);
+            kernel_set_system_resource_size(*(uint32_t *)(meta + 0x14));
         }
         fclose(f);
     }

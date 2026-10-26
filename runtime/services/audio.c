@@ -1009,25 +1009,89 @@ static uint32_t new_event_handle(void) {
     return r;
 }
 
+static const char *audio_routes[] = {
+    "AudioStereoJackOutput", "AudioBuiltInSpeakerOutput", "AudioTvOutput", "AudioUsbDeviceOutput"
+};
+static float route_volume[] = {1, 1, 1, 1};
+static pthread_mutex_t route_lock = PTHREAD_MUTEX_INITIALIZER;
+static KEvent *route_events[3];
 static void audio_device(Service *s, IpcReq *req, IpcResp *resp) {
     (void)s;
-    switch (req->cmd) {
-    case 0: case 6: {  // ListAudioDeviceName(Auto)
+    bool list = req->cmd == 0 || req->cmd == 6 || req->cmd == 14;
+    bool active = req->cmd == 3 || req->cmd == 10 || req->cmd == 13;
+    if (list || active) {
         IpcBuf *b = out_buf(req, 0);
-        if (b && b->size >= 0x100) strcpy((char *)(uintptr_t)b->addr, "AudioTvOutput");
-        OUT(uint32_t, 0) = 1;
-        resp_size(resp, 4);
-        break;
+        if (!b || b->size < 0x100) {
+            if (!list) resp->result = 0x899;
+            else { OUT(uint32_t, 0) = 0; resp_size(resp, 4); }
+            return;
+        }
+        unsigned n = list ? (b->size / 0x100 < 3 ? (unsigned)(b->size / 0x100) : 3) : 1;
+        plat_write_prepare(b->addr, n * 0x100);
+        memset((void *)(uintptr_t)b->addr, 0, n * 0x100);
+        for (unsigned i = 0; i < n; i++) strcpy((char *)(uintptr_t)b->addr + i * 0x100, audio_routes[list ? i : 2]);
+        if (list) { OUT(uint32_t, 0) = n; resp_size(resp, 4); }
+        return;
     }
-    case 3: case 10: {  // GetActiveAudioDeviceName(Auto)
-        IpcBuf *b = out_buf(req, 0);
-        if (b && b->size) strncpy((char *)(uintptr_t)b->addr, "AudioTvOutput", b->size);
-        break;
+    if (req->cmd == 1 || req->cmd == 2 || req->cmd == 7 || req->cmd == 8) {
+        IpcBuf *b = in_buf(req, 0);
+        bool set = req->cmd == 1 || req->cmd == 7;
+        if (!b || b->size < 0x100 || (set && req->data_size < 4)) { resp->result = 0x899; return; }
+        const char *name = (const char *)(uintptr_t)b->addr;
+        if (strnlen(name, 0x100) == 0x100) { resp->result = 0x899; return; }
+        int route = 0;
+        while (route < 4 && strcmp(name, audio_routes[route])) route++;
+        float value = set ? IN(float, 0) : 0;
+        if (route == 4 || (set && (!isfinite(value) || value < 0 || value > 128))) { resp->result = 0x899; return; }
+        pthread_mutex_lock(&route_lock);
+        if (set) route_volume[route] = value;
+        else { OUT(float, 0) = route_volume[route]; resp_size(resp, 4); }
+        pthread_mutex_unlock(&route_lock);
+        return;
     }
-    case 4: case 11: case 12: resp->copy_handles[resp->ncopy++] = new_event_handle(); break;
-    case 5: OUT(uint32_t, 0) = 2; resp_size(resp, 4); break;  // GetActiveChannelCount
-    case 8: OUT(float, 0) = 1.0f; resp_size(resp, 4); break;
-    default: break;
+    if (req->cmd == 4 || req->cmd == 11 || req->cmd == 12) {
+        int i = req->cmd == 4 ? 0 : req->cmd - 10;
+        pthread_mutex_lock(&route_lock);
+        uint32_t h;
+        if (!route_events[i]) {
+            uint32_t w;
+            route_events[i] = kernel_create_event_pair(&w, &h);
+            if (!i) { pthread_mutex_lock(&g_klock); kernel_signal(route_events[i]); pthread_mutex_unlock(&g_klock); }
+        } else h = kernel_new_handle(route_events[i]);
+        pthread_mutex_unlock(&route_lock);
+        resp->copy_handles[resp->ncopy++] = h;
+        return;
+    }
+    if (req->cmd == 5) { OUT(uint32_t, 0) = 2; resp_size(resp, 4); return; }
+    LOG("[audren] unsupported audio device command %u\n", req->cmd);
+    resp->result = 0x899;
+}
+RT_ON_RESET(audio_routes_reset) {
+    memset(route_events, 0, sizeof route_events);
+    for (int i = 0; i < 4; i++) route_volume[i] = 1;
+}
+
+static void renderer_work_size(IpcReq *req, IpcResp *resp) {
+    if (req->data_size < 0x34) { resp->result = 0x899; return; }
+    const char *symbol = "_ZN2nn5audio6server17AudioRenderSystem17GetWorkBufferSizeEPmRKNS0_6detail30AudioRendererParameterInternalE";
+    uint64_t fn = loader_find_symbol(symbol);
+    Cpu *c = kernel_current_cpu();
+    if (!fn || !c) FATAL("AudioRenderer SDK work-size function unavailable\n");
+    uint8_t *data = hle_alloc(0x50);
+    memcpy(data, req->data, 0x34);
+    Cpu saved = *c;
+    c->x[0] = (uint64_t)(uintptr_t)(data + 0x40);
+    c->x[1] = (uint64_t)(uintptr_t)data;
+    guest_call(c, fn);
+    resp->result = (uint32_t)c->x[0];
+    *c = saved;
+    if (!resp->result) {
+        uint64_t size;
+        memcpy(&size, data + 0x40, 8);
+        if (!size || size > 64 * 1024 * 1024) FATAL("invalid AudioRenderer work size %llu\n", (unsigned long long)size);
+        OUT(uint64_t, 0) = size;
+        resp_size(resp, 8);
+        LOG("[audren] SDK work size: %llu bytes\n", (unsigned long long)size);
     }
 }
 
@@ -1062,7 +1126,7 @@ SERVICE("audren:u", audren_u) {
         ipc_return_object(resp, service_new("IAudioRenderer", audio_renderer, r));
         break;
     }
-    case 1: OUT(uint64_t, 0) = 0x1000000; resp_size(resp, 8); break;  // GetWorkBufferSize: 16 MB
+    case 1: renderer_work_size(req, resp); break;
     case 2: case 4: ipc_return_object(resp, service_new("IAudioDevice", audio_device, NULL)); break;
     default: LOG("[audren] cmd %u (ok)\n", req->cmd);
     }

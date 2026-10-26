@@ -40,3 +40,8 @@ void tegra_deswizzle(const uint8_t *src, uint8_t *dst, uint32_t wb, uint32_t hb,
                      uint32_t block_height_log2, uint32_t block_depth_log2);
 void tegra_swizzle(const uint8_t *src, uint8_t *dst, uint32_t wb, uint32_t hb, uint32_t d, uint32_t bpb,
                    uint32_t block_height_log2, uint32_t block_depth_log2);
+// Write a mip/subrectangle/array-layer range, preserving other texels and tile padding.
+// linear_stride is zero for block-linear storage; source strides of zero mean tightly packed.
+bool tegra_write_region(const TexLayout *layout, uint32_t level, uint32_t layer, const int32_t region[6],
+                        uint8_t *storage, uint64_t linear_stride, const uint8_t *source,
+                        uint64_t source_row, uint64_t source_image);

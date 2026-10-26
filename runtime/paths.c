@@ -71,70 +71,27 @@ static bool writable(const char *dir) {
 
 static void fail(const char *msg) {
     fprintf(stderr, "%s\n", msg);
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "BOTWRecompAndroid", msg, NULL);
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "TOTKRecompAndroid", msg, NULL);
     exit(1);
 }
 
 static bool g_dev;  // the data root is the starting folder because it has extracted/ (a source checkout)
 bool rt_dev_mode(void) { return g_dev; }
 
-// ---- game versions (paths.h): 1.0.0 in the data root, 1.6.0 / 1.8.2 in its v160 / v182
-static char g_main[1024];   // 1.0.0's data root, which the others' folders are in
-static int g_version = 100;  // whose folder the data root is
-
+// TotK 1.4.3 has its own application data, saves and caches.
+static char g_main[1024];
+static int g_version = 143;
 #define VERSION_FILE "game_version.txt"
-
-// The one the start screen chose (game_version.txt in the main root; none = 1.0.0)
-static int selected_version(const char *main_root) {
-    char p[1100];
-    snprintf(p, sizeof p, "%s" SEP VERSION_FILE, main_root);
-    FILE *f = fopen(p, "rb");
-    int v = 100;
-    if (f) {
-        if (fscanf(f, "%d", &v) != 1) v = 100;
-        fclose(f);
-    }
-    return v == 160 || v == 182 ? v : 100;
-}
-
-static bool copy_file(const char *from, const char *to) {
-    FILE *in = fopen(from, "rb");
-    if (!in) return false;
-    FILE *out = fopen(to, "wb");
-    bool ok = out != NULL;
-    char buf[1 << 16];
-    for (size_t n; ok && (n = fread(buf, 1, sizeof buf, in)) > 0;) ok = fwrite(buf, 1, n, out) == n;
-    fclose(in);
-    if (out) ok &= fclose(out) == 0;
-    if (!ok) remove(to);
-    return ok;
-}
-
-// The data root is a version's own folder (cwd): its settings start as 1.0.0's (once), its saves as 1.0.0's (fs.c copies
-// them when the game first opens one: LARECOMP_SAVE_SEED)
-static void version_seed(void) {
-    char from[1100];
-    snprintf(from, sizeof from, "%s" SEP "botwrecompandroid.ini", g_main);
-    if (!exists("botwrecompandroid.ini") && copy_file(from, "botwrecompandroid.ini"))
-        fprintf(stderr, "[paths] settings: a copy of 1.0.0's\n");
-    if (getenv("LARECOMP_SAVE_SEED")) return;
-    snprintf(from, sizeof from, "%s" SEP "save", g_main);
-#ifdef _WIN32
-    _putenv_s("LARECOMP_SAVE_SEED", from);
-#else
-    setenv("LARECOMP_SAVE_SEED", from, 1);
-#endif
-}
 
 int rt_game_version(void) { return g_version; }
 
 bool rt_version_root(int v, char *out, size_t n) {
-    if (v == 100) return (size_t)snprintf(out, n, "%s", g_main) < n;
-    if (v == 160 || v == 182) return (size_t)snprintf(out, n, "%s" SEP "v%d", g_main, v) < n;
+    if (v == 143) return (size_t)snprintf(out, n, "%s", g_main) < n;
     return false;
 }
 
 bool rt_select_game_version(int v) {
+    if (v != 143) return false;
     char p[1100];
     snprintf(p, sizeof p, "%s" SEP VERSION_FILE, g_main);
     FILE *f = fopen(p, "wb");
@@ -151,8 +108,8 @@ int rt_game_dir_version(const char *game_dir) {
         if (abs) snprintf(got, sizeof got, "%s", game_dir);
         else snprintf(got, sizeof got, "%s" SEP "%s", g_root, game_dir);
     }
-    static const int versions[] = {100, 160, 182};
-    for (int i = 0; i < 3; i++) {
+    static const int versions[] = {143};
+    for (unsigned i = 0; i < sizeof versions / sizeof *versions; i++) {
         char r[1024], want[1100];
         if (!rt_version_root(versions[i], r, sizeof r)) continue;
         snprintf(want, sizeof want, "%s" SEP "extracted", r);
@@ -162,10 +119,10 @@ int rt_game_dir_version(const char *game_dir) {
 }
 
 bool rt_version_game_lib(int v, char *out, size_t n) {
-    if (v != 160 && v != 182) return false;
+    if (v != 143) return false;
 #ifdef __ANDROID__
     const char *in = SDL_GetAndroidInternalStoragePath();
-    return in && (size_t)snprintf(out, n, "%s/v%d/%s", in, v, GAMELIB_NAME) < n;
+    return in && (size_t)snprintf(out, n, "%s/res/%s", in, GAMELIB_NAME) < n;
 #else
     char r[1024];
     return rt_version_root(v, r, sizeof r) && (size_t)snprintf(out, n, "%s" SEP "extracted" SEP "%s", r, GAMELIB_NAME) < n;
@@ -194,40 +151,27 @@ void rt_paths_init(void) {
         // (the AppImage is read-only): $XDG_DATA_HOME/botwrecompandroid, ~/.local/share/botwrecompandroid by default
         const char *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
         if (xdg && *xdg == '/') snprintf(root, sizeof root, "%s/botwrecompandroid", xdg);
-        else snprintf(root, sizeof root, "%s/.local/share/botwrecompandroid", home && *home ? home : "/tmp");
+        else snprintf(root, sizeof root, "%s/.local/share/botwrecompandroid", home && *home ? home : g_start);
 #else
         const char *home = getenv("HOME");
-        snprintf(root, sizeof root, "%s/Library/Application Support/" RT_BUNDLE_ID, home && *home ? home : "/tmp");
+        snprintf(root, sizeof root, "%s/Library/Application Support/" RT_BUNDLE_ID, home && *home ? home : g_start);
 #endif
-    }
-    if (!(env && *env)) {  // the game version the start screen chose: 1.6.0 / 1.8.2 in their own folder
-        int v = selected_version(root);
-        size_t l = strlen(root);
-        if (v != 100) snprintf(root + l, sizeof root - l, SEP "v%d", v);
     }
     mkdirs(root);
     char msg[1400];
     if (!is_dir(root) || !writable(root) || chdir(root) != 0) {
 #ifdef _WIN32
-        snprintf(msg, sizeof msg, "BOTWRecompAndroid can't write to its folder:\n%s\n\nIt keeps game files, saves and settings "
-                 "next to the program. Move the \"BOTWRecompAndroid\" folder somewhere you can write to (e.g. Documents or "
+        snprintf(msg, sizeof msg, "TOTKRecompAndroid can't write to its folder:\n%s\n\nIt keeps game files, saves and settings "
+                 "next to the program. Move the \"TOTKRecompAndroid\" folder somewhere you can write to (e.g. Documents or "
                  "Desktop, not Program Files) and start it again.", root);
 #else
-        snprintf(msg, sizeof msg, "BOTWRecompAndroid can't write to its data folder:\n%s", root);
+        snprintf(msg, sizeof msg, "TOTKRecompAndroid can't write to its data folder:\n%s", root);
 #endif
         fail(msg);
     }
     if (!getcwd(g_root, sizeof g_root)) snprintf(g_root, sizeof g_root, "%s", root);
-    // a version's own folder by its name (v160 / v182, chosen or LARECOMP_DATA_ROOT's), in 1.0.0's root
-    const char *base = strrchr(g_root, '/'), *bs = strrchr(g_root, '\\');
-    if (bs > base) base = bs;
     snprintf(g_main, sizeof g_main, "%s", g_root);
-    g_version = 100;
-    if (base && (!strcmp(base + 1, "v160") || !strcmp(base + 1, "v182"))) {
-        g_version = atoi(base + 2);
-        snprintf(g_main, sizeof g_main, "%.*s", (int)(base - g_root), g_root);
-        version_seed();
-    }
+    g_version = 143;
     // (tests: screenshots and debug frames go to build/, which a new data root doesn't have yet)
     if (getenv("LARECOMP_DEBUG_FRAME") || getenv("LARECOMP_SHOT_AT") || getenv("LARECOMP_SCREENSHOT_EVERY") ||
         getenv("LARECOMP_SAVE_MSL") || getenv("LARECOMP_LAUNCHER_SHOT"))

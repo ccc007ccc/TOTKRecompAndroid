@@ -110,7 +110,7 @@ static uint32_t device_integer_v55(uint32_t which) {
 
 NVN(nvnDeviceGetInteger) {
     uint32_t which = (uint32_t)A(1);
-    uint32_t v = g_game_version == 182 ? device_integer_v55(which) : device_integer(which);
+    uint32_t v = device_integer_v55(which);
     if (g_game_version == 160 && which <= 1) v = which ? 311 : 53;  // (v1.6.0 needs NVN 53.x, minor >= 311: its SDK 7.3.2)
     *(int32_t *)AP(2) = (int32_t)v;
 }
@@ -461,7 +461,14 @@ NVN(nvnTextureBuilderSetDepthStencilMode) { TB(uint32_t, 0x2C) = (uint32_t)A(1);
 NVN(nvnTextureBuilderSetStride) { TB(uint64_t, 0x30) = A(1); }
 NVN(nvnTextureBuilderSetStorage) { TB(uint64_t, 0x38) = A(1); TB(uint64_t, 0x40) = A(2); }
 NVN(nvnTextureBuilderSetPackagedTextureData) { TB(uint64_t, 0x48) = A(1); }
-NVN(nvnTextureBuilderSetPackagedTextureLayout) { TB(uint64_t, 0x50) = A(1) ? *(uint64_t *)AP(1) : 0; }
+NVN(nvnTextureBuilderSetPackagedTextureLayout) {
+    // Three low nibbles are height/depth/width. The upper bits and second word are not layout flags.
+    // Encode presence separately: an explicit all-zero layout is not the driver's default layout.
+    uint32_t layout = A(1) ? *(const uint32_t *)AP(1) & 0xfff : 0;
+    if ((layout & 15) > 5 || ((layout >> 4) & 15) > 5 || (layout >> 8))
+        FATAL("unsupported packaged texture layout %#x\n", layout);
+    TB(uint64_t, 0x50) = A(1) ? (uint64_t)layout + 1 : 0;
+}
 NVN(nvnTextureBuilderSetGLTextureName) { TB(uint32_t, 0x58) = (uint32_t)A(1); }
 NVN(nvnTextureBuilderGetDevice) { RET(TB(uint64_t, 0)); }
 NVN(nvnTextureBuilderGetFlags) { RET(TB(uint32_t, 8)); }
@@ -480,7 +487,11 @@ NVN(nvnTextureBuilderGetStride) { RET(TB(uint64_t, 0x30)); }
 NVN(nvnTextureBuilderGetMemoryPool) { RET(TB(uint64_t, 0x38)); }
 NVN(nvnTextureBuilderGetMemoryOffset) { RET(TB(uint64_t, 0x40)); }
 NVN(nvnTextureBuilderGetPackagedTextureData) { RET(TB(uint64_t, 0x48)); }
-NVN(nvnTextureBuilderGetPackagedTextureLayout) { RET(0); }
+NVN(nvnTextureBuilderGetPackagedTextureLayout) {
+    uint64_t encoded = TB(uint64_t, 0x50);
+    if (A(1)) *(uint32_t *)AP(1) = encoded ? (uint32_t)encoded - 1 : 0;
+    RET(encoded != 0);
+}
 NVN(nvnTextureBuilderGetGLTextureName) { RET(TB(uint32_t, 0x58)); }
 NVN(nvnTextureBuilderGetSparseTileLayout) { RET(0); }
 NVN(nvnTextureBuilderGetZCullStorageSize) { RET(0); }
@@ -513,13 +524,17 @@ static void builder_layout(uint64_t b, TexLayout *t) {
                                (unsigned long long)G(uint64_t, b, 0x50));
         }
     }
-    // Packaged textures (BNTX) were swizzled offline with their own block height, which can differ
-    // from the driver default: NVNpackagedTextureLayout's low word is log2(GOBs per block).
+    // BNTX supplies both block height and block depth, including explicit zero values.
     uint64_t pl = G(uint64_t, b, 0x50);
-    if (pl && (uint32_t)pl <= 5) t->block_height_log2 = (uint32_t)pl;
+    if (pl) {
+        uint32_t layout = (uint32_t)pl - 1;
+        t->block_height_log2 = layout & 15;
+        t->block_depth_log2 = (layout >> 4) & 15;
+    }
     if (pl && getenv("LARECOMP_LOG_PACKAGED")) {
         static int n;
-        if (n++ < 4000) LOG("[nvn] packaged layout %016llx fmt %#x %ux%u lv %u -> default bh %u\n", pl, G(uint32_t, b, 0x20), t->width, t->height, t->levels, t->block_height_log2);
+        if (n++ < 4000) LOG("[nvn] packaged layout %#x fmt %#x %ux%ux%u lv %u -> bh %u bd %u\n", (uint32_t)pl - 1,
+                           G(uint32_t, b, 0x20), t->width, t->height, t->depth, t->levels, t->block_height_log2, t->block_depth_log2);
     }
 }
 
@@ -741,6 +756,14 @@ void nvn_log_textures_over(uint64_t lo, uint64_t hi) {
     if (!n) LOG("[nvn]   no texture over %llx-%llx\n", (unsigned long long)lo, (unsigned long long)hi);
     pthread_mutex_unlock(&g_live_lock);
 }
+void nvn_texture_cpu_written(uint64_t addr, uint64_t size) {
+    if (!size || addr > UINT64_MAX - size) return;
+    pthread_mutex_lock(&g_live_lock);
+    for (NvnTexture *t = g_all_tex; t; t = t->next)
+        if (t->addr && t->addr < addr + size && addr < t->addr + tegra_total_size(&t->layout))
+            __atomic_add_fetch(&t->cpu_write_epoch, 1, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&g_live_lock);
+}
 
 // LARECOMP_WATCH_TEXADDR=<hex>: every texture created over that storage address, and its use as a render target or
 // a copy's ends (vulkan/exec.c) - who writes memory that a texture object reads (aliasing between descriptions)
@@ -831,6 +854,7 @@ NVN(nvnTextureInitialize) {
     G(uint32_t, A(0), 8) = OBJ_TAG;
     memcpy(AP(0) + 12, swizzle, 4);
     G(uint64_t, A(0), 16) = debug_id;
+    G(uint64_t, A(0), 24) = G(uint64_t, A(1), 0x38);  // preserve this object's pool, even when its image is shared
     RET(1);
 }
 NVN(nvnTextureFinalize) {
@@ -869,11 +893,25 @@ NVN(nvnTextureGetSwizzle) {
 NVN(nvnTextureGetDepthStencilMode) { RET(TEX->ds_mode); }
 NVN(nvnTextureGetStride) { RET(TEX->stride); }
 NVN(nvnTextureGetTextureAddress) { RET(TEX->addr); }
-NVN(nvnTextureGetMemoryPool) { RET(0); }
+NVN(nvnTextureGetMemoryPool) { RET(G(uint64_t, A(0), 24)); }
 NVN(nvnTextureGetMemoryOffset) { RET(TEX->pool_offset); }
 NVN(nvnTextureGetStorageSize) { RET(tegra_total_size(&TEX->layout)); }
 NVN(nvnTextureGetDebugID) { RET(obj_debug_id(A(0))); }
-NVN(nvnTextureGetViewOffset) { RET(0); }
+NVN(nvnTextureGetViewOffset) {
+    NvnTexture *t = TEX;
+    const NvnTextureView *v = A(1) ? AP(1) : NULL;
+    uint32_t level = v && (v->setmask & 1) ? v->base_level : 0;
+    uint32_t layer = v && (v->setmask & 2) ? v->min_layer : 0;
+    if (level >= t->layout.levels || layer >= t->layout.layers)
+        FATAL("texture view offset outside storage: mip %u layer %u\n", level, layer);
+    uint64_t offset = tegra_layer_size(&t->layout) * layer + tegra_level(&t->layout, level).offset;
+    if (getenv("LARECOMP_LOG_TEXOFFSET")) {
+        static int n;
+        if (n++ < 80) LOG("[nvn] texture view offset %ux%u f%#x mip %u layer %u -> %#llx\n",
+                         t->width, t->height, t->format, level, layer, (unsigned long long)offset);
+    }
+    RET(offset);
+}
 NVN(nvnTextureGetStorageClass) { RET(0); }
 NVN(nvnTextureGetRawStorageClass) { RET(0); }
 NVN(nvnTextureGetSparseTileLayout) { RET(0); }
@@ -883,7 +921,7 @@ NVN(nvnTextureCompare) {  // (each object's own description: two of another swiz
     NvnTexture *t0 = HOST(NvnTexture, A(0)), *t1 = HOST(NvnTexture, A(1));
     RET(s0 && s1 ? texture_same_storage(t0, t1) && !memcmp(s0, s1, 4) : texture_same_desc(t0, t1));
 }
-NVN(nvnTextureFlushTexels) { (void)c; }
+NVN(nvnTextureFlushTexels) { backend_pool_written(TEX->addr, tegra_total_size(&TEX->layout)); }
 NVN(nvnTextureInvalidateTexels) { (void)c; }
 
 // Texture views: an NvnTextureView (nvn.h) packed into the guest's 16-byte NVNtextureView. Clearing NVN 53's 0x28
@@ -908,20 +946,30 @@ NVN(nvnTextureViewGetTarget) { *(uint32_t *)AP(1) = TV->target; RET(!!(TV->setma
 NVN(nvnTextureViewCompare) { RET(memcmp(AP(0), AP(1), sizeof(NvnTextureView)) == 0); }
 // (From SavageWindRecomp, MIT; a smaller layout fits the older NVN versions too.)
 
-NVN(nvnTextureWriteTexels) {
-    // (texture, view, region, data) -- linear data into block-linear storage
+static void texture_write(Cpu *c, uint64_t row_stride, uint64_t image_stride) {
     NvnTexture *t = HOST(NvnTexture, A(0));
-    const int32_t *r = AP(2);  // xoffset, yoffset, zoffset, width, height, depth
-    LevelLayout l = tegra_level(&t->layout, 0);
-    if (r && r[0] == 0 && r[1] == 0 && (uint32_t)r[3] == t->width && (uint32_t)r[4] == t->height) {
-        tegra_swizzle(AP(3), (uint8_t *)(uintptr_t)t->addr + l.offset, l.wb, l.hb, r[5] > 0 ? (uint32_t)r[5] : 1,
-                      t->layout.fmt->bpb, l.block_height_log2, l.block_depth_log2);
-        backend_pool_written(t->addr, tegra_total_size(&t->layout));
-    } else {
-        LOG("[nvn] partial WriteTexels not implemented\n");
+    const NvnTextureView *v = A(1) ? AP(1) : NULL;
+    const int32_t *r = AP(2);
+    uint32_t level = v && (v->setmask & 1) ? v->base_level : 0;
+    uint32_t layer = v && (v->setmask & 2) ? v->min_layer : 0;
+    uint64_t stride = (t->flags & 0x10) ? t->stride : 0;
+    int32_t array_region[6];
+    if (t->target == 3 && r) {  // 1D arrays address layers through y/height, not z/depth.
+        if (r[2] || r[5] != 1 || t->layout.fmt->bh != 1) FATAL("invalid 1D-array WriteTexels region\n");
+        memcpy(array_region, r, sizeof array_region);
+        array_region[1] = 0; array_region[4] = 1; array_region[2] = r[1]; array_region[5] = r[4];
+        image_stride = row_stride ? row_stride : (uint64_t)((r[3] + t->layout.fmt->bw - 1) / t->layout.fmt->bw) * t->layout.fmt->bpb;
+        r = array_region;
     }
+    if (!tegra_write_region(&t->layout, level, layer, r, (uint8_t *)(uintptr_t)t->addr, stride, AP(3), row_stride, image_stride))
+        FATAL("invalid WriteTexels region at mip %u layer %u\n", level, layer);
+    backend_pool_written(t->addr, tegra_total_size(&t->layout));
+    static int n;
+    if (n++ < 16) LOG("[nvn] WriteTexels %ux%u f%#x mip %u layer %u region %d,%d,%d %dx%dx%d\n",
+                     t->width, t->height, t->format, level, layer, r[0], r[1], r[2], r[3], r[4], r[5]);
 }
-NVN(nvnTextureWriteTexelsStrided) { LOG("[nvn] WriteTexelsStrided not implemented\n"); (void)c; }
+NVN(nvnTextureWriteTexels) { texture_write(c, 0, 0); }
+NVN(nvnTextureWriteTexelsStrided) { texture_write(c, A(4), A(5)); }
 NVN(nvnTextureReadTexels) { LOG("[nvn] ReadTexels not implemented\n"); (void)c; }
 NVN(nvnTextureReadTexelsStrided) { LOG("[nvn] ReadTexelsStrided not implemented\n"); (void)c; }
 
@@ -1214,6 +1262,7 @@ NVN(nvnProgramFinalize) { free(HOST(NvnProgram, A(0))); SET_HOST(A(0), 0); }
 NVN(nvnProgramSetDebugLabel) { (void)c; }
 NVN(nvnProgramSetSampleShading) { (void)c; }
 NVN(nvnProgramSetSubroutineLinkage) { RET(1); }
+#include "shader_control.h"
 static void set_shaders(Cpu *c, int stride) {
     NvnProgram *p = HOST(NvnProgram, A(0));
     int n = (int)A(1);
@@ -1224,23 +1273,25 @@ static void set_shaders(Cpu *c, int stride) {
     for (int i = 0; i < n; i++) {
         uint64_t code = *(uint64_t *)(data + i * stride);
         const uint8_t *control = (const uint8_t *)(uintptr_t) * (uint64_t *)(data + i * stride + 8);
-        // stage from the Maxwell shader program header (after the 0x30-byte NVN header)
-        uint32_t sph0 = *(uint32_t *)(uintptr_t)(code + 0x30);
-        uint32_t stage;
-        switch ((sph0 >> 10) & 0xF) {
-        case 1: stage = 0; break;  // vertex
-        case 5: stage = 1; break;  // fragment
-        case 4: stage = 2; break;  // geometry
-        case 2: stage = 3; break;  // tess control
-        case 3: stage = 4; break;  // tess eval
-        default: stage = 5; break; // compute (no SPH)
+        NvnShaderControl info;
+        if (!nvn_shader_control(control, 0x880, &info) || code < GUEST_LO || code >= GUEST_HI ||
+            info.size > GUEST_HI - code ||
+            nvn_control_word((const uint8_t *)(uintptr_t)code, 0) != (info.stage == 5 ? 0x12345679u : 0x12345678u)) {
+            LOG("[nvn] invalid shader control/code for program %llx slot %d\n", (unsigned long long)A(0), i);
+            memset(p->stages, 0, sizeof p->stages); p->stage_mask = 0; RET(0); return;
         }
-        if (*(uint32_t *)(uintptr_t)code != 0x12345678) stage = 5;
+        uint32_t stage = info.stage;
+        if (stage != 5) {
+            static const uint8_t sph_stage[] = {1, 5, 4, 2, 3};
+            uint32_t sph0 = nvn_control_word((const uint8_t *)(uintptr_t)code, info.entry);
+            if (((sph0 >> 10) & 15) != sph_stage[stage]) { RET(0); return; }
+        }
         p->stages[stage].stage = stage;
+        p->stages[stage].entry_offset = info.entry;
         p->stages[stage].code_addr = code;
         p->stages[stage].control = control;
-        p->stages[stage].const_offset = *(const uint32_t *)(control + 0x700);
-        p->stages[stage].const_size = *(const uint32_t *)(control + 0x6FC);
+        p->stages[stage].const_offset = info.constants;
+        p->stages[stage].const_size = info.size - info.constants;
         p->stage_mask |= 1u << stage;
     }
     RET(1);

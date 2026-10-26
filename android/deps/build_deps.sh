@@ -18,9 +18,9 @@ mkdir -p "$S" "$P/include" "$P/lib" "$W"
 SDK=${ANDROID_HOME:-${LOCALAPPDATA:-$HOME}/Android/Sdk}
 SDK=${SDK//\\//}
 NDK=${ANDROID_NDK:-$SDK/ndk/30.0.16248370}
-CMAKE_DIR=$SDK/cmake/3.30.4/bin
+CMAKE_DIR=${CMAKE_DIR:-$SDK/cmake/4.1.2/bin}
 API=30
-JOBS=$(nproc 2>/dev/null || echo 8)
+JOBS=${JOBS:-$(nproc 2>/dev/null || echo 8)}
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) EXE=.exe ;; *) EXE= ;; esac
 CMAKE=$CMAKE_DIR/cmake$EXE
 ANDROID_CMAKE=(-G Ninja -DCMAKE_MAKE_PROGRAM="$CMAKE_DIR/ninja$EXE" -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake"

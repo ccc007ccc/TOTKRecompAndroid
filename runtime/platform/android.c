@@ -1,7 +1,7 @@
 // Android host layer (runtime/platform.h), arm64. Based on linux.c; what differs:
 // - the guest window goes wherever the app process has room (android/common/guest_window.h) instead of a fixed
 //   address: an app process is forked from the zygote, with its libraries already mapped, and can't re-exec itself;
-// - stdout / stderr go to logcat (tag BOTWRecompAndroid);
+// - stdout / stderr go to logcat (tag TOTKRecompAndroid);
 // - no execinfo: backtraces through the unwinder; no re-exec.
 #define _GNU_SOURCE
 #include <SDL3/SDL.h>
@@ -34,7 +34,7 @@
 uint64_t g_guest_lo;  // the window's start (rt.h GUEST_LO), set by plat_reserve_guest before main()
 
 // ---- the log in a file as well (Settings > Prelaunch > Driver compatibility, to send with a report; from
-// LASRecompAndroid): botwrecomp-log.txt in the folder the player picked (BOTWRecompAndroidActivity.openLog, the run
+// LASRecompAndroid): botwrecomp-log.txt in the folder the player picked (TOTKRecompAndroidActivity.openLog, the run
 // before's kept beside it), else <data root>/botwrecomp.log (Android lets only adb read there). The first lines (before
 // the setting is read, or a later switch on) wait in a buffer, so the file starts with the driver's and the GPU's lines.
 static pthread_mutex_t g_logf_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -65,7 +65,7 @@ static void log_file_line(const char *line) {
     pthread_mutex_unlock(&g_logf_lock);
 }
 
-static int picked_folder_log(bool first) {  // BOTWRecompAndroidActivity.openLog: a descriptor, -1 without a usable folder
+static int picked_folder_log(bool first) {  // TOTKRecompAndroidActivity.openLog: a descriptor, -1 without a usable folder
     JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
     jobject act = (jobject)SDL_GetAndroidActivity();
     if (!env || !act) return -1;
@@ -123,7 +123,7 @@ void android_log_file(bool on) {
 }
 
 static void log_line(const char *line) {
-    __android_log_write(ANDROID_LOG_INFO, "BOTWRecompAndroid", line);
+    __android_log_write(ANDROID_LOG_INFO, "TOTKRecompAndroid", line);
     log_file_line(line);
 }
 
@@ -361,7 +361,7 @@ const char *plat_symbol(uint64_t pc, uint64_t *offset) {
     return di.dli_sname;
 }
 
-// A graphics driver the game can't run on: BOTWRecompAndroidActivity.driverErrorDialog offers to install another one
+// A graphics driver the game can't run on: TOTKRecompAndroidActivity.driverErrorDialog offers to install another one
 // (or go back to the system's) and starts the app again - the Settings rows that choose the driver are out of reach
 // when it fails before the start screen (LAS Recomp for Android 1c05238, from LASRecomp-Android-Plus, MIT). False: no
 // dialog shown.
@@ -384,11 +384,11 @@ static bool driver_error_dialog(const char *text) {
 void plat_fatal_notice(void) {
     fflush(stderr);
     char message[1400];
-    snprintf(message, sizeof message, "BOTWRecompAndroid stopped because of an error.\n\n%s\n\n"
+    snprintf(message, sizeof message, "TOTKRecompAndroid stopped because of an error.\n\n%s\n\n"
              "Please include a screenshot of this message and your app/driver version in your bug report.\n"
-             "More details: logcat, tag BOTWRecompAndroid.", fatal_message[0] ? fatal_message : "The runtime encountered a fatal error.");
+             "More details: logcat, tag TOTKRecompAndroid.", fatal_message[0] ? fatal_message : "The runtime encountered a fatal error.");
     if (strcasestr(fatal_message, "vulkan") && driver_error_dialog(message)) return;  // (the driver's own errors)
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "BOTWRecompAndroid", message, NULL);
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "TOTKRecompAndroid", message, NULL);
 }
 
 const char *rt_host_fn_name(uint64_t pc, uint64_t *offset);  // runtime/dispatch.c
@@ -505,7 +505,7 @@ void plat_terminate(void) { _exit(0); }
 #include <jni.h>
 #include <stdatomic.h>
 
-// What the activity reports once a second (BOTWRecompAndroidActivity.reportDeviceStats: public Android APIs; apps can't read
+// What the activity reports once a second (TOTKRecompAndroidActivity.reportDeviceStats: public Android APIs; apps can't read
 // the battery or most thermal sensors in /sys).
 static pthread_mutex_t g_ds_lock = PTHREAD_MUTEX_INITIALIZER;
 static PlatDeviceStats g_ds = {.batt_temp_c = -1, .batt_pct = -1, .thermal = -1, .headroom = -1};

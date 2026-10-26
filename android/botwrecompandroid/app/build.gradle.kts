@@ -8,9 +8,9 @@ plugins {
 val repo: File = rootDir.resolve("../..").canonicalFile
 val deps: File = repo.resolve("android/deps/out")  // android/deps/build_deps.sh
 val gen = layout.buildDirectory.dir("generated/botwrecompandroid")
-// The release key: outside the repository, in ~/.botwrecompandroid/keystore.properties (storeFile, storePassword, keyAlias,
+// The release key: outside the repository, in ~/.totkrecompandroid/keystore.properties (storeFile, storePassword, keyAlias,
 // keyPassword); without it, release builds are signed with the debug key
-val releaseKey: File = File(System.getProperty("user.home"), ".botwrecompandroid/keystore.properties")
+val releaseKey: File = File(System.getProperty("user.home"), ".totkrecompandroid/keystore.properties")
 
 android {
     namespace = "com.botwrecompandroid"
@@ -18,11 +18,11 @@ android {
     ndkVersion = "30.0.16248370"
 
     defaultConfig {
-        applicationId = "com.botwrecomp.android"
+        applicationId = "com.totkrecomp.android"
         minSdk = 30
         targetSdk = 36
         versionCode = 12
-        versionName = "0.1.10-beta"
+        versionName = "0.1.0-totk-dev"
         ndk {
             abiFilters += "arm64-v8a"
         }
@@ -36,7 +36,7 @@ android {
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.30.4"
+            version = "4.1.2"
         }
     }
 
@@ -99,7 +99,7 @@ val prepareBotwRecompAndroid by tasks.registering {
     if (deps.resolve("gen").exists()) inputs.dir(deps.resolve("gen"))  // (the game code's builder, below)
     inputs.files(listOf("tools/gen.py", "tools/lifter.py", "tools/analyze.py", "tools/nso.py", "tools/passes.py", "tools/patches.py",
                         "tools/simd_c.py", "tools/gamelib_entry.c", "runtime/cpu.h",
-                        "runtime/simd.h", "runtime/simd_fp.h", "runtime/gamelib.h", "runtime/hle/hle_symbols.txt").map { repo.resolve(it) })
+                        "runtime/simd.h", "runtime/simd_fp.h", "runtime/gamelib.h", "runtime/game_profile.h", "runtime/hle/hle_symbols.txt").map { repo.resolve(it) })
     val hotLists = repo.resolve("tools").listFiles { f -> f.name.matches(Regex("hot_functions_\\d+\\.txt")) }?.toList() ?: listOf()
     inputs.files(hotLists)
     outputs.dir(gen)
@@ -135,7 +135,7 @@ val prepareBotwRecompAndroid by tasks.registering {
             g.resolve("zig/lib").copyRecursively(a.resolve("zig/lib"), overwrite = true)
             for (n in listOf("gen.py", "lifter.py", "analyze.py", "nso.py", "passes.py", "patches.py", "simd_c.py"))
                 repo.resolve("tools/$n").copyTo(a.resolve("tools/$n"), overwrite = true)
-            for (n in listOf("cpu.h", "simd.h", "simd_fp.h", "gamelib.h"))
+            for (n in listOf("cpu.h", "simd.h", "simd_fp.h", "gamelib.h", "game_profile.h"))
                 repo.resolve("runtime/$n").copyTo(a.resolve("gamelib-src/$n"), overwrite = true)
             repo.resolve("tools/gamelib_entry.c").copyTo(a.resolve("gamelib-src/gamelib_entry.c"), overwrite = true)
             repo.resolve("runtime/hle/hle_symbols.txt").copyTo(a.resolve("gamelib-src/hle_symbols.txt"), overwrite = true)

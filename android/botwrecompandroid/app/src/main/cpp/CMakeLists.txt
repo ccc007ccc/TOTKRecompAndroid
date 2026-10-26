@@ -1,5 +1,5 @@
-# libmain.so: the BOTWRecompAndroid runtime for Android, with the
-# Vulkan backend and the ImGui UI. The game code is not in it: botwgame.so, generated with gen.py --dyn-base and built
+# libmain.so: the TOTKRecompAndroid runtime for Android, with the
+# Vulkan backend and the ImGui UI. The game code is not in it: totkgame.so, generated with gen.py --dyn-base and built
 # from the player's own game files, is loaded at run time (docs/las/ANDROID-PORT.md).
 cmake_minimum_required(VERSION 3.22)
 project(botwrecompandroid C CXX)
@@ -14,7 +14,7 @@ if(NOT BOTW_GEN_DIR)
     message(FATAL_ERROR "BOTW_GEN_DIR (the Gradle build's generated files: smaa_hlsl.inc) is not set")
 endif()
 
-include(${R}/android/gamelib_id.cmake)  # (GAMELIB_ID: the same as botwgame.so's, android/gamelib)
+include(${R}/android/gamelib_id.cmake)  # (GAMELIB_ID: the same as totkgame.so's, android/gamelib)
 message(STATUS "GAMELIB_ID ${GAMELIB_ID}")
 
 add_subdirectory(${R}/third_party/libadrenotools ${CMAKE_BINARY_DIR}/adrenotools)

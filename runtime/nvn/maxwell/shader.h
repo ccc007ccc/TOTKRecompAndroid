@@ -49,6 +49,7 @@ typedef struct {
     uint32_t vs_out_mask;   // fragment: varyings the vertex shader provides
     uint8_t glsl;           // emit Vulkan GLSL (see the contract above) instead of MSL
     bool gmem_linear_lookup;  // Qualcomm compute: cached linear GMap lookup avoids its compiler's binary-search failure
+    uint8_t gather_bias_bits; // 0: native gather; otherwise compensate host subtexel truncation (half a subtexel)
 } ShaderKey;
 
 typedef struct {
@@ -118,6 +119,10 @@ extern bool maxwell_structured;
 extern bool maxwell_no_switch;
 // (maxwell_structured) a shader with local memory keeps its state machine (Qualcomm's compiler crashed on one)
 extern bool maxwell_no_local_struct;
+// Qualcomm's compiler can lose register values across a switch case fallthrough
+// in a linked graphics pipeline. Dispatch the next block explicitly in GLSL's
+// fallback state machine; structured control flow and MSL are unaffected.
+extern bool maxwell_explicit_fallthrough;
 // (GLSL) fragment and compute shaders convert halves with unpackHalf2x16 instead of the bitwise h2f (vertex shaders
 // keep it: NVIDIA ran math after unpacked halves in fp16, and depth passes disagreed). Set by the Android backend.
 extern bool maxwell_native_half;

@@ -9,8 +9,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 P=$PWD/out
-NDK=${ANDROID_NDK_LINUX:-$HOME/android-ndk-r30}
-W=$HOME/botwrecompandroid-ffmpeg
+NDK=${ANDROID_NDK_LINUX:-${ANDROID_NDK:-/home/deck/Code/Toolchains/android-ndk-r30}}
+W=${FFMPEG_WORK:-$PWD/../../.work/totk-port/ffmpeg}
 API=30
 mkdir -p "$W" "$P/include" "$P/lib"
 
@@ -55,7 +55,7 @@ cd "$W/ffmpeg"
 # unversioned shared library names (Android loads what the APK ships by exact file name)
 sed -i -e 's/^SLIBNAME_WITH_MAJOR=.*/SLIBNAME_WITH_MAJOR=$(SLIBNAME)/' -e 's/^SLIBNAME_WITH_VERSION=.*/SLIBNAME_WITH_VERSION=$(SLIBNAME)/' \
        -e 's/^SLIB_INSTALL_NAME=.*/SLIB_INSTALL_NAME=$(SLIBNAME)/' -e 's/^SLIB_INSTALL_LINKS=.*/SLIB_INSTALL_LINKS=/' ffbuild/config.mak
-make -j"$(nproc)"
+make -j"${JOBS:-6}"
 make install
 
 for l in avcodec avformat avutil swscale; do cp "$W/prefix/lib/lib$l.so" "$P/lib/"; done

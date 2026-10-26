@@ -54,7 +54,7 @@ static bool copy_to(const char *from, const char *to) {
 }
 
 // A 1.6.0 / 1.8.2 library in that version's extracted/ (put there over adb: android/push_game.sh) newer than the one in
-// internal storage, or another size, is copied in with its id - as BOTWRecompAndroidActivity does 1.0.0's. Once per
+// internal storage, or another size, is copied in with its id - as TOTKRecompAndroidActivity does 1.0.0's. Once per
 // process: a copy that fails isn't tried again every frame.
 static void sync_from_game_dir(const char *game_dir, const char *lib) {
     char src[1100], dir[1100];
@@ -91,7 +91,7 @@ static int candidates(const char *game_dir, char out[3][1100]) {
 #ifdef __ANDROID__
     {   // 1.0.0's next to "the executable" (the activity copies it there at start; one set up just now, here)
         char exe[1024];
-        if (game_dir && rt_game_dir_version(game_dir) == 100 && plat_exe_path(exe, sizeof exe) && strrchr(exe, '/')) {
+        if (game_dir && rt_game_dir_version(game_dir) == 143 && plat_exe_path(exe, sizeof exe) && strrchr(exe, '/')) {
             *strrchr(exe, '/') = 0;
             snprintf(own, sizeof own, "%s/%s", exe, GAMELIB_NAME);
             sync_from_game_dir(game_dir, own);
@@ -131,8 +131,8 @@ static const GameLibTables *open_lib(const char *path) {
         return NULL;  // (left loaded: nothing of it runs)
     }
 #ifdef __ANDROID__
-    // its addresses follow the guest window wherever it is (gen.py --dyn-base: botwgame_gb)
-    void (*set_base)(uint64_t) = (void (*)(uint64_t))dlsym(h, "botwgame_set_guest_base");
+    // its addresses follow the guest window wherever it is (gen.py --dyn-base: totkgame_gb)
+    void (*set_base)(uint64_t) = (void (*)(uint64_t))dlsym(h, "totkgame_set_guest_base");
     if (!set_base) {
         snprintf(g_error, sizeof g_error, "%s: not built for Android (gen.py --dyn-base)", path);
         return NULL;
@@ -158,8 +158,9 @@ bool gamelib_load(const char *game_dir, char *why, size_t why_size) {
                 continue;
             }
             g_tables = open_lib(c[i]);
-            if (g_tables) LOG("[gamelib] %s (%llu + %llu functions)\n", c[i], (unsigned long long)*g_tables->main_count,
-                              (unsigned long long)*g_tables->sdk_count);
+            if (g_tables) LOG("[gamelib] %s (main %llu, sdk %llu, subsdk0 %llu, rtld %llu functions)\n", c[i],
+                              (unsigned long long)*g_tables->main_count, (unsigned long long)*g_tables->sdk_count,
+                              (unsigned long long)*g_tables->subsdk0_count, (unsigned long long)*g_tables->rtld_count);
         }
     }
     if (!g_tables && why) snprintf(why, why_size, "%s", g_error);

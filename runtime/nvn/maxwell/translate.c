@@ -33,6 +33,7 @@ bool maxwell_static_stacks;
 bool maxwell_structured;
 bool maxwell_no_switch;
 bool maxwell_no_local_struct;
+bool maxwell_explicit_fallthrough;
 bool maxwell_native_half;
 bool maxwell_fast_minmax;
 const uint8_t *maxwell_dbg_code;
@@ -671,6 +672,15 @@ static void glsl_gather(Ctx *c, char *out, int slot, const char *const *co, cons
     } else {
         snprintf(xs, sizeof xs, "vec3(%s, %s, %s)", co[0], co[1], co[2]);
     }
+    // Maxwell rounds at the gather footprint boundary. Some hosts truncate there, selecting the neighboring
+    // 2x2 block. Use the physical mip-0 size: this correction is in host subtexels, even for scaled targets.
+    // Array layer and comparison reference must stay unchanged. Cube directions are not normalized 2D UVs.
+    if (!cube && c->key->gather_bias_bits && c->key->gather_bias_bits <= 23) {
+        char uv[1600];
+        memcpy(uv, xs, sizeof uv);
+        snprintf(xs, sizeof xs, "(%s + vec2(%.9gf) / vec2(textureSize(t%d, 0).xy))",
+                 uv, ldexpf(1.0f, -(int)c->key->gather_bias_bits - 1), slot);
+    }
     if (layer) snprintf(P, sizeof P, "vec%d(%s, float(%s))", n + 1, xs, layer);
     else snprintf(P, sizeof P, "%s", xs);
     if (t->shadow) snprintf(out, 2000, "textureGather(t%d, %s, %s)", slot, P, dref ? dref : "0.0f");
@@ -1137,6 +1147,44 @@ static void emit_tmml(Ctx *c, uint64_t w, bool bindless, uint32_t pc) {
 }
 
 // ------------------------------------------------------------------ instruction translation
+// Shared address formation for LDG/STG and RED. Keep both words until the heap bounds check.
+static void global_address(Ctx *c, int a, bool wide, int64_t off) {
+    c->info->uses_gmem = true;
+    if (c->glsl && maxwell_no_int64) {
+        if (maxwell_gmem_size > 0x100000000ull) fail(c, "32-bit shader heap exceeds 4 GiB");
+        sp(&c->body, "    { uint ac; uint al = uaddCarry(%s, 0x%08xu, ac); uint ah = %s + 0x%08xu + ac; "
+            "uint ga = al - 0x%08xu; uint gh = ah - 0x%08xu - uint(al < 0x%08xu); bool ok = gh == 0u",
+            a == RZ ? "0u" : R(a), (uint32_t)off, a != RZ && wide ? R(a + 1) : "0u", off < 0 ? 0xFFFFFFFFu : 0u,
+            (uint32_t)maxwell_gmem_base, (uint32_t)(maxwell_gmem_base >> 32), (uint32_t)maxwell_gmem_base);
+        if (maxwell_gmem_size < 0x100000000ull) sp(&c->body, " && ga < 0x%08xu", (uint32_t)maxwell_gmem_size);
+        sp(&c->body, ";\n");
+    } else {
+        char addr[256];
+        if (a == RZ) sprintf(addr, "ulong(%lld)", (long long)off);
+        else if (wide) sprintf(addr, "((ulong(%s) << 32 | ulong(%s)) + ulong(%lld))", R(a + 1), R(a), (long long)off);
+        else sprintf(addr, "(ulong(%s) + ulong(%lld))", R(a), (long long)off);
+        sp(&c->body, "    { ulong ga = %s - 0x%llxul; bool ok = ga < 0x%llxul;\n", addr,
+           (unsigned long long)maxwell_gmem_base, (unsigned long long)maxwell_gmem_size);
+    }
+}
+static void video_operand(char *out, const char *reg, int width, int selector, bool sign) {
+    if (width == 3) { sprintf(out, "%s", reg); return; }
+    int bits_ = width == 2 ? 16 : 8;
+    int shift = (selector * bits_) & 31;
+    if (sign) sprintf(out, "uint(int(%s << %d) >> %d)", reg, 32 - shift - bits_, 32 - bits_);
+    else sprintf(out, "((%s >> %d) & 0x%xu)", reg, shift, bits_ == 16 ? 0xffff : 0xff);
+}
+static void reduction(Ctx *c, const char *buffer, int op, bool sign, int reg_) {
+    if (sign && (op == 1 || op == 2)) {
+        // Buffers are uint words. A CAS preserves signed min/max without changing their descriptor type.
+        sp(&c->body, "{ uint old = atomicAdd(%s, 0u); uint operand = %s; for (;;) { "
+                     "uint value = uint(%s(int(old), int(operand))); uint seen = atomicCompSwap(%s, old, value); "
+                     "if (seen == old) break; old = seen; } }\n", buffer, R(reg_), op == 1 ? "min" : "max", buffer);
+    } else {
+        static const char *const names[] = {"atomicAdd", "atomicMin", "atomicMax", NULL, NULL, "atomicAnd", "atomicOr", "atomicXor"};
+        sp(&c->body, "%s(%s, %s);\n", names[op], buffer, R(reg_));
+    }
+}
 static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     char t[2048], u[2048];
     int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8);
@@ -1226,18 +1274,28 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         for (int i = 0; i < n; i++) attr_store(c, d + i, addr + 4 * i);
     } else if (OPM(0xef90000000000000ull, 0xfff8000000000000ull)) {  // LD c[idx][reg + imm]
         int idx = (int)bits(w, 36, 5);
-        int64_t off = (int64_t)bits(w, 20, 16);  // unsigned (Ryujinx InstLdc.CbufOffset)
+        int64_t off = sbits(w, 20, 16);  // LDC adds a signed 16-bit displacement to Ra.
         int sz = (int)bits(w, 48, 3);
         int n = sz == 5 ? 2 : 1;
         char rb[16];
         const char *dyn = a == RZ ? NULL : reg(c, a, rb);
+        // LDC.64 reads both words using the pre-instruction address, even when Rd == Ra.
+        // The first destination write must not change the address of the second word.
+        bool snapshot = dyn && n > 1;
+        if (snapshot) {
+            sp(&c->body, "    { uint ldc_base = %s;\n", dyn);
+            dyn = "ldc_base";
+        }
         for (int i = 0; i < n; i++) {
             char cb[256];
-            cbuf_ref(c, idx, off + 4 * i, dyn, cb);
-            if (!dyn && (off + 4 * i) & 0) {}
+            // A negative absolute address is outside the constant buffer. Avoid
+            // emitting a negative static array index (dynamic addresses wrap at 32 bits).
+            if (!dyn && off + 4 * i < 0) strcpy(cb, "0u");
+            else cbuf_ref(c, idx, off + 4 * i, dyn, cb);
             if (dyn) c->info->cbuf_size[idx] = 0x10000;
             set_reg(c, d + i, cb);
         }
+        if (snapshot) sp(&c->body, "    }\n");
     } else if (OPM(0xd000000000000000ull, 0xf600000000000000ull)) {  // TEXS
         emit_texs(c, w, false);
     } else if (OPM(0xd200000000000000ull, 0xf600000000000000ull)) {  // TLDS
@@ -1739,32 +1797,77 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         else if (right) sprintf(t, "uint((((ulong(%s) << 32) | ulong(%s)) >> (%s & 31u)))", hi, R(a), sh);
         else sprintf(t, "uint((((ulong(%s) << 32) | ulong(%s)) << (%s & 31u)) >> 32)", hi, R(a), sh);
         set_reg(c, d, t);
+    } else if (OPM(0x1800000000000000ull, 0xfc00000000000000ull) ||
+               OPM(0x5bd8000000000000ull, 0xfff8000000000000ull)) {  // LEA.HI
+        bool cb = (w >> 58) == 6;
+        int scale = (int)bits(w, cb ? 51 : 28, 5);
+        bool neg = bits(w, cb ? 56 : 37, 1);
+        if (bits(w, cb ? 57 : 38, 1) || bits(w, 47, 1) || bits(w, 48, 3) != PT) {
+            fail(c, "lea.hi extended flags");
+        } else {
+            char base[256];
+            if (cb) cbuf_ref(c, (int)bits(w, 34, 5), bits(w, 20, 14) * 4, NULL, base);
+            else snprintf(base, sizeof base, "%s", R((int)bits(w, 20, 8)));
+            sp(&c->body, "    { uint lo = %s; uint hi = %s;\n", R(a), R((int)bits(w, 39, 8)));
+            if (neg) sp(&c->body, "      hi = ~hi + uint(lo == 0u); lo = 0u - lo;\n");
+            if (scale) sp(&c->body, "      uint shifted = (hi << %d) | (lo >> %d);\n", scale, 32 - scale);
+            else sp(&c->body, "      uint shifted = hi;\n");
+            snprintf(t, sizeof t, "(%s + shifted)", base); set_reg(c, d, t);
+            sp(&c->body, "    }\n");
+        }
+    } else if (OPM(0x3a00000000000000ull, 0xfe00000000000000ull)) {  // VMNMX
+        int op = (int)bits(w, 51, 3);
+        if (bits(w, 47, 1) || bits(w, 55, 1) || (op != 5 && op != 6)) fail(c, "vmnmx flags/op %d", op);
+        else {
+            char av[256], bv[256], imm[32];
+            bool br = bits(w, 50, 1);
+            snprintf(imm, sizeof imm, "0x%xu", (unsigned)bits(w, 20, 16));
+            video_operand(av, R(a), (int)bits(w, 37, 2), (int)bits(w, 36, 2), bits(w, 48, 1));
+            video_operand(bv, br ? R((int)bits(w, 20, 8)) : imm, br ? (int)bits(w, 29, 2) : 2,
+                          br ? (int)bits(w, 28, 2) : 0, bits(w, 49, 1));
+            const char *sign1 = bits(w, 49, 1) ? "int" : "uint", *sign2 = bits(w, 54, 1) ? "int" : "uint";
+            snprintf(t, sizeof t, "uint(%s(%s(%s), %s(%s)))", bits(w, 56, 1) ? "max" : "min", sign1, av, sign1, bv);
+            snprintf(u, sizeof u, "uint(%s(%s(%s), %s(%s)))", op == 6 ? "max" : "min", sign2, t, sign2, R((int)bits(w, 39, 8)));
+            set_reg(c, d, u);
+        }
+    } else if (OPM(0x50d8000000000000ull, 0xfff8000000000000ull)) {  // VOTE, each Maxwell warp has 32 lanes
+        int op = (int)bits(w, 48, 2), pd = (int)bits(w, 45, 3);
+        if (!c->glsl || op > 2) fail(c, "vote dialect/op %d", op);
+        else {
+            sp(&c->body, "    { uint warp = gl_SubgroupInvocationID >> 5u; uint active_mask = subgroupBallot(true)[warp]; "
+                         "uint votes = subgroupBallot(%s)[warp];\n", P((int)bits(w, 39, 3), bits(w, 42, 1)));
+            set_reg(c, d, "votes");
+            if (pd != PT) {
+                c->pred_used[pd] = 1;
+                sp(&c->body, "      p%d = %s;\n", pd, op == 0 ? "votes == active_mask" : op == 1 ? "votes != 0u" : "(votes == 0u || votes == active_mask)");
+            }
+            sp(&c->body, "    }\n");
+        }
+    } else if (OPM(0xebf8000000000000ull, 0xfff8000000000000ull)) {  // RED global U32/S32 atomic reduction
+        int size = (int)bits(w, 20, 3), op = (int)bits(w, 23, 3);
+        static const char *const ops[] = {"atomicAdd", "atomicMin", "atomicMax", NULL, NULL, "atomicAnd", "atomicOr", "atomicXor"};
+        if (!c->glsl || size > 1 || !ops[op]) fail(c, "red size/op %d/%d", size, op);
+        else {
+            global_address(c, a, bits(w, 48, 1), a == RZ ? (int64_t)bits(w, 28, 20) : sbits(w, 28, 20));
+            c->uses_gmem_store = c->info->uses_gmem_store = true;
+            if (c->stage == STAGE_COMPUTE || maxwell_gmem_map_all) {
+                c->info->uses_gmem_map = true;
+                sp(&c->body, "      uint fw = ok ? gfind(uint(ga)) : 0xFFFFFFFFu;\n"
+                             "      if (fw != 0xFFFFFFFFu) ");
+                reduction(c, "gfast_.w[fw]", op, size == 1, d);
+                if (!maxwell_gmem_map_all) {
+                    sp(&c->body, "      else if (ok) "); reduction(c, "gmem_.w[uint(ga >> 2)]", op, size == 1, d);
+                }
+                else if (GMISS_ON(c->stage)) sp(&c->body, "      else if (ok) gmiss(ga);\n");
+            } else { sp(&c->body, "      if (ok) "); reduction(c, "gmem_.w[uint(ga >> 2)]", op, size == 1, d); }
+            sp(&c->body, "    }\n");
+        }
     } else if (OPM(0xeed0000000000000ull, 0xfff8000000000000ull) || OPM(0xeed8000000000000ull, 0xfff8000000000000ull)) {  // LDG / STG
         bool store = bits(w, 51, 1);
         bool wide = bits(w, 45, 1);
         int size = (int)bits(w, 48, 3);
         int64_t off = sbits(w, 20, 24);
-        c->info->uses_gmem = true;
-        char addr[256];
-        if (a == RZ) sprintf(addr, "ulong(%lld)", (long long)off);
-        else if (wide) sprintf(addr, "((ulong(%s) << 32 | ulong(%s)) + ulong(%lld))", R(a + 1), R(a), (long long)off);
-        else sprintf(addr, "(ulong(%s) + ulong(%lld))", R(a), (long long)off);
-        if (c->glsl && maxwell_no_int64) {
-            // Keep the full high word until after signed offset addition and base subtraction.
-            // Only the checked heap-relative offset is 32-bit (the guest heap is at most 3.25 GiB).
-            if (maxwell_gmem_size > 0x100000000ull) fail(c, "32-bit shader heap exceeds 4 GiB");
-            const char *lo = a == RZ ? "0u" : R(a);
-            const char *hi = a != RZ && wide ? R(a + 1) : "0u";
-            sp(&c->body, "    { uint ac; uint al = uaddCarry(%s, 0x%08xu, ac); uint ah = %s + 0x%08xu + ac; "
-                "uint ga = al - 0x%08xu; uint gh = ah - 0x%08xu - uint(al < 0x%08xu); bool ok = gh == 0u",
-                lo, (uint32_t)off, hi, off < 0 ? 0xFFFFFFFFu : 0u,
-                (uint32_t)maxwell_gmem_base, (uint32_t)(maxwell_gmem_base >> 32), (uint32_t)maxwell_gmem_base);
-            if (maxwell_gmem_size < 0x100000000ull) sp(&c->body, " && ga < 0x%08xu", (uint32_t)maxwell_gmem_size);
-            sp(&c->body, ";\n");
-        } else {
-            sp(&c->body, "    { ulong ga = %s - 0x%llxul; bool ok = ga < 0x%llxul;\n", addr,
-               (unsigned long long)maxwell_gmem_base, (unsigned long long)maxwell_gmem_size);
-        }
+        global_address(c, a, wide, off);
         static const char *const ld_small[] = {"uint(gmem[ga])", "uint(int(char(gmem[ga])))",
                                                "uint(*(device ushort *)(gmem + ga))", "uint(int(*(device short *)(gmem + ga)))"};
         int nw = size == 5 ? 2 : size >= 6 ? 4 : 1;
@@ -2099,6 +2202,7 @@ static const char glsl_prelude[] =
     "#extension GL_KHR_shader_subgroup_basic : require\n"
     "#extension GL_KHR_shader_subgroup_shuffle : require\n"
     "#extension GL_KHR_shader_subgroup_shuffle_relative : require\n"
+    "#extension GL_KHR_shader_subgroup_ballot : require\n"
     "#extension GL_EXT_texture_shadow_lod : require\n"
     "#define cbr(cb, off) cb[min((off) >> 4, uint(cb.length() - 1))][((off) >> 2) & 3u]\n"
     "uint as_u(float x) { return floatBitsToUint(x); }\n"
@@ -2847,7 +2951,16 @@ ShaderInfo *maxwell_translate_bounded(const uint8_t *blob, size_t max_size, size
     for (size_t i = 0; i < end && !c->fail; i++) {
         if (i % 4 == 0) continue;
         uint32_t pc = (uint32_t)(i * 8);
-        if (any_branch && label[i]) sp(&c->body, "  case %uu:\n", pc);
+        if (any_branch && label[i]) {
+            // Keep every case's successor explicit. Qualcomm miscompiles live
+            // registers at fallthrough joins when the vertex stage is linked
+            // to a fragment stage (rasterizer-discard replay hides the failure).
+            // This is outside [us, ue), so successful structuring omits it.
+            // A fallthrough consumes no guest branch: preserve the guard budget.
+            if (c->glsl && maxwell_explicit_fallthrough && i > 1)
+                sp(&c->body, "    guard--; pc = %uu; continue;\n", pc);
+            sp(&c->body, "  case %uu:\n", pc);
+        }
         if (us) us[i] = (uint32_t)c->body.len;
         if (annotate) sp(&c->body, "    // pc %x: %016llx\n", pc, (unsigned long long)((const uint64_t *)code)[i]);
         emit_insn(c, ((const uint64_t *)code)[i], pc);

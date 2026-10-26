@@ -4,7 +4,7 @@
 // - the Vulkan driver: the first driver in <external files>/drivers (a .so, or an adrenotools .zip: Turnip), copied to
 //   internal storage (dlopen refuses external storage) and named in LARECOMP_VK_DRIVER; none there = the system's;
 // - LARECOMP_NATIVE_LIB_DIR: where adrenotools finds its hook libraries;
-// - the game code (botwgame.so + botwgame.so.id, built from the player's own game files: android/build_gamelib.sh) from
+// - the game code (totkgame.so + totkgame.so.id, built from the player's own game files: android/build_gamelib.sh) from
 //   <external files>/extracted to <internal files>/res, where runtime/gamelib.c looks for it next to "the executable".
 // - the game code's builder (docs/las/ANDROID-PORT.md, Fase 6): assets/gen (the generator, its Python's standard library,
 //   zig's headers) unpacked to <internal files>/gen once per app version, named in LARECOMP_GEN_DIR; its programs
@@ -13,7 +13,7 @@
 //   found in it; exefs/ is copied to its version's extracted/ - <external files>/extracted for 1.0.0, v160/ and v182/
 //   inside it for the others, runtime/paths.h - and romfs.bin built there straight from romfs/) and the Vulkan driver
 //   (a .zip copied to the drivers folder).
-// The data root (game files, saves, settings) is <external files>: /sdcard/Android/data/com.botwrecomp.android/files.
+// The data root (game files, saves, settings) is <external files>: /sdcard/Android/data/com.totkrecomp.android/files.
 // While in front it reports the battery and thermal state once a second for the performance overlay
 // (runtime/ui/perf_overlay.mm): apps can't read those in /sys.
 package com.botwrecompandroid;
@@ -54,7 +54,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 public class BOTWRecompAndroidActivity extends SDLActivity {
-    private static final String TAG = "BOTWRecompAndroid";
+    private static final String TAG = "TOTKRecompAndroid";
 
     private final Handler stats = new Handler(Looper.getMainLooper());
     private final Runnable report = new Runnable() {
@@ -94,8 +94,8 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
             File res = new File(getFilesDir(), "res");
             copyAssets("res", res);
             File games = new File(getExternalFilesDir(null), "extracted");
-            copyIfChanged(new File(games, "botwgame.so"), new File(res, "botwgame.so"));
-            copyIfChanged(new File(games, "botwgame.so.id"), new File(res, "botwgame.so.id"));
+            copyIfChanged(new File(games, "totkgame.so"), new File(res, "totkgame.so"));
+            copyIfChanged(new File(games, "totkgame.so.id"), new File(res, "totkgame.so.id"));
             setenv("LARECOMP_NATIVE_LIB_DIR", getApplicationInfo().nativeLibraryDir);
             File gen = new File(getFilesDir(), "gen");
             unpackGen(gen);
@@ -105,7 +105,7 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
             setenv("LARECOMP_VK_DRIVER", driver != null ? driver.getAbsolutePath() : "");
             // testing: the runtime's LARECOMP_* switches from the launch intent, separated by commas (adb shell drops
             // the quotes around spaces), e.g. LARECOMP_VK_DRIVER= is the system driver:
-            // adb shell am start -n com.botwrecomp.android/com.botwrecompandroid.BOTWRecompAndroidActivity --es env LARECOMP_NO_LAUNCHER=1,LARECOMP_VK_DRIVER=
+            // adb shell am start -n com.totkrecomp.android/com.botwrecompandroid.BOTWRecompAndroidActivity --es env LARECOMP_NO_LAUNCHER=1,LARECOMP_VK_DRIVER=
             String env = getIntent() != null ? getIntent().getStringExtra("env") : null;
             // Opened again from the recent apps, Android hands back that test launch's intent: keep only which game
             // version it ran (a scripted input left in it ignored the touch screen - the menu looked frozen)
@@ -123,9 +123,9 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
                 if (name != null && (!recents || KEEP_FROM_RECENTS.contains(name))) setenv(name, value);
                 // (debugging) the game code built on the phone, out where adb can read it: a crash's host addresses
                 if (env.contains("LARECOMP_EXPORT_GAMELIB")) {
-                    File lib = new File(res, "botwgame.so");
+                    File lib = new File(res, "totkgame.so");
                     if (lib.exists()) try (InputStream in = new FileInputStream(lib)) {
-                        copy(in, new File(getExternalFilesDir(null), "botwgame-export.so"));
+                        copy(in, new File(getExternalFilesDir(null), "totkgame-export.so"));
                     }
                 }
             }
@@ -441,18 +441,18 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
     // levels below it (as runtime/ui/launcher.mm find_game)
     private Doc exefs, romfs;
     private boolean packages;
-    // A game code built already (botwgame.so with its .id, and .game: the game version it's for - a package made on a
+    // A game code built already (totkgame.so with its .id, and .game: the game version it's for - a package made on a
     // PC from the same files), used instead of building it on the phone when it's for this version and this app
     private Doc preLib, preId, preGame;
 
     private void find(Uri tree, Doc dir, int depth) {
         if (depth > 4 || (exefs != null && romfs != null)) return;
         List<Doc> kids = children(tree, dir.id);
-        if (preLib == null && named(kids, "botwgame.so") != null && named(kids, "botwgame.so.id") != null &&
-            named(kids, "botwgame.so.game") != null) {
-            preLib = named(kids, "botwgame.so");
-            preId = named(kids, "botwgame.so.id");
-            preGame = named(kids, "botwgame.so.game");
+        if (preLib == null && named(kids, "totkgame.so") != null && named(kids, "totkgame.so.id") != null &&
+            named(kids, "totkgame.so.game") != null) {
+            preLib = named(kids, "totkgame.so");
+            preId = named(kids, "totkgame.so.id");
+            preGame = named(kids, "totkgame.so.game");
         }
         if (exefs == null && named(kids, "main") != null && named(kids, "main.npdm") != null) exefs = dir;
         Doc rc = named(kids, "Pack");
@@ -609,8 +609,8 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
             copyTree(tree, exefs, new File(games, "exefs"));
             if (preLib != null && Integer.toString(version).equals(readText(tree, preGame).trim())) {
                 // (the native side checks its id against this app's and builds it on the phone when they differ)
-                copyDoc(tree, preId, new File(games, "botwgame.so.id"));
-                copyDoc(tree, preLib, new File(games, "botwgame.so"));
+                copyDoc(tree, preId, new File(games, "totkgame.so.id"));
+                copyDoc(tree, preLib, new File(games, "totkgame.so"));
                 Log.i(TAG, "game code from the picked folder: " + preLib.size + " bytes");
             }
             nativeImportProgress(copied, total);

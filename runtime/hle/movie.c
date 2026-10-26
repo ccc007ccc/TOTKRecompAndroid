@@ -540,7 +540,7 @@ static void dec_get_output_buffer_format(Cpu *c) { dec_output_format(self_state(
 
 // Video decoders started and not stopped: a movie is playing. The game shows one of its pictures per frame, so the
 // frame rate is held at 30 meanwhile (runtime/hle/framepace.c; from SavageWindRecomp, MIT).
-volatile int g_movie_playing;
+extern volatile int g_movie_playing;
 
 static void dec_start(Cpu *c) {
     Decoder *d = self_state(c);

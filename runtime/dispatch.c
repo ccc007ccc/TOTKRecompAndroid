@@ -14,7 +14,7 @@
 #include "kernel.h"
 
 typedef struct { const uint64_t *addrs; const GuestFn *fns; uint64_t count, lo, hi; } FnTable;
-static FnTable tables[2];
+static FnTable tables[GAME_MODULE_COUNT];
 
 // HLE stubs live at fake addresses HLE_BASE + 16*i
 #define MAX_HLE 4096
@@ -70,13 +70,10 @@ void hle_override(uint64_t addr, HostFn fn, const char *name) {
 }
 
 static __thread uint64_t unimpl_pc;
-static int unimpl_counts[MAX_HLE];
 static void hle_unimplemented(Cpu *c) {
     int i = (int)((unimpl_pc - HLE_BASE) / 16);
-    if (unimpl_counts[i]++ < 3)
-        LOG("[hle] UNIMPLEMENTED %s (x0=%llx x1=%llx lr=%llx) -> returning 0\n", hle_slots[i].name, c->x[0],
-            c->x[1], c->x[30]);
-    c->x[0] = 0;
+    FATAL("unimplemented import %s (x0=%llx x1=%llx lr=%llx)\n",
+          hle_slots[i].name, c->x[0], c->x[1], c->x[30]);
 }
 
 uint64_t guest_sym(const char *name) {
@@ -119,27 +116,31 @@ void *hle_alloc(uint64_t size) {
 
 void dispatch_init(void) {  // (after gamelib_load)
     const GameLibTables *g = gamelib_tables();
-    uint64_t nm = *g->main_count, ns = *g->sdk_count;
+    const uint64_t *src[] = {g->main_addrs, g->sdk_addrs, g->subsdk0_addrs, g->rtld_addrs};
+    const GuestFn *fns[] = {g->main_fns, g->sdk_fns, g->subsdk0_fns, g->rtld_fns};
+    const uint64_t cnt[] = {*g->main_count, *g->sdk_count, *g->subsdk0_count, *g->rtld_count};
 #ifdef __ANDROID__
-    // The library lists the desktop window's addresses (gen.py --dyn-base): moved to where the window is (rt.h).
-    static uint64_t *moved[2];
-    const uint64_t *src[2] = {g->main_addrs, g->sdk_addrs}, cnt[2] = {nm, ns};
-    for (int t = 0; t < 2; t++) {
+    static uint64_t *moved[GAME_MODULE_COUNT];
+#endif
+    for (int t = 0; t < GAME_MODULE_COUNT; t++) {
+        tables[t] = (FnTable){0};
+#ifdef __ANDROID__
         free(moved[t]);
+        moved[t] = NULL;
+#endif
+        if (!cnt[t]) continue;
+#ifdef __ANDROID__
         moved[t] = malloc(cnt[t] * sizeof *moved[t]);
         if (!moved[t]) FATAL("out of memory\n");
         for (uint64_t i = 0; i < cnt[t]; i++) moved[t][i] = src[t][i] - GUEST_CANON + GUEST_LO;
-    }
-    tables[0] = (FnTable){moved[0], g->main_fns, nm, moved[0][0], moved[0][nm - 1]};
-    tables[1] = (FnTable){moved[1], g->sdk_fns, ns, moved[1][0], moved[1][ns - 1]};
-#else
-    tables[0] = (FnTable){g->main_addrs, g->main_fns, nm, g->main_addrs[0], g->main_addrs[nm - 1]};
-    tables[1] = (FnTable){g->sdk_addrs, g->sdk_fns, ns, g->sdk_addrs[0], g->sdk_addrs[ns - 1]};
+        src[t] = moved[t];
 #endif
+        tables[t] = (FnTable){src[t], fns[t], cnt[t], src[t][0], src[t][cnt[t] - 1]};
+    }
 }
 
 GuestFn dispatch_lookup(uint64_t addr) {
-    for (int t = 0; t < 2; t++) {
+    for (int t = 0; t < GAME_MODULE_COUNT; t++) {
         FnTable *ft = &tables[t];
         if (addr < ft->lo || addr > ft->hi) continue;
         uint64_t lo = 0, hi = ft->count;
@@ -254,10 +255,11 @@ const char *rt_host_fn_name(uint64_t pc, uint64_t *offset) {
     static uint64_t n;
     static __thread char name[32];
     if (!byhost) {
-        uint64_t total = tables[0].count + tables[1].count, k = 0;
+        uint64_t total = 0, k = 0;
+        for (int t = 0; t < GAME_MODULE_COUNT; t++) total += tables[t].count;
         uint64_t (*v)[2] = malloc(total * sizeof *v);
         if (!v) return NULL;
-        for (int t = 0; t < 2; t++)
+        for (int t = 0; t < GAME_MODULE_COUNT; t++)
             for (uint64_t i = 0; i < tables[t].count; i++) {
                 v[k][0] = (uint64_t)(uintptr_t)tables[t].fns[i];
                 v[k++][1] = tables[t].addrs[i];
@@ -279,7 +281,7 @@ const char *rt_host_fn_name(uint64_t pc, uint64_t *offset) {
 }
 
 static const char *host_sym(uint64_t pc, uint64_t *offset) {
-    // (game functions first: they live in botwgame.dll, which the OS lookup can only name as a whole)
+    // (game functions first: they live in totkgame.dll, which the OS lookup can only name as a whole)
     const char *s = rt_host_fn_name(pc, offset);
     return s ? s : plat_symbol(pc, offset);
 }

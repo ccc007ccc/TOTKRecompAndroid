@@ -140,3 +140,44 @@ void tegra_swizzle(const uint8_t *src, uint8_t *dst, uint32_t wb, uint32_t hb, u
                    uint32_t bh_log2, uint32_t bd_log2) {
     copy_surface(src, dst, wb, hb, d, bpb, bh_log2, bd_log2, false);
 }
+
+bool tegra_write_region(const TexLayout *t, uint32_t level, uint32_t layer, const int32_t r[6],
+                        uint8_t *storage, uint64_t stride, const uint8_t *src, uint64_t row, uint64_t image) {
+    if (!t || !t->fmt || !t->fmt->bpb || !t->fmt->bw || !t->fmt->bh || !r || !storage || !src || level >= t->levels) return false;
+    for (int i = 0; i < 6; i++) if (r[i] < 0) return false;
+    if (!r[3] || !r[4] || !r[5]) return true;
+    LevelLayout l = tegra_level(t, level);
+    bool volume = t->depth > 1;
+    uint32_t layers = t->layers ? t->layers : 1, limit = volume ? l.d : layers;
+    if (layer >= layers || (volume && layer) || (uint32_t)r[0] > l.w || (uint32_t)r[3] > l.w - r[0] ||
+        (uint32_t)r[1] > l.h || (uint32_t)r[4] > l.h - r[1] ||
+        (uint64_t)layer + r[2] + r[5] > limit) return false;
+    uint32_t bw = t->fmt->bw, bh = t->fmt->bh, bpb = t->fmt->bpb;
+    if (r[0] % bw || r[1] % bh || (r[3] % bw && (uint32_t)(r[0] + r[3]) != l.w) ||
+        (r[4] % bh && (uint32_t)(r[1] + r[4]) != l.h)) return false;
+    uint32_t rows = div_up((uint32_t)r[4], bh), start_x = (uint32_t)r[0] / bw * bpb, start_y = (uint32_t)r[1] / bh;
+    uint64_t bytes = (uint64_t)div_up((uint32_t)r[3], bw) * bpb;
+    if (!row) row = bytes;
+    if (row < bytes || row > UINT64_MAX / rows) return false;
+    if (!image) image = row * rows;
+    if (image < row * rows || image > SIZE_MAX / (uint32_t)r[5]) return false;
+    if (stride && (level || volume || layers > 1 || stride < (uint64_t)l.wb * bpb)) return false;
+    uint64_t layer_bytes = tegra_layer_size(t);
+    uint32_t width_gobs = div_up(l.wb * bpb, 64);
+    uint64_t blocks_rows = div_up(l.hb, 8u << l.block_height_log2);
+    for (uint32_t z = 0; z < (uint32_t)r[5]; z++) {
+        uint64_t base = l.offset + (volume ? 0 : (layer + r[2] + z) * layer_bytes);
+        for (uint32_t y = 0; y < rows; y++) {
+            const uint8_t *from = src + z * image + y * row;
+            if (stride) { memcpy(storage + (start_y + y) * stride + start_x, from, bytes); continue; }
+            for (uint64_t x = 0; x < bytes;) {
+                uint32_t xb = start_x + (uint32_t)x, n = 16 - (xb & 15);
+                if (n > bytes - x) n = (uint32_t)(bytes - x);
+                uint64_t at = gob_offset(xb, start_y + y, volume ? r[2] + z : 0, width_gobs,
+                                         l.block_height_log2, l.block_depth_log2, blocks_rows);
+                memcpy(storage + base + at, from + x, n); x += n;
+            }
+        }
+    }
+    return true;
+}

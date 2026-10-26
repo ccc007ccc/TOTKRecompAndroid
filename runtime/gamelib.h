@@ -7,15 +7,16 @@
 #include <stdint.h>
 
 #include "cpu.h"
+#include "game_profile.h"
 
 #if defined(_WIN32)
-#define GAMELIB_NAME "botwgame.dll"
+#define GAMELIB_NAME "totkgame.dll"
 #define GAMELIB_EXPORT __declspec(dllexport)
 #elif defined(__APPLE__)
-#define GAMELIB_NAME "botwgame.dylib"
+#define GAMELIB_NAME "totkgame.dylib"
 #define GAMELIB_EXPORT __attribute__((visibility("default")))
 #else
-#define GAMELIB_NAME "botwgame.so"
+#define GAMELIB_NAME "totkgame.so"
 #define GAMELIB_EXPORT __attribute__((visibility("default")))
 #endif
 
@@ -24,7 +25,7 @@
 #ifndef GAMELIB_ID
 #define GAMELIB_ID "dev"
 #endif
-#define GAMELIB_ABI 1
+#define GAMELIB_ABI 2
 
 typedef struct {
     uint32_t abi;    // GAMELIB_ABI
@@ -32,11 +33,16 @@ typedef struct {
     const uint64_t *main_addrs, *sdk_addrs;  // sorted guest addresses
     const GuestFn *main_fns, *sdk_fns;       // the functions at them
     const uint64_t *main_count, *sdk_count;
+    const uint64_t *subsdk0_addrs, *rtld_addrs;
+    const GuestFn *subsdk0_fns, *rtld_fns;
+    const uint64_t *subsdk0_count, *rtld_count;
+    // Raw NSO identities in main, sdk, subsdk0, rtld order.
+    const uint8_t *build_ids[GAME_MODULE_COUNT];
 } GameLibTables;
 
 // The library's one exported function (tools/gamelib_entry.c).
 typedef const GameLibTables *(*GameLibEntry)(void);
-#define GAMELIB_ENTRY "botwgame_tables"
+#define GAMELIB_ENTRY "totkgame_tables"
 
 #ifdef __cplusplus
 extern "C" {

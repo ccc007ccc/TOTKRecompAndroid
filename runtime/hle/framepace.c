@@ -37,7 +37,7 @@
 #include "../settings.h"
 #include "../framepace.h"
 
-extern volatile int g_movie_playing;  // runtime/hle/movie.c: video decoders running
+volatile int g_movie_playing;  // FFmpeg decoder count; zero in builds without FFmpeg
 
 // a canonical address of 1.8.2's main (0x7000000000 + offset) where the guest window is
 #define GA(a) ((uint64_t)(a) - 0x7000000000ull + GUEST_LO)

@@ -540,23 +540,8 @@ static void tab_display(void) {
 #ifdef __ANDROID__
     opt_toggle("Touch controls", &g_settings.touch_controls, false,
                "On-screen buttons and stick while no controller is connected. The back button opens this menu.");
-    {
-        // 1.8.2: up to 60 (hle/framepace.c keeps the game's clock right at any rate). 1.0.0 / 1.6.0 never run above
-        // 30 - their frame loop picks 2 or 3 vsyncs - so a 60 there counts as 30. (On the start screen the version
-        // isn't loaded yet: the 1.8.2 choices.)
-        extern int g_game_version;
-        bool sixty = g_game_version == 0 || g_game_version == 182;
-        if (!sixty && g_settings.fps_mode > 1) g_settings.fps_mode = 1;
-        static const char *fr[] = {"Auto (20 / 30)", "30 fps"};
-        static const char *fr60[] = {"Auto (30 / 60)", "30 fps", "60 fps"};
-        opt_choice("Frame rate", &g_settings.fps_mode, sixty ? fr60 : fr, sixty ? 3 : 2, 1,
-                   sixty ? "Auto: 60 fps where your device keeps up, 30 where it doesn't (the game's clock stays right "
-                           "either way). 30 fps: steady and cooler - the phone heats less. 60 fps: always aims for 60 "
-                           "(game version 1.8.2; 1.0.0 and 1.6.0 run at 30)."
-                         : "Auto: the game picks, as on the Switch, and drops to 20 fps where a frame doesn't fit in 30. "
-                           "30 fps: always 30 - where a frame takes longer, the game runs slightly slower instead of "
-                           "dropping to 20.");
-    }
+    ImGui::TextDisabled("%s", tr("Frame rate: original game timing (up to 30 fps)."));
+
 #endif
 
     opt_section("Rendering");
@@ -669,8 +654,8 @@ static void tab_quit(float scale, bool in_game) {
         ask = 0;
     const char *lost = in_game ? tr("\n\nProgress since your last save is lost.") : "";
     char d1[320], d2[320];
-    snprintf(d1, sizeof d1, tr("Leaves the game and goes back to the BOTWRecompAndroid start screen.%s"), lost);
-    snprintf(d2, sizeof d2, tr("Closes BOTWRecompAndroid.%s"), lost);
+    snprintf(d1, sizeof d1, tr("Leaves the game and goes back to the TOTKRecompAndroid start screen.%s"), lost);
+    snprintf(d2, sizeof d2, tr("Closes TOTKRecompAndroid.%s"), lost);
 #ifdef __ANDROID__
     const char *quit_app = "Close app", *quit_app_yes = "Close app";
     const char *quit_start = "Return to start", *quit_start_yes = "Return to start";

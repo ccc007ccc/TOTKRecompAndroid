@@ -68,6 +68,7 @@ class Module:
         self.fdes = sorted((base + a, base + b) for a, b in eh_frame_extents(n) if b > a)
         self.fde_starts = [a for a, _ in self.fdes]
         self.jt_cache = {}
+        self.local_branch_cache = {}
         self.setjmps = self.setjmp_targets()
 
     def in_text(self, a):
@@ -325,6 +326,27 @@ class Module:
             a -= 4
         return False
 
+    def local_branch_registers(self, entry, end):
+        """Registers given an in-function code address by ADR.
+
+        Hand-written decompressors use these as local return addresses across
+        conditional branches. This only enables a checked local dispatch; an
+        overwritten/external register value still falls back to rt_dispatch.
+        """
+        key = (entry, end)
+        if key not in self.local_branch_cache:
+            regs = set()
+            for pc in range(entry, end, 4):
+                w = self.word(pc)
+                if (w & 0x9F000000) != 0x10000000:
+                    continue
+                imm = ((w >> 5) & 0x7FFFF) << 2 | ((w >> 29) & 3)
+                if imm & (1 << 20): imm -= 1 << 21
+                if entry <= pc + imm < end:
+                    regs.add(w & 31)
+            self.local_branch_cache[key] = regs
+        return self.local_branch_cache[key]
+
     def scan(self, entry, end):
         """Collect labels and external entries referenced by a function."""
         labels, ext, tables = {entry}, set(), {}
@@ -347,7 +369,8 @@ class Module:
                     # (a target outside this piece of a split function is a boundary, reached by a tail call)
                     for t in jt:
                         (labels if entry <= t < end else ext).add(t)
-                elif self.computed_target(a, (self.fde(a) or (entry,))[0]):
+                elif (self.computed_target(a, (self.fde(a) or (entry,))[0]) or
+                      bits(self.word(a), 5, 5) in self.local_branch_registers(entry, end)):
                     # unresolved table jump: allow jumping to any instruction of the function
                     tables[a] = 'all'
             terminated = ins.kind in ('b', 'br', 'ret', 'trap')
@@ -478,7 +501,7 @@ class Module:
             out.append('    __attribute__((musttail)) return rt_dispatch(c);')
         out.append('}')
         if lifter.DYN_BASE and any(GB_USE.search(l) for l in out):
-            out.insert(1, '    const uint64_t GB = botwgame_gb;')
+            out.insert(1, '    const uint64_t GB = totkgame_gb;')
         self._refs = refs
         return out
 
@@ -628,7 +651,7 @@ def generate(name, nso, base, outdir, opts):
         path = os.path.join(outdir, f'{name}_{nchunks:03d}.c')
         text = ['#include "cpu.h"\n' + ('#include "simd.h"\n' if m.lifter.sc else '')]
         if opts.dyn_base:
-            text += ['extern __attribute__((visibility("hidden"))) uint64_t botwgame_gb;\n']
+            text += ['extern __attribute__((visibility("hidden"))) uint64_t totkgame_gb;\n']
         if any('rt_setjmp_slot(' in l for l in body):
             text += ['#include <setjmp.h>\njmp_buf *rt_setjmp_slot(Cpu *c, uint64_t gbuf);\n']
         text += [f'void {fname(r)}(Cpu *c);\n' for r in sorted(refs)]
@@ -639,12 +662,14 @@ def generate(name, nso, base, outdir, opts):
         # (the start screen's setup reads these for its progress bar: runtime/gamebuild.c)
         print(f'{name}: progress {ci}/{len(order)} files {nchunks}', file=sys.stderr, flush=True)
     for fn in os.listdir(outdir):  # an earlier run's extra chunks
-        mm = re.fullmatch(re.escape(name) + r'_(\d{3})\.c', fn)
+        mm = re.fullmatch(re.escape(name) + r'_(\d+)\.c', fn)
         if mm and int(mm.group(1)) >= nchunks:
             os.remove(os.path.join(outdir, fn))
     import io
     with io.StringIO() as f:
         f.write('#include "cpu.h"\n')
+        f.write(f'const uint8_t {name}_build_id[32] = {{' +
+                ','.join(str(b) for b in bytes.fromhex(m.nso.build_id)) + '};\n')
         for a in order:
             f.write(f'void {fname(a)}(Cpu *c);\n')
         # (a module without functions still gets its arrays: C has no empty initializer)
@@ -657,9 +682,9 @@ def generate(name, nso, base, outdir, opts):
         f.write(f'const uint64_t {name}_fn_count = {len(order)};\n')
         if opts.dyn_base:  # (in each module's table, weak: main and sdk share one)
             f.write("// the guest window's start (--dyn-base): the runtime sets it before any game code runs\n")
-            f.write(f'__attribute__((weak, visibility("hidden"))) uint64_t botwgame_gb = {hx(CANON)};\n')
-            f.write('__attribute__((weak, visibility("default"))) void botwgame_set_guest_base(uint64_t gb) '
-                    '{ botwgame_gb = gb; }\n')
+            f.write(f'__attribute__((weak, visibility("hidden"))) uint64_t totkgame_gb = {hx(CANON)};\n')
+            f.write('__attribute__((weak, visibility("default"))) void totkgame_set_guest_base(uint64_t gb) '
+                    '{ totkgame_gb = gb; }\n')
         write_if_changed(os.path.join(outdir, f'{name}_table.c'), f.getvalue())
     print(f'{name}: wrote {nchunks} chunks, {time.time() - t0:.0f}s total', file=sys.stderr)
 

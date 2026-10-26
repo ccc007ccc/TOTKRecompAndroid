@@ -905,22 +905,45 @@ VkSpan vk_transient(uint64_t size, uint64_t align) {
 // GPU -> CPU copies: the ring is write-combined (often device-local over the BAR), where CPU reads crawl (a
 // 1280x720 screenshot took 7 s). Readbacks use one host-cached buffer instead. Every user waits for the GPU and
 // reads the data before the next readback (render thread), so a single grow-only buffer suffices.
+static struct { VkBuffer buf; VmaAllocation mem; uint8_t *ptr; uint64_t cap, used; } readback;
+
 VkSpan vk_readback(uint64_t size) {
-    static VkBuffer buf;
-    static VmaAllocation mem;
-    static uint8_t *ptr;
-    static uint64_t cap;
-    if (size > cap) {
-        if (buf) { vk_wait_seq(submit_seq); vmaDestroyBuffer(g_vk.vma, buf, mem); }
-        cap = (size + (16 << 20) - 1) & ~((16ull << 20) - 1);
-        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = cap, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+    if (size > readback.cap) {
+        if (readback.buf) { vk_wait_seq(submit_seq); vmaDestroyBuffer(g_vk.vma, readback.buf, readback.mem); }
+        readback.cap = (size + (16 << 20) - 1) & ~((16ull << 20) - 1);
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = readback.cap, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
                                       .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
         VmaAllocationInfo info;
-        VK_CHECK(vmaCreateBuffer(g_vk.vma, &bi, &ai, &buf, &mem, &info));
-        ptr = info.pMappedData;
+        VK_CHECK(vmaCreateBuffer(g_vk.vma, &bi, &ai, &readback.buf, &readback.mem, &info));
+        readback.ptr = info.pMappedData;
+        VkMemoryPropertyFlags flags;
+        vmaGetMemoryTypeProperties(g_vk.vma, info.memoryType, &flags);
+        LOG("[vk] readback: memory type %u, flags %#x (%scoherent)\n", info.memoryType, flags,
+            flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT ? "" : "non-");
     }
-    return (VkSpan){buf, 0, ptr};
+    readback.used = size;
+    return (VkSpan){readback.buf, 0, readback.ptr};
+}
+
+void vk_readback_barrier(VkCommandBuffer cb) {
+    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT, .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+    vkCmdPipelineBarrier2(cb, &di);
+}
+
+void vk_readback_invalidate(void) {
+    // Waiting on a fence does not invalidate non-coherent CPU caches. Qualcomm
+    // selects cached, non-coherent memory for TRANSFER_DST-only buffers.
+    if (readback.used) VK_CHECK(vmaInvalidateAllocation(g_vk.vma, readback.mem, 0, readback.used));
+}
+
+void vk_readback_wait(void) {
+    vk_readback_barrier(vk_cmd());
+    renderer_flush();
+    vk_readback_invalidate();
 }
 
 VkSpan vk_transient_copy(const void *data, uint64_t size, uint64_t align) {
@@ -1527,7 +1550,7 @@ static void dump_layers_raw(TexBackend *b) {  // every layer, level 0, as stored
                                .imageExtent = {w, h, 1}};
         vkCmdCopyImageToBuffer(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
     }
-    renderer_flush();
+    vk_readback_wait();
     for (uint32_t l = 0; l < nl; l++) {
         char p[128];
         snprintf(p, sizeof p, "build/sampled_%ux%u_L%u.raw", b->width, b->height, l);
@@ -1538,6 +1561,7 @@ static void dump_layers_raw(TexBackend *b) {  // every layer, level 0, as stored
 }
 static void vk_end_pass_at(int line);
 static void save_texture_raw(TexBackend *b, const char *path);
+#include "target_debug.h"
 static TexBackend *pass_dump_b;  // (debug frame) the color target the open pass draws into
 static uint32_t pass_dump_layer = ~0u;  // (a depth-only pass: its depth target's layer, dumped as red)
 void vk_end_pass(void) { vk_end_pass_at(0); }
@@ -1601,9 +1625,12 @@ static void vk_end_pass_at(int line) {
         if (raw < 0) raw = getenv("LARECOMP_DEBUG_RAW_PASSES") != NULL;
         if (raw && pass_dump_layer == ~0u) save_texture_raw(b, path);
     }
+    debug_target_end();
 }
 
 static uint32_t level_extent(uint32_t v, uint32_t lv) { v >>= lv; return v ? v : 1; }
+
+#include "frame_capture.h"
 
 // The frame the 3D scene's G-buffer was last drawn in (a pass of 3+ scene-sized targets with depth): widescreen.c
 // keeps the title screen and loading screens - no scene - at 16:9
@@ -1755,6 +1782,8 @@ static void begin_pass(void) {
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};
     vk_begin_rendering(cb, &ri, pass_color, pass_depth != VK_FORMAT_UNDEFINED ? pass_depth : pass_stencil,
                        (VkSampleCountFlagBits)pass_samples);
+    if (capture_enabled()) frame_capture.dirty = true;
+    debug_target_begin(ca);
     if (g_debug_frame) pass_dump_b = st.rt.ncolor && st.rt.color[0] ? st.rt.color[0]->backend : NULL;
     pass_dump_layer = ~0u;
     if (g_debug_frame && !pass_dump_b && st.rt.depth && st.rt.depth->backend) {  // depth only (shadow maps)
@@ -2058,6 +2087,11 @@ typedef struct {
     _Atomic int state;  // 0 building, 1 ready, 2 failed
 } Prog;
 
+#ifdef __ANDROID__
+static void debug_global_inputs(void);
+#endif
+#include "vertex_debug.h"
+
 static VkPipelineLayout make_layout(Prog *p, int nsets, VkShaderStageFlags s0, VkShaderStageFlags s1) {
 #ifdef __ANDROID__
     for (int set = 0; set < nsets; set++) descriptor_plan(p->binds, p->nbinds, (uint32_t)set, &p->descriptor_plans[set]);
@@ -2165,6 +2199,7 @@ static uint64_t hmix(uint64_t h, const void *p, size_t n);  // (below; LARECOMP_
 // The structured control flow (maxwell_structured) unless LARECOMP_NO_STRUCTURE - and not on Qualcomm's own driver,
 // whose shader compiler crashed on it inside vkCreateGraphicsPipelines (libllvm-qgl, 2026-10-16: the overworld) -
 // LARECOMP_STRUCTURE=1 there anyway
+extern bool vk_driver_is_qualcomm(void);
 static bool structure_on(void) {
     static int on = -1;
     if (on < 0) {
@@ -2187,6 +2222,23 @@ static bool qcom_no_switch(void) {
     return on;
 }
 
+static uint8_t gather_bias_bits(void) {
+    static int bits = -1;
+    if (bits < 0) {
+        int automatic = 0;
+#ifdef __ANDROID__
+        extern bool vk_driver_is_turnip(void);
+        if (vk_driver_is_turnip()) automatic = (int)g_vk.props.limits.subTexelPrecisionBits;
+#endif
+        const char *e = getenv("LARECOMP_GATHER_BIAS_BITS");
+        bits = e ? atoi(e) : automatic;
+        if (bits < 0 || bits > 23) bits = 0;
+        LOG("[vk] gather subtexel correction: %d bits%s (device precision %u)\n", bits,
+            e ? " (override)" : "", g_vk.props.limits.subTexelPrecisionBits);
+    }
+    return (uint8_t)bits;
+}
+
 static void translate_program(void *arg) {
     Prog *p = arg;
     pthread_mutex_lock(&translate_lock);
@@ -2203,6 +2255,7 @@ static void translate_program(void *arg) {
     maxwell_structured = structure_on();
     maxwell_no_switch = qcom_no_switch();
     maxwell_no_local_struct = qcom_no_switch() && !getenv("LARECOMP_QCOM_LOCAL");
+    maxwell_explicit_fallthrough = vk_driver_is_qualcomm();
     maxwell_native_half = !getenv("LARECOMP_BITWISE_HALF");
     maxwell_fast_minmax = !getenv("LARECOMP_SAFE_MATH");
 #endif
@@ -2243,6 +2296,7 @@ static void translate_program(void *arg) {
     subst_glsl(p->fi, p->code[1], "fs");
 #endif
     p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
+    vertex_debug_instrument(p->vi, &p->vkey, p->code[0]);
     save_glsl(p->vi->msl, p->code[0], "vs");
     save_glsl(p->fi->msl, p->code[1], "fs");
     run_job(compile_program, p);
@@ -2813,7 +2867,7 @@ static void debug_save_depth(TexBackend *b, const char *path) {
     VkBufferImageCopy c = {.bufferOffset = out.off, .imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1},
                            .imageExtent = {b->width, b->height, 1}};
     vkCmdCopyImageToBuffer(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
-    renderer_flush();
+    vk_readback_wait();
     const float *d = out.ptr;
     float lo = 1e30f, hi = -1e30f;
     for (uint64_t i = 0; i < n; i++) { if (d[i] < lo) lo = d[i]; if (d[i] > hi) hi = d[i]; }
@@ -3044,7 +3098,7 @@ static void resolve_feedback(Prog *pr) {
                 for (int k = 0; k < st.rt.ncolor; k++) if (st.rt.color[k] == t) bit |= 1u << k;
                 if (bit && !(written & bit)) {
                     stat_feedback_reads++;
-                    if (g_debug_frame && t == st.rt.depth) {  // (debug frames: the depth sampled in place, as it is now)
+                    if (g_debug_frame && t == st.rt.depth && !capture_enabled()) {  // deferred capture already includes depth
                         static int nd;
                         char path[128];
                         snprintf(path, sizeof path, "build/fbdepth_%03d_inplace.pgm", nd++);
@@ -3119,7 +3173,7 @@ static void resolve_feedback(Prog *pr) {
                                   .extent = {w ? w : 1, h ? h : 1, 1}};
                 vkCmdCopyImage(cb, src->image, VK_IMAGE_LAYOUT_GENERAL, dst->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
             }
-            if (g_debug_frame && (src->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) {
+            if (g_debug_frame && (src->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) && !capture_enabled()) {
                 static int nd;
                 char path[128];
                 snprintf(path, sizeof path, "build/fbdepth_%03d_src.pgm", nd);
@@ -3676,6 +3730,43 @@ static uint64_t ga_res_top, ga_head = GA_RES, ga_seg_seq[GA_SIZE / GA_SEG];
 static int gres_state = -1;
 static uint64_t stat_gres_res, stat_gres_sync;  // (resident ranges used, CPU-changed bytes uploaded)
 static uint64_t stat_gres_fail[4];  // (fell back to the plain copies: 0 no entry/space, 1 table full, 2 ring, 3 too big)
+
+// Optional snapshot at the selected vertex draw, after its normal diagnostic
+// readback. In particular, the transparent pass sees the completed tile-class
+// table here. Preserve addresses so the arena's slots can be decoded offline.
+static void debug_global_inputs(void) {
+    if (!getenv("LARECOMP_DUMP_GLOBAL_INPUT") || !ga_buf || !ga_res_top) return;
+    VkSpan copy = vk_readback(ga_res_top);
+    VkCommandBuffer cb = vk_cmd();
+    vk_full_barrier(cb);
+    VkBufferCopy region = {0, copy.off, ga_res_top};
+    vkCmdCopyBuffer(cb, ga_buf, copy.buf, 1, &region);
+    vk_readback_wait();
+    char dir[128], path[192];
+    vertex_debug_directory(dir, sizeof dir);
+    snprintf(path, sizeof path, "%s/global-gpu.bin", dir);
+    FILE *f = fopen(path, "wb");
+    if (f) { fwrite(copy.ptr, 1, ga_res_top, f); fclose(f); }
+    snprintf(path, sizeof path, "%s/global-ranges.txt", dir);
+    FILE *list = fopen(path, "w");
+    if (list) fprintf(list, "frame %llu; CPU and shadow at capture, after retire\n", (unsigned long long)renderer_present_count());
+    for (int i = 0; i < ga_nres; i++) {
+        const GaRes *e = &ga_res[i];
+        if (!e->live) continue;
+        uint64_t size = e->hi - e->lo;
+        if (list) fprintf(list, "%d address %llx bytes %llx offset %llx\n", i,
+            (unsigned long long)(HEAP_BASE + e->lo), (unsigned long long)size, (unsigned long long)e->off);
+        snprintf(path, sizeof path, "%s/global-%d-cpu.bin", dir, i);
+        f = fopen(path, "wb");
+        if (f) { fwrite((const void *)(uintptr_t)(HEAP_BASE + e->lo), 1, size, f); fclose(f); }
+        snprintf(path, sizeof path, "%s/global-%d-shadow.bin", dir, i);
+        f = fopen(path, "wb");
+        if (f) { fwrite(e->shadow, 1, size, f); fclose(f); }
+    }
+    if (list) fclose(list);
+    LOG("[global-debug] saved %llu arena bytes at frame %llu\n", (unsigned long long)ga_res_top,
+        (unsigned long long)renderer_present_count());
+}
 
 static bool gres_init(void) {
     if (gres_state >= 0) return gres_state;
@@ -4491,7 +4582,14 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
         } else if (is_ubo(b->type) && b->binding < 17) {
             uint64_t tc_ = prof > 0 ? plat_now_ns() : 0;
             bi[n] = cbuf_info(stage, si, (int)b->binding, gx, gy, gz);
+            if (stage == 0 && vertex_debug_capturing()) {
+                vertex_debug_cbufs[b->binding] = bi[n];
+                if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) vertex_debug_dynamic_cbufs |= 1u << b->binding;
+            }
             if (prof > 0) prof_cbuf += plat_now_ns() - tc_;
+            w[n].pBufferInfo = &bi[n];
+        } else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && b->binding == VERTEX_DEBUG_BINDING) {
+            bi[n] = vertex_debug_info();
             w[n].pBufferInfo = &bi[n];
         } else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
 #ifdef __ANDROID__
@@ -4662,18 +4760,21 @@ static CsProg *compute_program(NvnProgram *np) {
     maxwell_structured = structure_on();
     maxwell_no_switch = qcom_no_switch();
     maxwell_no_local_struct = qcom_no_switch() && !getenv("LARECOMP_QCOM_LOCAL");
+    maxwell_explicit_fallthrough = vk_driver_is_qualcomm();
     maxwell_native_half = !getenv("LARECOMP_BITWISE_HALF");
     maxwell_fast_minmax = !getenv("LARECOMP_SAFE_MATH");
 #endif
     ShaderKey k = {0};
     k.glsl = 1;
+    k.gather_bias_bits = gather_bias_bits();
 #ifdef __ANDROID__
     {   // Keep the cached binary lookup for graphics and Turnip; Qualcomm rejects it in large compute shaders.
         extern bool vk_driver_is_qualcomm(void);
         k.gmem_linear_lookup = vk_driver_is_qualcomm();
     }
 #endif
-    cp->si = maxwell_translate((const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, STAGE_COMPUTE, &k);
+    cp->si = maxwell_translate_bounded((const uint8_t *)(uintptr_t)(ss->code_addr + ss->entry_offset),
+                                      ss->const_offset - ss->entry_offset, ss->const_size, STAGE_COMPUTE, &k);
     pthread_mutex_unlock(&translate_lock);
     cp->p.vi = cp->si;
     if (!cp->si->msl) {
@@ -4805,6 +4906,7 @@ static void draw_(CmdRec *r, bool indexed) {
     if (!st.program) { stat_skipped++; return; }
     ShaderKey vkey = {0}, fkey = {0};
     vkey.glsl = fkey.glsl = 1;
+    vkey.gather_bias_bits = fkey.gather_bias_bits = gather_bias_bits();
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
     vkey.depth_minus_one = nvn_depth_mode() == 0;
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
@@ -5520,9 +5622,63 @@ static void draw_(CmdRec *r, bool indexed) {
                     use_index ? icount : count, inst, use_index ? " idx" : "");
 #endif
     }
+    vertex_debug_finish();
 }
 
+// Opt-in snapshot of one draw's guest inputs for offline vertex/shader diagnosis.
+// This records CPU-visible inputs, not a GPU readback or proof of descriptor visibility.
+static void debug_vertex_inputs(Prog *pr) {
+    static bool saved;
+    static uint64_t saved_frame = ~0ull;
+    const char *want = getenv("LARECOMP_DUMP_VERTEX_INPUT");
+    bool multi = getenv("LARECOMP_DUMP_VERTEX_FRAMES") != NULL;
+    if ((multi ? saved_frame == renderer_present_count() : saved) || !vertex_debug_selected(want, pr->code[0], false)) return;
+    char dir[128], path[192];
+    vertex_debug_directory(dir, sizeof dir);
+    snprintf(path, sizeof path, "%s/input.txt", dir);
+    FILE *meta = fopen(path, "w");
+    if (!meta) return;
+    saved = true;
+    saved_frame = renderer_present_count();
+    fprintf(meta, "vs %llx frame %llu\n", (unsigned long long)pr->code[0],
+            (unsigned long long)renderer_present_count());
+    uint32_t streams = 0;
+    for (int i = 0; i < st.nattrib && i < 16; i++) {
+        if (!(pr->vi->attr_mask & (1u << i))) continue;
+        uint32_t a = st.attrib[i], sn = (a >> 8) & 31;
+        if (sn >= 16) continue;
+        streams |= 1u << sn;
+        fprintf(meta, "attr %d format %x stream %u offset %u stride %u divisor %u\n", i, a & 255,
+                sn, a >> 13, st.stream[sn][0], st.stream[sn][1]);
+    }
+    for (int kind = 0; kind < 2; kind++) for (int i = 0; i < (kind ? 18 : 16); i++) {
+        Range range = {0};
+        if (!kind && (streams & (1u << i))) range = st.vbuf[i];
+        if (kind && i >= 3 && (pr->vi->cbuf_mask & (1u << i))) range = st.ubuf[0][i - 3];
+        if (kind && i == 1 && (pr->vi->cbuf_mask & 2))
+            range = (Range){pr->code[0] + st.program->stages[0].const_offset, st.program->stages[0].const_size};
+        if (!range.addr || !range.size || range.size > (1u << 20)) continue;
+        snprintf(path, sizeof path, "%s/%s%d.bin", dir, kind ? "cb" : "vb", i);
+        FILE *f = fopen(path, "wb");
+        if (f) {
+            size_t n = fwrite((const void *)(uintptr_t)range.addr, 1, range.size, f);
+            fclose(f);
+            fprintf(meta, "%s%d address %llx bytes %zu\n", kind ? "cb" : "vb", i,
+                    (unsigned long long)range.addr, n);
+        }
+    }
+    snprintf(path, sizeof path, "%s/shader.vert", dir);
+    FILE *shader = fopen(path, "w");
+    if (shader) { fputs(pr->vi->msl, shader); fclose(shader); }
+    fclose(meta);
+    LOG("[draw] vertex inputs saved for %llx\n", (unsigned long long)pr->code[0]);
+}
+
+#include "fragment_debug.h"
+
 static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
+    debug_vertex_inputs(pr);
+    debug_fragment_inputs(pr);
     LOG("[draw] %s inst %llu mode %llu count %llu prog vs=%llx fs=%llx | vs cb %#x fs cb %#x | rt %d", indexed ? "e" : "a",
         (unsigned long long)(indexed ? r->x[6] : r->x[4]), (unsigned long long)r->x[0], (unsigned long long)r->x[2],
         (unsigned long long)st.program->stages[0].code_addr, (unsigned long long)st.program->stages[1].code_addr,
@@ -5774,7 +5930,7 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
                            .imageExtent = {(uint32_t)rg[3], (uint32_t)rg[4], array ? 1 : nz}};
     vkCmdCopyImageToBuffer(cb, srcimg, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
     wait_why = "texture -> buffer readback";
-    renderer_flush();  // the CPU may read the result right after the fence
+    vk_readback_wait();  // make GPU results visible to the CPU before returning them to the game
     memcpy((void *)(uintptr_t)dst, out.ptr, total);
     {   static int nlog;
         if (getenv("LARECOMP_LOG_READBACK") && nlog++ < 20) {
@@ -6266,7 +6422,7 @@ static void save_texture_raw(TexBackend *b, const char *path) {
     VkBufferImageCopy c = {.bufferOffset = out.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                            .imageExtent = {b->width, b->height, 1}};
     vkCmdCopyImageToBuffer(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
-    renderer_flush();
+    vk_readback_wait();
     char rp[300];
     snprintf(rp, sizeof rp, "%s.raw", path);
     FILE *f = fopen(rp, "wb");
@@ -6324,7 +6480,7 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
     VkSpan out = vk_readback((uint64_t)w * h * 4);
     VkBufferImageCopy c = {.bufferOffset = out.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {w, h, 1}};
     vkCmdCopyImageToBuffer(cb, img, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
-    renderer_flush();
+    vk_readback_wait();
     vk_save_png(path, out.ptr, w, h);
     vk_rp_forget_view(tv);
     vkDestroyImageView(g_vk.dev, tv, NULL);
@@ -6447,6 +6603,7 @@ static void exec_list(uint64_t handle, int depth) {
             static int always = -1;
             if (always < 0) always = getenv("LARECOMP_VK_PASS_RESTART") != NULL;
             if (always || memcmp(&prev, &st.rt, sizeof prev)) {
+                capture_targets(&prev);
                 st.rt_dirty = true;
                 snapshots_flush_fb_dirty("rt-change");
             }
@@ -6561,7 +6718,20 @@ static void exec_list(uint64_t handle, int depth) {
             }
             break;
         }
-        case CMD_BARRIER: snapshots_flush_fb_dirty("barrier"); break;
+        case CMD_BARRIER:
+            snapshots_flush_fb_dirty("barrier");
+            // NVN ordering/cache barriers also publish shader and attachment
+            // writes to later GPU consumers. Invalidating a CPU-side snapshot
+            // alone leaves fragment->vertex/storage dependencies unordered when
+            // the next draw keeps the same targets. Dynamic rendering cannot
+            // contain this cross-stage barrier, so close the pass first.
+            // A zero record is also our command-list header; it orders no work.
+            if (r->x[0]) {
+                if (g_debug_frame) LOG("[barrier] flags %#llx, open pass %d\n", (unsigned long long)r->x[0], in_pass);
+                vk_end_pass();
+                vk_full_barrier(vk_cmd());
+            }
+            break;
         case CMD_FENCE_SYNC: {
             static int fence_flush = -1;
             if (fence_flush < 0) fence_flush = getenv("LARECOMP_FENCE_FLUSH") ? 1 : 0;
@@ -6642,7 +6812,16 @@ static void exec_list(uint64_t handle, int depth) {
             renderer_flush();
             memmove((void *)(uintptr_t)r->x[1], (void *)(uintptr_t)r->x[0], r->x[2]);
             break;
-        default: break;
+        default: {
+            static bool reported[CMD_COUNT];
+            if (r->op < CMD_COUNT && !reported[r->op]) {
+                reported[r->op] = true;
+                LOG("[nvn] unimplemented command %u: %llx %llx %llx %llx %llx\n", r->op,
+                    (unsigned long long)r->x[0], (unsigned long long)r->x[1], (unsigned long long)r->x[2],
+                    (unsigned long long)r->x[3], (unsigned long long)r->x[4]);
+            }
+            break;
+        }
         }
         p += r->size;
     }

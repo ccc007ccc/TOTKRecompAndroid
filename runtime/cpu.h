@@ -16,7 +16,9 @@ typedef struct __attribute__((aligned(16))) Cpu {
     void *thread;            // 312: runtime thread object
     uint64_t fpcr;           // 320: guest FPCR/FPSR (portable FP/SIMD lowering only; the asm path uses the host's)
     uint64_t fpsr;           // 328
-    uint8_t _pad[512 - 336];
+    uint64_t excl_hi;        // 336: high half of a 128-bit exclusive reservation
+    uint32_t excl_size;      // 344: reservation width in bytes
+    uint8_t _pad[512 - 348];
     __uint128_t v[32];       // 512
 } Cpu;
 
@@ -76,11 +78,13 @@ void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0);
         T v = __atomic_load_n((T *)(uintptr_t)a, __ATOMIC_ACQUIRE);                        \
         c->excl_addr = a;                                                                  \
         c->excl_val = v;                                                                   \
+        c->excl_size = sizeof(T);                                                          \
         return v;                                                                          \
     }                                                                                      \
     static inline uint32_t stx##N(Cpu *c, uint64_t a, uint64_t v) {                        \
-        if (c->excl_addr != a) return 1;                                                   \
+        int valid = c->excl_addr == a && c->excl_size == sizeof(T);                        \
         c->excl_addr = ~0ull;                                                              \
+        if (!valid) return 1;                                                              \
         T expected = (T)c->excl_val;                                                       \
         return !__atomic_compare_exchange_n((T *)(uintptr_t)a, &expected, (T)v, 0,         \
                                             __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);           \
@@ -95,6 +99,31 @@ EXCL(8, uint8_t)
 EXCL(16, uint16_t)
 EXCL(32, uint32_t)
 EXCL(64, uint64_t)
+
+// LDXP/STXP: one compare/exchange covers both lanes. The game uses these to
+// implement 16-byte atomic loads and stores. Ordering may be stronger than the
+// guest's relaxed variants, as with the scalar exclusive helpers above.
+static inline uint64_t ldxp32(Cpu *c, uint64_t a) { return ldx64(c, a); }
+static inline uint32_t stxp32(Cpu *c, uint64_t a, uint64_t lo, uint64_t hi) {
+    return stx64(c, a, (uint32_t)lo | ((uint64_t)(uint32_t)hi << 32));
+}
+static inline __uint128_t ldxp64(Cpu *c, uint64_t a) {
+    __uint128_t v = __atomic_load_n((__uint128_t *)(uintptr_t)a, __ATOMIC_ACQUIRE);
+    c->excl_addr = a;
+    c->excl_val = (uint64_t)v;
+    c->excl_hi = (uint64_t)(v >> 64);
+    c->excl_size = 16;
+    return v;
+}
+static inline uint32_t stxp64(Cpu *c, uint64_t a, uint64_t lo, uint64_t hi) {
+    int valid = c->excl_addr == a && c->excl_size == 16;
+    c->excl_addr = ~0ull;
+    if (!valid) return 1;
+    __uint128_t expected = c->excl_val | ((__uint128_t)c->excl_hi << 64);
+    __uint128_t value = lo | ((__uint128_t)hi << 64);
+    return !__atomic_compare_exchange_n((__uint128_t *)(uintptr_t)a, &expected, value, 0,
+                                        __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
 
 // ---- flags (packed NZCV in bits 31..28)
 #define FLAG_N(c) (((c)->nzcv >> 31) & 1)

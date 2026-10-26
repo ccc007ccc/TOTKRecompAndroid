@@ -109,10 +109,13 @@ static bool kwait(int64_t timeout_ns, const struct timespec *ts) {
 }
 
 // ------------------------------------------------------------------ memory map
-typedef struct { uint64_t addr, size; uint32_t type, perm; } Region;
-static Region regions[1024];
+typedef struct { uint64_t addr, size; uint32_t type, perm; bool physical; } Region;
+enum { MAX_REGIONS = 8192 };
+static Region regions[MAX_REGIONS];
+static pthread_mutex_t g_memlock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t system_resource_size;
 static int nregions;
-static uint64_t heap_size;
+static _Atomic uint64_t heap_size;
 #ifdef __ANDROID__
 static uint64_t tls_next;  // (TLS_BASE moves with the window: kernel_init sets it)
 #else
@@ -121,23 +124,31 @@ static uint64_t tls_next = TLS_BASE;
 uint64_t kernel_heap_size(void) { return heap_size; }  // bytes from HEAP_BASE set by SetHeapSize
 // Writable guest data regions (heap, mapped/physical memory, module .data): for debug/runtime memory scans.
 int kernel_data_regions(uint64_t *addr, uint64_t *size, int max) {
+    pthread_mutex_lock(&g_memlock);
     int n = 0;
     for (int i = 0; i < nregions && n < max; i++)
         if ((regions[i].perm & 2) && regions[i].type != 0xB && regions[i].type != 0xC) {
             addr[n] = regions[i].addr; size[n] = regions[i].size; n++;
         }
+    pthread_mutex_unlock(&g_memlock);
     return n;
 }
 
-static void region_add(uint64_t addr, uint64_t size, uint32_t type, uint32_t perm) {
-    if (nregions == 1024) FATAL("too many regions\n");
+static int region_add_locked(uint64_t addr, uint64_t size, uint32_t type, uint32_t perm) {
+    if (nregions == MAX_REGIONS) FATAL("too many regions\n");
     plat_commit(addr, size);  // back it before the OS writes there (Windows: file reads into the heap)
     int i = nregions++;
     while (i > 0 && regions[i - 1].addr > addr) { regions[i] = regions[i - 1]; i--; }
-    regions[i] = (Region){addr, size, type, perm};
+    regions[i] = (Region){addr, size, type, perm, false};
+    return i;
+}
+static void region_add(uint64_t addr, uint64_t size, uint32_t type, uint32_t perm) {
+    pthread_mutex_lock(&g_memlock);
+    region_add_locked(addr, size, type, perm);
+    pthread_mutex_unlock(&g_memlock);
 }
 
-static void region_remove(uint64_t addr) {
+static void region_remove_locked(uint64_t addr) {
     for (int i = 0; i < nregions; i++) {
         if (regions[i].addr == addr) {
             memmove(&regions[i], &regions[i + 1], (nregions - i - 1) * sizeof(Region));
@@ -147,7 +158,13 @@ static void region_remove(uint64_t addr) {
     }
 }
 
-static void query_memory(uint64_t addr, uint64_t out) {
+static void region_remove(uint64_t addr) {
+    pthread_mutex_lock(&g_memlock);
+    region_remove_locked(addr);
+    pthread_mutex_unlock(&g_memlock);
+}
+
+static void query_memory_locked(uint64_t addr, uint64_t out) {
     uint64_t prev_end = 0;
     uint64_t info[5] = {0};  // addr, size, type|attr<<32, perm|ipc<<32, device|pad<<32
     for (int i = 0; i < nregions; i++) {
@@ -171,6 +188,107 @@ static void query_memory(uint64_t addr, uint64_t out) {
     info[0] = prev_end;
     info[1] = (1ull << 39) - prev_end;
     memcpy((void *)out, info, 0x28);
+}
+
+static void query_memory(uint64_t addr, uint64_t out) {
+    pthread_mutex_lock(&g_memlock);
+    query_memory_locked(addr, out);
+    pthread_mutex_unlock(&g_memlock);
+}
+
+void kernel_set_system_resource_size(uint64_t size) {
+    if (size > 0x40000000 || (size & 0xfff)) FATAL("invalid NPDM system resource size\n");
+    system_resource_size = size;
+    LOG("[kernel] NPDM system resources: %#llx bytes\n", (unsigned long long)size);
+}
+static uint64_t memory_total(void) {
+    const char *e = getenv("LARECOMP_TOTAL_MEM");
+    return e ? strtoull(e, NULL, 16) : 0xCD500000ull;
+}
+static uint64_t memory_extra(void) {
+    const char *e = getenv("LARECOMP_USED_EXTRA");
+    return e ? strtoull(e, NULL, 16) : 0x4000000ull;
+}
+static uint64_t physical_used_locked(void) {
+    uint64_t bytes = 0;
+    for (int i = 0; i < nregions; i++) if (regions[i].physical) bytes += regions[i].size;
+    return bytes;
+}
+static uint64_t physical_used(void) {
+    pthread_mutex_lock(&g_memlock);
+    uint64_t bytes = physical_used_locked();
+    pthread_mutex_unlock(&g_memlock);
+    return bytes;
+}
+static void merge_physical_locked(void) {
+    for (int i = 1; i < nregions;) {
+        Region *a = &regions[i - 1], *b = &regions[i];
+        if (a->physical && b->physical && a->addr + a->size == b->addr) {
+            a->size += b->size;
+            memmove(b, b + 1, (nregions - i - 1) * sizeof *b);
+            nregions--;
+        } else i++;
+    }
+}
+static uint32_t physical_memory(uint64_t addr, uint64_t size, bool map) {
+    if (!system_resource_size) return R_INVALID_STATE;
+    if (!size || ((addr | size) & 0xfff) || size > ALIAS_SIZE || addr < ALIAS_BASE ||
+        addr - ALIAS_BASE > ALIAS_SIZE - size) return R_INVALID_ADDRESS;
+    uint64_t end = addr + size, added = size;
+    pthread_mutex_lock(&g_memlock);
+    uint32_t result = R_OK;
+    // Validate the whole request before changing either contents or the map.
+    for (int i = 0; i < nregions; i++) {
+        Region *r = &regions[i];
+        uint64_t re = r->addr + r->size;
+        if (re <= addr || r->addr >= end) continue;
+        if (!r->physical) { result = R_INVALID_STATE; goto done; }
+        added -= (re < end ? re : end) - (r->addr > addr ? r->addr : addr);
+    }
+    if (map) {
+        uint64_t used = heap_size + memory_extra() + system_resource_size + physical_used_locked();
+        if (used > memory_total() || added > memory_total() - used) { result = R_OUT_OF_RESOURCE; goto done; }
+        for (uint64_t cursor = addr; cursor < end;) {
+            uint64_t next = end;
+            bool covered = false;
+            for (int i = 0; i < nregions; i++) {
+                Region *r = &regions[i];
+                if (r->addr + r->size <= cursor) continue;
+                if (r->addr <= cursor) { cursor = r->addr + r->size; covered = true; }
+                else if (r->addr < next) next = r->addr;
+                break;
+            }
+            if (covered) continue;
+            if (nregions == MAX_REGIONS) { result = R_OUT_OF_RESOURCE; goto done; }
+            int i = region_add_locked(cursor, next - cursor, 5, 3);
+            memset((void *)(uintptr_t)cursor, 0, next - cursor);
+            regions[i].physical = true;
+            merge_physical_locked();
+            cursor = next;
+        }
+    } else {
+        if (nregions == MAX_REGIONS) { result = R_OUT_OF_RESOURCE; goto done; }
+        // Release only whole host pages wholly inside the unmapped interval.
+        // Guest pages at either edge are cleared if subsequently mapped again.
+        uint64_t lo = (addr + PLAT_PAGE - 1) & ~(PLAT_PAGE - 1), hi = end & ~(PLAT_PAGE - 1);
+        if (lo < hi && !plat_reset_guest(lo, hi)) { result = R_OUT_OF_RESOURCE; goto done; }
+        for (int i = 0; i < nregions;) {
+            Region r = regions[i];
+            uint64_t re = r.addr + r.size;
+            if (re <= addr || r.addr >= end) { i++; continue; }
+            if (r.addr < addr && re > end) {
+                memmove(&regions[i + 2], &regions[i + 1], (nregions - i - 1) * sizeof r);
+                regions[i].size = addr - r.addr;
+                regions[i + 1] = (Region){end, re - end, r.type, r.perm, true};
+                nregions++; i += 2;
+            } else if (r.addr < addr) { regions[i].size = addr - r.addr; i++; }
+            else if (re > end) { regions[i].addr = end; regions[i].size = re - end; i++; }
+            else { memmove(&regions[i], &regions[i + 1], (nregions - i - 1) * sizeof r); nregions--; }
+        }
+    }
+done:
+    pthread_mutex_unlock(&g_memlock);
+    return result;
 }
 
 // ------------------------------------------------------------------ threads
@@ -570,7 +688,7 @@ static uint32_t svc_wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t
     // A wait that timed out returns without the mutex in BOTW 1.8.2's SDK, as on the console: user mode takes it
     // again (InternalConditionVariableImplByHorizon::TimedWait calls Enter on 0xea01). Taken here too, the thread then
     // waited for the mutex it held, and every thread after it (SavageWindRecomp). The older SDKs run as before.
-    if (r != R_OK && !(r == R_TIMEOUT && g_game_version == 182)) {
+    if (r != R_OK && !(r == R_TIMEOUT && g_game_version == TOTK_VERSION)) {
         // timed out / cancelled: still must reacquire the mutex
         if (!mutex_acquire_or_mark(mutex, tag)) {
             t->wait_kind = WAIT_MUTEX;
@@ -1084,17 +1202,13 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         case 4: v = HEAP_BASE; break;
         case 5: v = HEAP_MAX; break;
         case 6: case 21: {  // application memory (3.2 GB, as on hardware); LARECOMP_TOTAL_MEM=<hex bytes> (test)
-            static uint64_t tot = 0;
-            if (!tot) tot = getenv("LARECOMP_TOTAL_MEM") ? strtoull(getenv("LARECOMP_TOTAL_MEM"), NULL, 16) : 0xCD500000ull;
-            v = tot;
+            v = memory_total() - (id0 == 21 ? system_resource_size : 0);
             static int nlog;
             if (nlog++ < 8) LOG("[kernel] GetInfo total memory -> %#llx\n", (unsigned long long)v);
             break;
         }
         case 7: case 22: {  // used: the heap + the rest (code, data, stacks); LARECOMP_USED_EXTRA=<hex bytes> (test)
-            static uint64_t extra = ~0ull;
-            if (extra == ~0ull) extra = getenv("LARECOMP_USED_EXTRA") ? strtoull(getenv("LARECOMP_USED_EXTRA"), NULL, 16) : 0x4000000;
-            v = heap_size + extra;
+            v = heap_size + memory_extra() + physical_used() + (id0 == 7 ? system_resource_size : 0);
             static int nlog;
             if (nlog++ < 8) LOG("[kernel] GetInfo used memory -> %#llx (heap %#llx)\n", (unsigned long long)v, (unsigned long long)heap_size);
             break;
@@ -1106,8 +1220,9 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         case 13: v = GUEST_HI - GUEST_LO; break;
         case 14: v = STACK_BASE; break;
         case 15: v = STACK_SIZE; break;
-        case 16: case 17: v = 0; break;
-        case 18: v = 0x01007EF00011E000ull; break;  // program id (BOTW)
+        case 16: v = system_resource_size; break;
+        case 17: v = 0; break;  // host manages page-table storage
+        case 18: v = TOTK_TITLE_ID; break;  // program id (BOTW)
         // UserExceptionContextAddress: a zeroed page at the top of the TLS region (BOTW 1.8.2's SDK passes it to
         // SetDyingMessageRegion, which needs it non-null - SavageWindRecomp); AliasRegionExtraSize (HOS 18+): none
         case 20: v = TLS_BASE + TLS_SIZE - 0x1000; break;
@@ -1118,15 +1233,8 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         x[1] = v;
         break;
     }
-    case 0x2C:  // MapPhysicalMemory(addr, size)
-        memset((void *)x[0], 0, x[1]);
-        region_add(x[0], x[1], 0x7, 3);
-        x[0] = R_OK;
-        break;
-    case 0x2D:  // UnmapPhysicalMemory
-        region_remove(x[0]);
-        x[0] = R_OK;
-        break;
+    case 0x2C: x[0] = physical_memory(x[0], x[1], true); break;
+    case 0x2D: x[0] = physical_memory(x[0], x[1], false); break;
     case 0x34: x[0] = svc_wait_for_address(x[0], (uint32_t)x[1], (int32_t)x[2], (int64_t)x[3]); break;
     case 0x35: x[0] = svc_signal_to_address(x[0], (uint32_t)x[1], (int32_t)x[2], (int32_t)x[3]); break;
     case 0x45: {  // CreateEvent -> w1 writable, w2 readable
