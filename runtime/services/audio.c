@@ -15,10 +15,12 @@
 // Ryujinx's AudioRenderer (VoiceState / DataSourceHelper / StateUpdater, copies in notes/ryujinx_audio).
 // Voices decode PCM16 / ADPCM wave buffers, resample to 48 kHz, and mix into their destination mix's
 // buffers; sub mixes route into their destination; the final mix feeds the device sink, which we
-// downmix to stereo and push to an SDL audio stream. Effects and splitters are not implemented.
+// downmix to stereo and push to an SDL audio stream.
 #define WB_COUNT 4
 #define MIXBUF_MAX 24
 #define HIST 4
+#define UNUSED_MIX 0x7fffffff
+#define UNUSED_SPLITTER UINT32_MAX
 
 typedef struct {
     uint64_t addr, size, ctx;
@@ -46,7 +48,7 @@ typedef struct {
 typedef struct {
     uint8_t in_use, is_new, play_state;  // play_state: 0 started, 1 stopped, 2 stopping, 3 paused
     uint8_t fmt, chans, drop;
-    uint32_t rate, wb_count, flush;
+    uint32_t rate, wb_count, first_wb, flush;
     float pitch, volume, prev_volume;
     int32_t mix_id;
     uint32_t splitter_id;
@@ -71,8 +73,20 @@ typedef struct {
 typedef struct Effect Effect;
 
 typedef struct {
+    uint32_t count, capacity, sample_rate;
+    uint32_t *destinations;
+} Splitter;
+
+typedef struct {
+    int32_t mix_id;
+    uint8_t used, touched, bq_on[2], bq_initialized[2];
+    float volume[MIXBUF_MAX], previous[MIXBUF_MAX];
+    float bq[2][5], state[2][2];
+} SplitterDestination;
+
+typedef struct {
     uint32_t sample_rate, sample_count, mix_buffers, submixes, voices, sinks, effects, perf_frames;
-    uint32_t splitters, revision;
+    uint32_t splitters, splitter_destinations, revision;
     uint64_t elapsed_frames;
     uint32_t event_r, event_w;
     KEvent *event;
@@ -83,6 +97,12 @@ typedef struct {
     ChanState *chst;
     Mix *mix;
     uint32_t nmix;
+    Splitter *splitter;
+    SplitterDestination *destination;
+    uint32_t *mix_order, *mix_pending, mix_order_count;
+    bool routing_dirty;
+    uint64_t direct_channels, split_channels, unrouted_channels, decoded_samples;
+    double split_energy;
     uint8_t sink_used, sink_inputs, sink_input[6];
     Effect *fx;
     SDL_AudioStream *stream;
@@ -93,6 +113,9 @@ typedef struct {
 } Renderer;
 
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
+static uint32_t audio_u32(const uint8_t *p) { uint32_t v; memcpy(&v, p, sizeof v); return v; }
+static uint64_t audio_u64(const uint8_t *p) { uint64_t v; memcpy(&v, p, sizeof v); return v; }
+static unsigned audio_revision(const Renderer *r) { return (r->revision >> 24) - '0'; }
 
 // One sample of DSP ADPCM at absolute sample index s (frames of 8 bytes: header + 14 nibbles).
 static int16_t adpcm_next(const uint8_t *data, uint64_t size, uint32_t s, const int16_t *coefs, ChanState *cs) {
@@ -145,7 +168,7 @@ static int decode_voice(Voice *v, int ch, ChanState *cs, int16_t *out, int need)
             cs->pred_scale = c[0]; cs->h0 = c[1]; cs->h1 = c[2];
         }
         uint32_t start = wb->start, end = wb->end;
-        if (cs->loop_count > 0 && wb->loop_start && wb->loop_end && wb->loop_start <= wb->loop_end) {
+        if (cs->loop_count > 0 && wb->loop_end > wb->loop_start) {
             start = wb->loop_start;
             end = wb->loop_end;
         }
@@ -198,7 +221,11 @@ static int decode_voice(Voice *v, int ch, ChanState *cs, int16_t *out, int need)
 static int voice_prepare(Renderer *r, Voice *v) {
     int nch = v->chans > 6 ? 6 : v->chans;
     if (v->is_new) {
-        for (int c = 0; c < nch; c++) memset(&r->chst[v->chan_ids[c] % r->voices], 0, sizeof(ChanState));
+        for (int c = 0; c < nch; c++) {
+            ChanState *cs = &r->chst[v->chan_ids[c] % r->voices];
+            memset(cs, 0, sizeof *cs);
+            cs->wb_index = v->first_wb % WB_COUNT;
+        }
         v->prev_volume = v->volume;
         v->is_new = 0;
     }
@@ -247,6 +274,152 @@ static int voice_prepare(Renderer *r, Voice *v) {
 }
 
 static Mix *find_mix(Renderer *r, int32_t id) { return id >= 0 && (uint32_t)id < r->nmix && r->mix[id].used ? &r->mix[id] : NULL; }
+
+// Splitter wire layouts and channel assignment follow Ryujinx.Audio (MIT),
+// Renderer/Parameter/Splitter* and Server/CommandGenerator. REV12 adds filters;
+// REV15 changes their coefficients from Q14 to float (destination stride 0xA8).
+// Updates are sparse: a section with zero entries must retain the previous graph.
+static bool update_splitters(Renderer *r, const uint8_t *p, size_t size) {
+    if (!size) return true;
+    if (size < 0x20 || audio_u32(p) != 0x48444e53) return false;
+    uint32_t states = audio_u32(p + 4), destinations = audio_u32(p + 8);
+    unsigned rev = audio_revision(r), stride = rev >= 15 ? 0xa8 : rev >= 12 ? 0x90 : 0x70;
+    if (states > r->splitters || destinations > r->splitter_destinations) return false;
+    // Validate the complete section before changing any persistent routing state.
+    for (int apply = 0; apply < 2; apply++) {
+        size_t at = 0x20;
+        for (uint32_t i = 0; i < states; i++) {
+            if (size - at < 0x1c || audio_u32(p + at) != 0x49444e53) return false;
+            uint32_t id = audio_u32(p + at + 4), count = audio_u32(p + at + 12);
+            if (id >= r->splitters || count > r->splitter_destinations || count > (size - at - 0x1c) / 4) return false;
+            for (uint32_t j = 0; j < count; j++)
+                if (audio_u32(p + at + 16 + j * 4) >= r->splitter_destinations) return false;
+            if (apply) {
+                Splitter *s = &r->splitter[id];
+                if (count > s->capacity) {
+                    uint32_t *ids = realloc(s->destinations, count * sizeof *ids);
+                    if (!ids) FATAL("audio splitter allocation failed\n");
+                    s->destinations = ids; s->capacity = count;
+                }
+                s->count = count;
+                s->sample_rate = audio_u32(p + at + 8);
+                if (count) memcpy(s->destinations, p + at + 16, count * 4);
+                r->routing_dirty = true;
+            }
+            at += 0x1c + count * 4; // includes 12 reserved bytes after the ID list
+        }
+        if (destinations > (size - at) / stride) return false;
+        for (uint32_t i = 0; i < destinations; i++, at += stride) {
+            const uint8_t *d = p + at;
+            uint32_t id = audio_u32(d + 4), mix = audio_u32(d + 0x68);
+            if (audio_u32(d) != 0x44444e53 || id >= r->splitter_destinations ||
+                (mix != UNUSED_MIX && mix >= r->nmix)) return false;
+            if (!apply) continue;
+            SplitterDestination *dst = &r->destination[id];
+            unsigned flags = rev >= 15 ? 0x9c : rev >= 12 ? 0x84 : 0x6c;
+            bool used = d[flags] != 0;
+            bool reset = rev >= 13 ? d[flags + 1] != 0 : !dst->used && used;
+            if (dst->mix_id != (int32_t)mix || dst->used != used) r->routing_dirty = true;
+            dst->mix_id = (int32_t)mix;
+            memcpy(dst->volume, d + 8, sizeof dst->volume);
+            if (reset) memcpy(dst->previous, dst->volume, sizeof dst->previous);
+            for (unsigned f = 0; f < 2; f++) {
+                if (rev < 12) { dst->bq_on[f] = dst->bq_initialized[f] = 0; continue; }
+                const uint8_t *b = d + 0x6c + f * (rev >= 15 ? 0x18 : 0xc);
+                bool enabled = b[0] != 0;
+                if (!enabled || !dst->bq_on[f] || (!dst->used && used)) dst->bq_initialized[f] = 0;
+                dst->bq_on[f] = enabled;
+                if (rev >= 15) memcpy(dst->bq[f], b + 4, sizeof dst->bq[f]);
+                else {
+                    int16_t coefficients[5]; memcpy(coefficients, b + 2, sizeof coefficients);
+                    for (unsigned k = 0; k < 5; k++) dst->bq[f][k] = coefficients[k] / 16384.f;
+                }
+            }
+            dst->used = used;
+        }
+    }
+    return true;
+}
+
+static SplitterDestination *splitter_destination(Renderer *r, uint32_t splitter, uint32_t index) {
+    if (splitter >= r->splitters || index >= r->splitter[splitter].count) return NULL;
+    uint32_t id = r->splitter[splitter].destinations[index];
+    return id < r->splitter_destinations ? &r->destination[id] : NULL;
+}
+
+static void mix_ramp(float *out, const float *in, uint32_t n, float from, float to) {
+    if (from == 0 && to == 0) return;
+    float delta = (to - from) / n;
+    for (uint32_t i = 0; i < n; i++) out[i] += in[i] * (from + delta * i);
+}
+
+// Filter once per destination, then fan out to its mix buffers. Filtering once
+// per output buffer would incorrectly advance the history multiple times.
+static void mix_split_destination(Renderer *r, SplitterDestination *d, const float *in, float gain, bool ramp) {
+    Mix *out = d->used ? find_mix(r, d->mix_id) : NULL;
+    if (!out || !out->buf) return;
+    bool audible = false;
+    for (uint32_t b = 0; b < out->bufs; b++)
+        if (d->volume[b] != 0 || (ramp && d->previous[b] != 0)) { audible = true; break; }
+    d->touched = 1;
+    if (!audible) return;
+    uint32_t n = r->sample_count;
+    float filtered[4096];
+    if (d->bq_on[0] || d->bq_on[1]) {
+        memcpy(filtered, in, n * sizeof(float));
+        for (unsigned f = 0; f < 2; f++) if (d->bq_on[f]) {
+            float *s = d->state[f], *k = d->bq[f];
+            if (!d->bq_initialized[f]) { s[0] = s[1] = 0; d->bq_initialized[f] = 1; }
+            for (uint32_t i = 0; i < n; i++) {
+                float x = filtered[i], y = x * k[0] + s[0];
+                s[0] = x * k[1] + y * k[3] + s[1];
+                s[1] = x * k[2] + y * k[4];
+                filtered[i] = y;
+            }
+        }
+        in = filtered;
+    }
+    for (uint32_t b = 0; b < out->bufs; b++)
+        mix_ramp(out->buf + b * n, in, n, gain * (ramp ? d->previous[b] : d->volume[b]), gain * d->volume[b]);
+}
+
+// A submix may have several downstream mixes through a splitter. Build a
+// topological order when connections change, rather than following only dest.
+static void mix_edges(Renderer *r, uint32_t id, bool remove) {
+    Mix *m = &r->mix[id];
+    if (!id || !m->used) return;
+    if (find_mix(r, m->dest) && (uint32_t)m->dest != id) {
+        if (remove) r->mix_pending[m->dest]--; else r->mix_pending[m->dest]++;
+    } else if (m->dest == UNUSED_MIX && m->dest_splitter < r->splitters) {
+        Splitter *s = &r->splitter[m->dest_splitter];
+        for (uint32_t i = 0; i < s->count; i++) {
+            SplitterDestination *d = splitter_destination(r, m->dest_splitter, i);
+            if (d && d->used && find_mix(r, d->mix_id) && (uint32_t)d->mix_id != id) {
+                if (remove) r->mix_pending[d->mix_id]--; else r->mix_pending[d->mix_id]++;
+            }
+        }
+    }
+}
+
+static void update_mix_order(Renderer *r) {
+    if (!r->routing_dirty) return;
+    memset(r->mix_pending, 0, r->nmix * sizeof *r->mix_pending);
+    for (uint32_t m = 0; m < r->nmix; m++) mix_edges(r, m, false);
+    uint32_t count = 0;
+    for (uint32_t m = 0; m < r->nmix; m++)
+        if (r->mix[m].used && !r->mix_pending[m]) r->mix_order[count++] = m;
+    for (uint32_t i = 0; i < count; i++) {
+        mix_edges(r, r->mix_order[i], true);
+        r->mix_pending[r->mix_order[i]] = UINT32_MAX;
+        for (uint32_t m = 0; m < r->nmix; m++) if (r->mix[m].used && !r->mix_pending[m]) {
+            bool queued = false;
+            for (uint32_t j = i + 1; j < count; j++) if (r->mix_order[j] == m) { queued = true; break; }
+            if (!queued) r->mix_order[count++] = m;
+        }
+    }
+    r->mix_order_count = count;
+    r->routing_dirty = false;
+}
 
 // ------------------------------------------------------------------ reverb (port of Ryujinx ReverbState/Command)
 typedef struct { float *buf; uint32_t sr, cur, last, count, max; } DelayLine;
@@ -421,22 +594,46 @@ static void reverb_process(Reverb *rv, float *const *in, float *const *out, uint
     }
 }
 
+#include "audio_effects.h"
+
 struct Effect {
     uint8_t type, enabled;
     int32_t mix_id;
     uint32_t order;
     Reverb rv;
+    AuxiliaryParam aux;
+    Limiter limiter;
+    Reverb3d rv3d;
 };
+
+static void effect_free(Effect *fx) {
+    for (unsigned i = 0; i < 4; i++) { free(fx->rv.fdn[i].buf); free(fx->rv.decay[i].dl.buf); }
+    free(fx->rv.pre.buf); free(fx->rv.fc.buf);
+    free(fx->limiter.delay);
+    reverb3d_free(&fx->rv3d);
+    memset(fx, 0, sizeof *fx);
+}
+
+static bool effect_supported(unsigned type) { return type == 2 || type == 4 || type == 5 || type == 7; }
 
 // Effect slot update from EffectInParameterVersion1 (0xC0 bytes: type, is_new, enabled, mix, buffers, order, data).
 static void effect_update(Effect *fx, const uint8_t *e) {
-    if (fx->type != e[0]) memset(&fx->rv.p, 0, sizeof fx->rv.p), fx->rv.ready = 0;
+    if (fx->type != e[0] || e[1]) effect_free(fx);
     fx->type = e[0];
     fx->enabled = e[2];
     memcpy(&fx->mix_id, e + 4, 4);
     memcpy(&fx->order, e + 0x18, 4);
-    if (fx->type != 4) return;
     const uint8_t *d = e + 0x20;
+    if (fx->type == 2) { memcpy(&fx->aux, d, sizeof fx->aux); return; }
+    if (fx->type == 5) {
+        if (fx->enabled || d[14]) reverb3d_update(&fx->rv3d, d);
+        return;
+    }
+    if (fx->type == 7) {
+        if (fx->enabled || d[14]) limiter_update(&fx->limiter, d);
+        return;
+    }
+    if (fx->type != 4) return;
     uint16_t ch_max, ch;
     memcpy(&ch_max, d + 12, 2);
     memcpy(&ch, d + 14, 2);
@@ -463,7 +660,15 @@ static void apply_effects(Renderer *r, int32_t mix_id, Mix *m) {
     for (uint32_t order = 0; order < r->effects; order++) {
         for (uint32_t i = 0; i < r->effects; i++) {
             Effect *fx = &r->fx[i];
-            if (fx->type != 4 || fx->mix_id != mix_id || fx->order != order || !fx->rv.ready) continue;
+            if (fx->mix_id != mix_id || fx->order != order) continue;
+            if (fx->type == 2) { auxiliary_process(&fx->aux, m, N, fx->enabled); continue; }
+            if (fx->type == 7) { limiter_process(&fx->limiter, m, N, fx->enabled); continue; }
+            if (fx->type == 5) {
+                bool enabled = fx->enabled && g_settings.reverb && !getenv("LARECOMP_NO_REVERB");
+                reverb3d_process(&fx->rv3d, m, N, enabled, audio_revision(r));
+                continue;
+            }
+            if (fx->type != 4 || !fx->rv.ready) continue;
             int ch = fx->rv.p.ch;
             float *in[6], *out[6];
             int ok = 1;
@@ -512,6 +717,7 @@ static void render_frame(Renderer *r, float *stereo) {
             if (need > 4096) need = 4096;
             memcpy(tmp, cs->hist, sizeof cs->hist);
             int got = decode_voice(v, c, cs, tmp + HIST, need);
+            r->decoded_samples += got;
             if (got < need) memset(tmp + HIST + got, 0, (need - got) * 2);
             float pos = cs->fraction;
             for (uint32_t i = 0; i < N; i++, pos += ratio) {
@@ -546,15 +752,32 @@ static void render_frame(Renderer *r, float *stereo) {
                 double e = (q1 * q1 + q2 * q2 - q1 * q2 * cw) * v->volume * v->volume / N;
                 hf[vi] += e;
             }
-            if (!dst) continue;
             static int solo = -2;
             if (solo == -2) solo = getenv("LARECOMP_AUDIO_SOLO") ? atoi(getenv("LARECOMP_AUDIO_SOLO")) : -1;
             if (solo >= 0 && (int)vi != solo) continue;
-            for (uint32_t b = 0; b < dst->bufs && b < MIXBUF_MAX; b++) {
-                float g0 = v->prev_volume * cr->prev[b], g1 = v->volume * cr->mix[b];
-                if (g0 == 0 && g1 == 0) continue;
-                float *o = dst->buf + b * N, dg = (g1 - g0) / N;
-                for (uint32_t i = 0; i < N; i++) o[i] += smp[i] * (g0 + dg * i);
+            float volume_delta = (v->volume - v->prev_volume) / N;
+            for (uint32_t i = 0; i < N; i++) smp[i] *= v->prev_volume + volume_delta * i;
+            if (dst && dst->buf) {
+                for (uint32_t b = 0; b < dst->bufs; b++)
+                    mix_ramp(dst->buf + b * N, smp, N, cr->prev[b], cr->mix[b]);
+                r->direct_channels++;
+            } else if (v->mix_id == UNUSED_MIX && v->splitter_id < r->splitters) {
+                bool routed = false;
+                // Destinations are interleaved by source channel, not broadcast:
+                // a stereo voice uses entries 0,2,4... for L and 1,3,5... for R.
+                for (uint32_t index = c; index < r->splitter[v->splitter_id].count; index += nch) {
+                    SplitterDestination *d = splitter_destination(r, v->splitter_id, index);
+                    if (d && d->used && find_mix(r, d->mix_id)) {
+                        mix_split_destination(r, d, smp, 1.f, true);
+                        routed = true;
+                    }
+                }
+                if (routed) {
+                    r->split_channels++;
+                    for (uint32_t i = 0; i < N; i++) r->split_energy += (double)smp[i] * smp[i];
+                } else r->unrouted_channels++;
+            } else {
+                r->unrouted_channels++;
             }
         }
         for (int c = 0; c < nch; c++) {
@@ -574,31 +797,45 @@ static void render_frame(Renderer *r, float *stereo) {
         LOG("\n");
         memset(hf, 0, sizeof hf);
     }
-    // sub mixes, deepest first
-    int depth[64] = {0};
-    int maxd = 0;
-    for (uint32_t m = 1; m < r->nmix && m < 64; m++) {
-        if (!r->mix[m].used) continue;
-        int d = 0;
-        for (Mix *x = &r->mix[m]; x && d < 64; x = find_mix(r, x->dest)) { if (x == &r->mix[0]) break; d++; }
-        depth[m] = d;
-        if (d > maxd) maxd = d;
-    }
-    for (int d = maxd; d >= 1; d--) {
-        for (uint32_t m = 1; m < r->nmix && m < 64; m++) {
-            Mix *s = &r->mix[m];
-            if (!s->used || depth[m] != d) continue;
-            apply_effects(r, (int32_t)m, s);
-            Mix *t = find_mix(r, s->dest);
-            if (!t || t == s) continue;
-            for (uint32_t i = 0; i < s->bufs; i++)
-                for (uint32_t j = 0; j < t->bufs; j++) {
-                    float g = s->volume * s->vol[i * MIXBUF_MAX + j];
-                    if (g == 0) continue;
-                    float *src = s->buf + i * N, *o = t->buf + j * N;
-                    for (uint32_t k = 0; k < N; k++) o[k] += src[k] * g;
-                }
+    update_mix_order(r);
+    for (uint32_t index = 0; index < r->mix_order_count; index++) {
+        uint32_t m = r->mix_order[index];
+        if (!m) continue; // final effects run after every incoming submix
+        Mix *s = &r->mix[m];
+        if (!s->used || !s->buf || !s->bufs) continue;
+        apply_effects(r, (int32_t)m, s);
+        Mix *t = find_mix(r, s->dest);
+        if (!t && s->dest == UNUSED_MIX && s->dest_splitter < r->splitters) {
+            Splitter *split = &r->splitter[s->dest_splitter];
+            for (uint32_t i = 0; i < split->count; i++) {
+                SplitterDestination *d = splitter_destination(r, s->dest_splitter, i);
+                if (d && d->mix_id != (int32_t)m)
+                    mix_split_destination(r, d, s->buf + (i % s->bufs) * N, s->volume, false);
+            }
+            continue;
         }
+        if (!t || t == s) continue;
+        for (uint32_t i = 0; i < s->bufs; i++)
+            for (uint32_t j = 0; j < t->bufs; j++) {
+                float g = s->volume * s->vol[i * MIXBUF_MAX + j];
+                if (g == 0) continue;
+                float *src = s->buf + i * N, *o = t->buf + j * N;
+                for (uint32_t k = 0; k < N; k++) o[k] += src[k] * g;
+            }
+    }
+    for (uint32_t i = 0; i < r->splitter_destinations; i++) {
+        SplitterDestination *d = &r->destination[i];
+        if (d->touched) memcpy(d->previous, d->volume, sizeof d->previous);
+        d->touched = 0;
+    }
+    if (getenv("LARECOMP_AUDIO_STATS") && r->elapsed_frames % 200 == 199) {
+        LOG("[audren] routing f%llu: direct %llu split %llu unconnected %llu channel-frames, decoded %llu samples, split rms %.1f\n",
+            (unsigned long long)r->elapsed_frames, (unsigned long long)r->direct_channels,
+            (unsigned long long)r->split_channels, (unsigned long long)r->unrouted_channels,
+            (unsigned long long)r->decoded_samples,
+            r->split_channels ? sqrt(r->split_energy / ((double)r->split_channels * N)) : 0);
+        r->direct_channels = r->split_channels = r->unrouted_channels = r->decoded_samples = 0;
+        r->split_energy = 0;
     }
     // final mix -> device sink (FL FR FC LFE BL BR) -> stereo
     Mix *f = find_mix(r, 0);
@@ -717,6 +954,7 @@ static void update_voice(Renderer *r, Voice *v, const uint8_t *p, uint8_t *out, 
     memcpy(&v->pitch, p + 28, 4);
     memcpy(&v->volume, p + 32, 4);
     memcpy(&v->wb_count, p + 60 + d, 4);
+    if (is_new) memcpy(&v->first_wb, p + 64 + d, 4);
     memcpy(&v->ds_addr, p + 72 + d, 8);
     memcpy(&v->mix_id, p + 88 + d, 4);
     memcpy(&v->splitter_id, p + 92 + d, 4);
@@ -742,10 +980,6 @@ static void update_voice(Renderer *r, Voice *v, const uint8_t *p, uint8_t *out, 
         }
         v->bq_on[f] = b[0];
         memcpy(v->bq[f], k, sizeof k);
-    }
-    if (v->splitter_id != 0xFFFFFFFF && v->mix_id < 0) {
-        static int warned;
-        if (!warned++) LOG("[audren] splitter destinations not implemented\n");
     }
     ChanState *cs0 = &r->chst[v->chan_ids[0] % r->voices];
     if (is_new)
@@ -790,9 +1024,9 @@ static void update_voice(Renderer *r, Voice *v, const uint8_t *p, uint8_t *out, 
             static int vlog = -1;
             if (vlog < 0) vlog = getenv("LARECOMP_AUDIO_LOG") ? 1 : 0;
             if (vlog)
-                LOG("[audren] f%llu v%ld wb%d fmt %u rate %u ch %u pitch %.3f vol %.3f mix %d res %u addr %llx size %llx "
+                LOG("[audren] f%llu v%ld wb%d fmt %u rate %u ch %u pitch %.3f vol %.3f mix %d splitter %u res %u addr %llx size %llx "
                     "[%u,%u) loop %u/%d eos %u ctx %llx ds %llx\n", (unsigned long long)r->elapsed_frames,
-                    (long)(v - r->voice), i, v->fmt, v->rate, v->chans, v->pitch, v->volume, v->mix_id, v->chan_ids[0],
+                    (long)(v - r->voice), i, v->fmt, v->rate, v->chans, v->pitch, v->volume, v->mix_id, v->splitter_id, v->chan_ids[0],
                     (unsigned long long)wb->addr, (unsigned long long)wb->size, wb->start, wb->end, wb->loop,
                     wb->loop_count, wb->eos, (unsigned long long)wb->ctx, (unsigned long long)v->ds_addr);
             if (vlog && v->ds_addr && in_guest(v->ds_addr, 38)) {
@@ -816,6 +1050,8 @@ static void update_voice(Renderer *r, Voice *v, const uint8_t *p, uint8_t *out, 
 static void update_mix(Renderer *r, const uint8_t *p, int id) {
     if (id < 0 || (uint32_t)id >= r->nmix) return;
     Mix *m = &r->mix[id];
+    if (m->used != p[12] || m->dest != (int32_t)audio_u32(p + 0x924) || m->dest_splitter != audio_u32(p + 0x928))
+        r->routing_dirty = true;
     memcpy(&m->volume, p, 4);
     memcpy(&m->bufs, p + 8, 4);
     if (m->bufs > MIXBUF_MAX) m->bufs = MIXBUF_MAX;
@@ -837,18 +1073,21 @@ static void update_mix(Renderer *r, const uint8_t *p, int id) {
 // RequestUpdate: input is an UpdateDataHeader + sections; write a matching output.
 static void request_update(Renderer *r, IpcReq *req, IpcResp *resp) {
     IpcBuf *in = in_buf(req, 0), *out = out_buf(req, 0);
-    if (!in || !out || !in->size || !out->size) return;
+    if (!in || !out || in->size < 0x40 || out->size < 0x40) return;
     const uint8_t *ip = (const uint8_t *)(uintptr_t)in->addr;
     uint8_t *op = (uint8_t *)(uintptr_t)out->addr;
     const uint32_t *h = (const uint32_t *)ip;
     uint32_t behavior_sz = h[1], pools_sz = h[2], voices_sz = h[3], chans_sz = h[4], effects_sz = h[5];
     uint32_t mixes_sz = h[6], sinks_sz = h[7], perf_sz = h[8];
+    uint64_t total = 0x40;
+    for (unsigned i = 1; i <= 9; i++) total += h[i];
+    if (h[15] > in->size || total > h[15]) FATAL("invalid audio update section bounds\n");
     {
         static int dump_n = -1;
         static long count;
         if (dump_n < 0) dump_n = getenv("LARECOMP_AUDIO_DUMP") ? 1 : 0;
         count++;
-        if (dump_n && (count == 300 || count == 2000 || count == 6000 || count == 12000)) {
+        if (dump_n && (count == 1 || count == 300 || count == 2000 || count == 6000 || count == 12000)) {
             char path[64];
             snprintf(path, sizeof path, "build/audren_in_%ld.bin", count);
             FILE *f = fopen(path, "wb");
@@ -893,7 +1132,7 @@ static void request_update(Renderer *r, IpcReq *req, IpcResp *resp) {
         const uint8_t *v = vin + i * vstride;
         if (v[9]) update_voice(r, &r->voice[i], v, op + o, voice2);
     }
-    // effects (not processed): report them as enabled/disabled per request
+    // Effect status describes the previous rendering cycle, including limiter statistics.
     const uint8_t *ein = vin + voices_sz;
     // (REV9 on, BOTW 1.8.2's SDK 20 is REV13: an effect's status is 0x90 bytes, its result state after the first 0x10)
     uint32_t rev = (r->revision >> 24) - '0', estat = rev >= 9 ? 0x90 : 0x10;
@@ -902,10 +1141,14 @@ static void request_update(Renderer *r, IpcReq *req, IpcResp *resp) {
         const uint8_t *e = ein + i * 0xC0;
         op[o] = e[2] ? 3 : 4;  // EffectState Enabled / Disabled
         if (i < r->effects) effect_update(&r->fx[i], e);
+        if (i < r->effects && e[0] == 7 && estat >= 0x40) {
+            memcpy(op + o + 0x10, r->fx[i].limiter.input_max, 24);
+            memcpy(op + o + 0x28, r->fx[i].limiter.gain_min, 24);
+        }
         static uint32_t seen_types;
         if (e[0] && e[0] < 32 && !(seen_types & (1u << e[0]))) {
             seen_types |= 1u << e[0];
-            LOG("[audren] effect type %u used%s: slot %u mix %d enabled %u\n", e[0], e[0] == 4 ? "" : " (not implemented)", i,
+            LOG("[audren] effect type %u used%s: slot %u mix %d enabled %u\n", e[0], effect_supported(e[0]) ? "" : " (not implemented)", i,
                 *(const int32_t *)(e + 4), e[2]);
         }
         if (e[0] && getenv("LARECOMP_AUDIO_LOG")) {
@@ -919,10 +1162,7 @@ static void request_update(Renderer *r, IpcReq *req, IpcResp *resp) {
         }
     }
     const uint8_t *min = ein + effects_sz;
-    if (r->splitters && *(const uint32_t *)min == 0x48444E53) {
-        static int warned;
-        if (!warned++) LOG("[audren] splitter section present (ignored)\n");
-    }
+    if (!update_splitters(r, min, h[9])) FATAL("invalid audio splitter update\n");
     // mixes: the section ends right before the sinks
     const uint8_t *sin = ip + h[15] - perf_sz - sinks_sz;
     min = sin - mixes_sz;
@@ -1107,22 +1347,30 @@ SERVICE("audren:u", audren_u) {
         r->sample_rate = p[0]; r->sample_count = p[1]; r->mix_buffers = p[2]; r->submixes = p[3];
         r->voices = p[4]; r->sinks = p[5]; r->effects = p[6]; r->perf_frames = p[7];
         r->splitters = p[9];
+        r->splitter_destinations = p[10];
         r->revision = p[12];
         r->state = 1;
-        if (r->voices > 1024) r->voices = 1024;
+        if (!r->voices || r->voices > 1024 || !r->sample_count || r->sample_count > 4096 ||
+            !r->sample_rate || r->submixes >= 64 || r->splitters > 4096 || r->splitter_destinations > 16384)
+            FATAL("invalid audio renderer configuration\n");
         r->nmix = r->submixes + 1;
         pthread_mutex_init(&r->lock, NULL);
         r->voice = calloc(r->voices, sizeof(Voice));
         r->chres = calloc(r->voices, sizeof(ChanRes));
         r->chst = calloc(r->voices, sizeof(ChanState));
         r->mix = calloc(r->nmix, sizeof(Mix));
+        r->splitter = calloc(r->splitters ? r->splitters : 1, sizeof *r->splitter);
+        r->destination = calloc(r->splitter_destinations ? r->splitter_destinations : 1, sizeof *r->destination);
+        r->mix_order = calloc(r->nmix, sizeof *r->mix_order);
+        r->mix_pending = calloc(r->nmix, sizeof *r->mix_pending);
+        r->routing_dirty = true;
         r->fx = calloc(r->effects ? r->effects : 1, sizeof(Effect));
         renderer_open_output(r);
         r->event = kernel_create_event_pair(&r->event_w, &r->event_r);
         pthread_create(&r->thread, NULL, renderer_tick, r);
         audio_track(r, NULL);
-        LOG("[audren] renderer %u Hz, %u samples/frame, %u voices, %u mixes, %u mix buffers, %u splitters, %u effects\n",
-            r->sample_rate, r->sample_count, r->voices, r->nmix, r->mix_buffers, r->splitters, r->effects);
+        LOG("[audren] renderer %u Hz, %u samples/frame, %u voices, %u mixes, %u mix buffers, %u splitters/%u destinations, %u effects\n",
+            r->sample_rate, r->sample_count, r->voices, r->nmix, r->mix_buffers, r->splitters, r->splitter_destinations, r->effects);
         ipc_return_object(resp, service_new("IAudioRenderer", audio_renderer, r));
         break;
     }
@@ -1199,7 +1447,10 @@ void audio_stop(void) {
             if (r->stream) SDL_DestroyAudioStream(r->stream);
             if (r->wav) { wav_header(r->wav, r->wav_bytes); fclose(r->wav); }
             for (uint32_t m = 0; m < r->nmix; m++) free(r->mix[m].buf);
-            free(r->voice), free(r->chres), free(r->chst), free(r->mix), free(r->fx);  // (reverb delay lines leak)
+            for (uint32_t j = 0; j < r->splitters; j++) free(r->splitter[j].destinations);
+            free(r->splitter); free(r->destination); free(r->mix_order); free(r->mix_pending);
+            for (uint32_t j = 0; j < r->effects; j++) effect_free(&r->fx[j]);
+            free(r->voice); free(r->chres); free(r->chst); free(r->mix); free(r->fx);
             free(r);
             g_rens[i] = NULL;
             n++;

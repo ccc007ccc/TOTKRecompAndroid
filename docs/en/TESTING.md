@@ -93,3 +93,18 @@ adb -s "$ANDROID_SERIAL" shell am instrument -w \
 ```
 
 The output must include `PASS: Copy preserved the dialog`; the adb exit code alone is insufficient.
+
+The mixer test uses synthetic wire parameters and known samples without game files or an audio device.
+It covers splitters, ADPCM, auxiliary rings, limiting and 3D reverb:
+
+```bash
+clang -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Wno-format \
+  -ffunction-sections -fdata-sections -Wl,--gc-sections -Iruntime -pthread \
+  tools/test_audio_mixer.c -lm -o .work/totk-port/scratch/test_audio_mixer
+.work/totk-port/scratch/test_audio_mixer
+```
+
+`LARECOMP_AUDIO_STATS=1` reports direct/split/unconnected channels and decoded samples every 200 audio frames.
+Unconnected voices may be intentionally disabled by the game, so they are not automatically missing sounds.
+`LARECOMP_AUDIO_DUMP=1` saves update snapshots, including the initial full configuration.
+`LARECOMP_AUDIO_WAV=<path inside the app data directory>` records audren's float stereo output; this is not a measure of complete game-audio coverage.

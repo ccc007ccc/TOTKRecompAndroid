@@ -87,3 +87,16 @@ adb -s "$ANDROID_SERIAL" shell am instrument -w \
 ```
 
 输出须包含 `PASS: Copy preserved the dialog`；不要仅根据 adb 退出码判定通过。
+
+音频混音检查使用自造参数包和已知样本，不需要游戏文件或声卡，覆盖分流器、ADPCM、辅助效果环、限幅和 3D 混响：
+
+```bash
+clang -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Wno-format \
+  -ffunction-sections -fdata-sections -Wl,--gc-sections -Iruntime -pthread \
+  tools/test_audio_mixer.c -lm -o .work/totk-port/scratch/test_audio_mixer
+.work/totk-port/scratch/test_audio_mixer
+```
+
+`LARECOMP_AUDIO_STATS=1` 每 200 个音频帧记录直接/分流/未连接声道及解码样本数；未连接声源可能是游戏主动停用，
+不能直接视作丢失。`LARECOMP_AUDIO_DUMP=1` 保存包括首次完整初始化在内的参数快照；
+`LARECOMP_AUDIO_WAV=<应用数据目录内路径>` 保存 audren 的浮点立体声输出。抓取不是完整游戏音频覆盖率证明。
