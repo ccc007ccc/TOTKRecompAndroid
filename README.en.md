@@ -15,8 +15,8 @@ The game reaches the underground Hyrule Castle scene on a OnePlus 13 with Adreno
 The user confirmed that character deformation was fixed. With Banner Turnip 27 A8xx and the gather correction enabled,
 the user also confirmed that the gloom checkerboard disappeared.
 
-**The port is unfinished.** The upper-left quarter of the game image still clips the torch halo, and large parts of the scene
-occasionally become dark or disappear. Audio, save transactions, complete input flows, long sessions and performance need further validation.
+The user also confirmed the latest fix for torch-halo clipping and large-area scene flicker after NVN conditional rendering was implemented.
+**The project is still in development.** Audio, save transactions, complete input flows, long sessions and performance need further validation.
 The current diagnostic game library uses `-O0`; its frame rate is not an optimized performance baseline.
 See [status and known issues](docs/en/STATUS.md) and the [detailed investigation record, in Chinese](docs/TOTK-PORT.md).
 

@@ -20,18 +20,24 @@ The validated device is a OnePlus 13 (PJZ110, Adreno 830); this branch has no ac
 The driver and gather correction have not been isolated by separate controls in the current scene. Do not attribute the improvement to only one of them.
 Earlier negative results remain in the [investigation record](../TOTK-PORT.md).
 
-## Unresolved
+## Latest visual fix confirmed
 
-- **Torch halo clipping:** the upper-left quarter of the 16:9 image cuts off the halo, including with runtime scaling disabled.
-  Run39 located the first fault in bloom upsampling: the actual mip 1 has a zeroed upper-left quarter.
-  Unimplemented NVN render-enable and conditional-render state are being checked for incorrectly executed clears.
-- **Large-area flicker:** the user captured a frame with characters, flame and UI still visible while much of the background became dark or absent.
-  Missing draws, lighting and compositing have not yet been distinguished.
-- **Other transparency and shadows:** gloom, fog, particles and flame previously disappeared together; ordinary shadows could flicker independently.
-  They have not all been accepted after the driver change.
-- Some views encounter an unimplemented vertex `DMUL` instruction; its relation to these faults is unproven.
-- Complete audio, input flows, save transactions/crash recovery, long sessions and performance remain unverified.
+Run40 implements `SetRenderEnable` and `SetRenderEnableConditional`. At command execution it compares the two 64-bit
+NVNcounterData counter values, then gates draws and color/depth attachment clears. Timestamps do not participate;
+state changes and counter reports still execute.
+
+Before the fix, clearing a 40×22 rectangle in the 80×45 bloom mip reproduced the captured corruption pixel for pixel.
+In frames 1000/1001, the fix skipped 117 color clears and 28 depth clears; the final bloom mip's upper-left region regained valid content.
+The user confirmed that this device build fixed the reported halo clipping and scene flicker.
+
+## Remaining validation
+
+- A subsequent user comparison shows overly dark standalone rocks and the base material of luminous rocks. This material/lighting issue is now being investigated.
+- Broader scenes, ordinary shadows, transparency and long sessions still need coverage. Current scene acceptance does not cover every game area or device.
+- Some views previously encountered an unimplemented vertex `DMUL`; this change does not address it, and its relation to the fixed faults was not established.
+- Complete audio, input flows, save transactions/crash recovery and performance remain unverified.
   The game has produced readable autosaves, but `IFileSystem::Commit` is still a stub.
+- Conditional rendering uses the existing CPU counter results and SAMPLES_PASSED fallback. It does not implement hardware occlusion queries.
 
 ## Build and upstream state
 
@@ -39,7 +45,9 @@ The application development version is `0.1.0-totk-dev`, distinct from game vers
 Upstream `ef7a306` / `v0.1.11-beta` has been merged and the APK builds. Its language, font, touch and lifecycle changes,
 and its new policy for game GPU timestamps, still need device acceptance in this branch.
 
-The phone's run39 baseline was installed before that merge and uses Banner Turnip. It is not evidence for the merged APK.
+The phone now runs run40, which includes the upstream merge and conditional-render fix, with Banner Turnip.
+The focused comparison uses `LARECOMP_GAME_DYNRES=1` to preserve the earlier game-resolution behavior;
+it is not a separate acceptance test of upstream's new default counter policy.
 The game library was built with `GAMELIB_FAST_COMPILE=ON`, all functions at `-O0`.
 
 ## Inherited functionality

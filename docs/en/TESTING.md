@@ -59,3 +59,12 @@ The last group is the presented image under the same frame number as its draws.
 Readback changes timing. Deferred capture reduces per-pass CPU waits but is not suitable for performance measurement.
 Shader instrumentation can also alter driver optimization. A successful independent replay verifies those inputs, not every live binding or synchronization dependency.
 Keep private GPU inputs, generated shader sources and replay data out of Git.
+
+
+The conditional-clear regression uses the real command recorder and checks execution-time values, one-time clearing, ignored timestamps and 64-bit comparisons. Build it with Clang:
+
+```bash
+clang -O2 -ffunction-sections -fdata-sections tools/test_render_condition.c \
+  -Wl,--gc-sections -pthread -o .work/totk-port/scratch/test-render-condition
+.work/totk-port/scratch/test-render-condition
+```

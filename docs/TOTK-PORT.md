@@ -325,3 +325,40 @@ run36 第 700 帧的三张合成输入与 cb3 又做了独立完整片元回放�
 不能用于性能结论。默认开发构建为 `-O1`，超大跳转表函数单独 `-O0`。
 
 本机证据：`.work/totk-port/logs/`；生成输入身份：`.work/totk-port/game/manifest.json`。
+
+
+### 第 40 轮：条件渲染与一次性清除修复，用户确认
+
+上游同步与中英文文档已先提交推送，随后继续原排查。参考工程 `hle_nvn.c` 明确记录了 TOTK 的协议：
+CPU 写入计数值 1 请求清除，`SetRenderEnableConditional` 比较相邻两个 NVNcounterData 的 counter 字段，
+清除后 TIMESTAMP_TOP 报告将 counter 归零，重复执行相同命令列表时不再清除。
+
+本项目原来的条件命令为空函数，显式渲染启用命令也没有执行。现已记录条件模式和地址，在回放时比较
+`+0` 与 `+16` 的完整 64 位计数值，忽略 `+8`／`+24` 时间戳；渲染禁用时跳过颜色、深度／模板清除和绘制，
+继续执行状态变化与计数器报告。显式启用覆盖条件结果，重启随 `st_defaults` 恢复启用。
+当前 ReportCounter 在 CPU 命令回放中写 counter，异步查询仅更新 timestamp，因此该路径不添加逐条件 GPU 等待。
+SAMPLES_PASSED 仍是原有回退，不是新增硬件遮挡查询实现。
+
+源码为 `runtime/nvn/render_control.h`、`cmdbuf.c`、`nvn.h`、`vulkan/exec.c`。
+`tools/test_render_condition.c` 使用真实命令记录器，验证记录后才写入请求、重复回放仅清除一次、忽略时间戳及完整 64 位比较。
+Clang 构建并执行通过；默认 GCC 不支持运行时 SIMD 头中的 Clang builtin，首次 GCC 尝试未记为通过。
+修复 APK 构建通过，日志 `build-render-condition.log`。
+
+独立像素核对：run39/1001 的 group83 与 group91，后者与“前者仅将左上 40×22 清零”的结果完全相同，
+矩形外逐位一致。这把故障定位到错误清除，而非模糊算法或采样坐标推测。
+
+run40 使用合并上游后的 APK、Banner Turnip、`LARECOMP_NO_SCALE=1`，并设置 `LARECOMP_GAME_DYNRES=1`
+保留此前游戏动态分辨率策略。1000／1001 两帧共记录 191 次条件判断，跳过 117 次颜色清除、28 次深度清除。
+帧末捕获分别有 178／177 张图，每帧约 246 MiB，遗漏 0。
+本机只取回每帧 30 张光晕相关与最终画面：`run-40-capture/<frame>/manifest.tsv` 为子集，
+`full-manifest.tsv` 是完整设备清单，不能把本机子集声称为所有附件。
+最终 160×90 bloom mip 左上区域非零覆盖率为 34.5%／45.25%，不再被整体擦除。
+
+用户对本轮针对光晕截断和大面积场景闪烁的实机版本明确回复 **“修好了”**。
+已保存 `runtime-40.log`、`run-40-env.txt`、`run-40-capture/` 和 `test-render-condition.log`，手机继续保持游戏运行。
+当前场景的修复得到确认；音频、存档事务、其他场景与性能等后续验收仍按状态文档保留。
+
+
+第 40 轮确认光晕／闪烁修复后，用户又提供 14:06:11 的本项目截图与 14:06:40 的正常视频截图，
+要求修复石头颜色异常。本项目部分独立岩石／发光矿石的底色明显偏黑，而周围洞壁和地面仍有棕色材质。
+两张图已保存在 `logs/user-screenshots/`。这是新的待处理材质／光照问题，不能把上一条“修好了”扩展为所有画面已正确。

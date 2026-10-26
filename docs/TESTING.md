@@ -54,3 +54,12 @@ Android 可通过 `adb -s "$ANDROID_SERIAL" shell input keyevent KEYCODE_F9` 发
 所有 GPU 回读都会改变时序；新捕获减少了逐 pass 的 CPU 等待，但仍不能用于性能验收。
 插入着色器诊断也可能改变驱动优化。独立回放通过只证明相同输入下的结果，不能证明游戏中的绑定与同步均正确。
 私有 GPU 数据、生成着色器和回放文件不要提交 Git。
+
+
+条件清除协议使用真实命令记录器，验证记录后更新计数值、仅清除一次、忽略时间戳与 64 位比较。使用 Clang 编译：
+
+```bash
+clang -O2 -ffunction-sections -fdata-sections tools/test_render_condition.c \
+  -Wl,--gc-sections -pthread -o .work/totk-port/scratch/test-render-condition
+.work/totk-port/scratch/test-render-condition
+```

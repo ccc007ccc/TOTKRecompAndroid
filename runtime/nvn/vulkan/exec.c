@@ -16,6 +16,7 @@
 #include "vk.h"
 #include "timing_trace.h"
 #include "../renderer.h"
+#include "../render_control.h"
 #include "../../settings.h"
 #include "../../paths.h"
 
@@ -1183,6 +1184,7 @@ static struct {
     float blend_color[4];
     uint32_t stencil_ref[2], stencil_mask[2], stencil_vmask[2];
     bool prim_restart;
+    bool render_disabled;  // SetRenderEnable/Conditional gates draws and attachment clears, not state or reports
     bool depth_clamp;  // nvnCommandBufferSetDepthClamp: shadow casters in front of the near plane still cast (pancaking)
     uint32_t restart_index;
     uint64_t copy_row_stride, copy_image_stride;
@@ -6642,7 +6644,31 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_SET_PRIMITIVE_RESTART: st.prim_restart = r->x[0] != 0; st.restart_index = (uint32_t)r->x[1]; break;
         case CMD_SET_DEPTH_CLAMP: pipeline_dirty |= st.depth_clamp != (r->x[0] != 0); st.depth_clamp = r->x[0] != 0; break;
         case CMD_SET_COPY_STRIDES: st.copy_row_stride = r->x[0]; st.copy_image_stride = r->x[1]; break;
+        case CMD_SET_RENDER_ENABLE:
+            st.render_disabled = (uint8_t)r->x[0] == 0;
+            break;
+        case CMD_SET_RENDER_ENABLE_CONDITIONAL: {
+            uint32_t mode = (uint32_t)r->x[0];
+            uint64_t address = r->x[1], a, b;
+            if (mode > 1 || address < GUEST_LO || address > GUEST_HI - 32)
+                FATAL("nvn: invalid render condition mode %u address %llx\n", mode, (unsigned long long)address);
+            // ReportCounter currently writes the counter lane during ordered
+            // command replay; asynchronous query resolution only changes its
+            // timestamp lane. Reading at replay (rather than recording) sees
+            // the CPU's clear request and all preceding counter resets without
+            // a GPU wait for each conditional clear. This does not add hardware
+            // occlusion queries; SAMPLES_PASSED retains its existing fallback.
+            st.render_disabled = !nvn_render_condition((const void *)(uintptr_t)address, mode, &a, &b);
+            if (g_debug_frame) LOG("[render-condition] mode %u @%llx counters %llu/%llu -> %s\n", mode,
+                (unsigned long long)address, (unsigned long long)a, (unsigned long long)b,
+                st.render_disabled ? "disabled" : "enabled");
+            break;
+        }
         case CMD_CLEAR_COLOR: {
+            if (st.render_disabled) {
+                if (g_debug_frame) LOG("[render-condition] skipped color clear %llu\n", (unsigned long long)r->x[0]);
+                break;
+            }
             snap_reason = "clear-color"; snapshots_invalidate(NULL);
             int index = (int)r->x[0];
             static long clears_from = -1;  // (LARECOMP_LOG_CLEARS=<from frame>)
@@ -6687,6 +6713,10 @@ static void exec_list(uint64_t handle, int depth) {
             break;
         }
         case CMD_CLEAR_DEPTH_STENCIL:
+            if (st.render_disabled) {
+                if (g_debug_frame) LOG("[render-condition] skipped depth/stencil clear\n");
+                break;
+            }
             snap_reason = "clear-depth"; snapshots_invalidate(NULL);
             if (ct_on() && st.rt.depth)
                 LOG("[ct] clear-depth %p d%d s%d sc %d %d %d %d\n", (void *)st.rt.depth, r->x[0] != 0, r->x[2] != 0, st.scissor[0][0],
@@ -6715,8 +6745,13 @@ static void exec_list(uint64_t handle, int depth) {
             }
             break;
         case CMD_DISPATCH: dispatch_compute((uint32_t)r->x[0], (uint32_t)r->x[1], (uint32_t)r->x[2]); break;
-        case CMD_DRAW_ARRAYS: draw(r, false); split_long_pass(); break;
-        case CMD_DRAW_ELEMENTS: draw(r, true); split_long_pass(); break;
+        case CMD_DRAW_ARRAYS:
+        case CMD_DRAW_ELEMENTS:
+            if (st.render_disabled) {
+                if (g_debug_frame) LOG("[render-condition] skipped draw\n");
+                break;
+            }
+            draw(r, r->op == CMD_DRAW_ELEMENTS); split_long_pass(); break;
         case CMD_UPDATE_UNIFORM_BUFFER: {
             uint64_t dst = r->x[0] + r->x[2], sz = r->x[3];
             if (ct_on()) LOG("[ct] ubo-update %llx + %llx size %llx%s\n", (unsigned long long)r->x[0], (unsigned long long)r->x[2],
