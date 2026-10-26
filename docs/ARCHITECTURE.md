@@ -1,5 +1,7 @@
 # 运行时架构
 
+简体中文 | [English](en/ARCHITECTURE.md)
+
 本项目沿用 [BOTWRecompAndroid](https://github.com/mamcjr/BOTWRecompAndroid) 的 AArch64 → C 静态重编译器
 和 Android/Vulkan 运行时。自己的 Switch 1.4.3 程序经 NDK 编译为游戏库，资源从合并后的 RomFS 读取。
 

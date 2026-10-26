@@ -1,5 +1,7 @@
 # TOTKRecompAndroid
 
+简体中文 | [English](README.en.md)
+
 面向 Android ARM64 的《塞尔达传说：王国之泪》静态重编译实验移植，当前适配 **Nintendo Switch 1.4.3**。
 
 本仓库是 **[mamcjr/BOTWRecompAndroid](https://github.com/mamcjr/BOTWRecompAndroid) 的 Fork**，现已更名为

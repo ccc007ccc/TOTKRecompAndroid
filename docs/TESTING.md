@@ -1,5 +1,7 @@
 # 测试与诊断
 
+简体中文 | [English](en/TESTING.md)
+
 在项目根目录进入 `distrobox enter dev` 并执行 `source android/dev_env.sh`。
 生成器、编译器、Python 和 Java 的临时目录统一留在 `.work/totk-port/`。
 

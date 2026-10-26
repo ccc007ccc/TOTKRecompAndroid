@@ -1,5 +1,7 @@
 # 上游关系、同步与来源
 
+简体中文 | [English](en/UPSTREAM.md)
+
 ## 项目身份
 
 - 当前仓库：[ccc007ccc/TOTKRecompAndroid](https://github.com/ccc007ccc/TOTKRecompAndroid)，目标为《王国之泪》Switch 1.4.3。
@@ -21,7 +23,7 @@
 必须在后续实机对照中记录这项变化。
 
 本机回归通过：13 项 TOTK 输入检查、6 项 RomFS 构建及 9 项继承的导入检查、40,000 次成对独占并发更新、
-局部间接跳转、8,192 次着色器控制流执行和 96 个 GLSL/SPIR-V 验证。项目 27 份 Markdown 的本地链接与代码围栏检查通过。
+局部间接跳转、8,192 次着色器控制流执行和 96 个 GLSL/SPIR-V 验证。项目 35 份 Markdown 的本地链接与代码围栏检查通过。
 这些结果不替代合并后 APK 的实机渲染验收。
 
 本地 `origin` 指向本 Fork，`upstream` 指向 mamcjr/BOTWRecompAndroid。后续同步应先保存正在开发的修改，

@@ -1,5 +1,7 @@
 # 构建与部署
 
+简体中文 | [English](en/BUILD.md)
+
 本指南针对 TOTKRecompAndroid 的 Switch 1.4.3 输入。功能边界见 [当前状态](STATUS.md)。
 
 ## 构建

@@ -1,6 +1,8 @@
 # 项目文档
 
-现行指南针对 **TOTKRecompAndroid / Switch 1.4.3**，默认中文。
+简体中文 | [English](en/README.md)
+
+现行指南针对 **TOTKRecompAndroid / Switch 1.4.3**，默认中文，现行指南同时提供 [英文版](en/README.md)。
 直接上游是 [mamcjr/BOTWRecompAndroid](https://github.com/mamcjr/BOTWRecompAndroid)。
 
 | 文档 | 内容 |
