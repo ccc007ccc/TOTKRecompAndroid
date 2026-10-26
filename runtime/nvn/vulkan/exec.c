@@ -19,6 +19,8 @@
 #include "../render_control.h"
 #include "../../settings.h"
 #include "../../paths.h"
+#include "view_overlap.h"
+#include "feedback_identity.h"
 
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 static uint64_t stat_feedback_reads;  // (attachments sampled as they are: only read, resolve_feedback)
@@ -26,6 +28,7 @@ static uint64_t stat_inplace_breaks;  // (passes ended so a draw reads a target 
 static uint64_t stat_upload_bytes;
 static uint64_t stat_cb_bytes[2], stat_cb_n[2], stat_cb_copied;  // (LARECOMP_LOG_CBUF_BYTES: game constant buffers bound,
                                                                  // fixed [0] / dynamically indexed [1], and bytes copied)
+static uint64_t stat_cb_hits, stat_cb_misses, stat_cb_collisions;
 static uint64_t stat_pipe_binds, stat_set_binds;  // (graphics draws: pipelines / descriptor sets bound)
 // LARECOMP_VK_PROF=1: render-thread time per category in the fps log (exec = whole command lists, draw = draw(),
 // sets = descriptor sets incl. cbuf copies, vtx = index scan + vertex copies, submit = vkQueueSubmit2)
@@ -998,7 +1001,7 @@ static VkSpan copy_dedupe(int slot, const void *data, uint64_t size, uint64_t al
 
 // Guest memory copied once per submission: draws binding the same range share the copy.
 #define GCOPY_TAB 4096
-static struct { uint64_t addr, size, seq; VkSpan span; } gcopy[GCOPY_TAB];
+static struct { uint64_t addr, size, seq, listed; VkSpan span; } gcopy[GCOPY_TAB];
 static uint16_t gcopy_active[GCOPY_TAB];
 static int gcopy_nactive;
 static uint64_t gcopy_active_seq;
@@ -1016,8 +1019,19 @@ static VkSpan guest_copy(uint64_t addr, uint64_t size) {
     uint64_t seq = vk_pending_seq() + (gcopy_gen << 40), h = (addr * 0x9E3779B97F4A7C15ull) ^ (size * 0xC2B2AE3D27D4EB4Full);
     if (gcopy_active_seq != seq) { gcopy_active_seq = seq; gcopy_nactive = 0; }
     uint32_t slot = (uint32_t)(h ^ (h >> 32)) & (GCOPY_TAB - 1);
-    if (gcopy[slot].seq == seq && gcopy[slot].addr == addr && gcopy[slot].size == size) return gcopy[slot].span;
-    if (gcopy[slot].seq != seq && gcopy_nactive < GCOPY_TAB) gcopy_active[gcopy_nactive++] = (uint16_t)slot;
+    bool same = gcopy[slot].seq == seq && gcopy[slot].addr == addr && gcopy[slot].size == size;
+    if (same) {
+        stat_cb_hits++;
+        return gcopy[slot].span;
+    }
+    stat_cb_misses++;
+    if (gcopy[slot].seq == seq && !same) stat_cb_collisions++;
+    // Track each slot once per submission, including after invalidation or collision replacement. Duplicate slots
+    // used to fill the active list before all live copies were registered, so an inline write could miss one.
+    if (gcopy[slot].listed != seq) {
+        gcopy_active[gcopy_nactive++] = (uint16_t)slot;
+        gcopy[slot].listed = seq;
+    }
     VkSpan s = vk_transient_copy((const void *)(uintptr_t)addr, size, 256);
     stat_cb_copied += size;
     gcopy[slot].addr = addr; gcopy[slot].size = size; gcopy[slot].seq = seq; gcopy[slot].span = s;
@@ -1225,10 +1239,12 @@ const char *renderer_stats(void) {
              (unsigned long long)stat_pipe_binds, (unsigned long long)stat_set_binds);
     stat_feedback_copies = stat_feedback_reads = stat_inplace_breaks = stat_upload_bytes = stat_build_wait_ns = stat_pipe_binds = stat_set_binds = 0;
     if (getenv("LARECOMP_LOG_CBUF_BYTES")) {
-        LOG("[cbuf] fixed %llu x %.1f KB, dynamic %llu x %.1f KB; copied %.1f MB\n", (unsigned long long)stat_cb_n[0],
+        LOG("[cbuf] fixed %llu x %.1f KB, dynamic %llu x %.1f KB; copied %.1f MB; cache %llu hits %llu misses %llu collisions\n", (unsigned long long)stat_cb_n[0],
             stat_cb_n[0] ? stat_cb_bytes[0] / 1024.0 / stat_cb_n[0] : 0, (unsigned long long)stat_cb_n[1],
-            stat_cb_n[1] ? stat_cb_bytes[1] / 1024.0 / stat_cb_n[1] : 0, stat_cb_copied / 1048576.0);
+            stat_cb_n[1] ? stat_cb_bytes[1] / 1024.0 / stat_cb_n[1] : 0, stat_cb_copied / 1048576.0,
+            (unsigned long long)stat_cb_hits, (unsigned long long)stat_cb_misses, (unsigned long long)stat_cb_collisions);
         stat_cb_bytes[0] = stat_cb_bytes[1] = stat_cb_n[0] = stat_cb_n[1] = stat_cb_copied = 0;
+        stat_cb_hits = stat_cb_misses = stat_cb_collisions = 0;
     }
     {   // (GPU memory in use, every heap, and the game's textures with an image)
         VmaBudget bud[VK_MAX_MEMORY_HEAPS];
@@ -2063,6 +2079,7 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
 
 // ================================================================== programs
 #define MAX_BIND 96
+static bool is_ubo(VkDescriptorType t) { return t == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || t == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC; }
 #ifdef __ANDROID__
 // Reflection is immutable once a program is published. Partition its bindings once, rather than scanning both
 // stages twice per draw. Only metadata is reused: live buffers, texture views and UBO contents are still resolved.
@@ -2073,9 +2090,9 @@ static void descriptor_plan(const VkBindingInfo *binds, int count, uint32_t set,
         const VkBindingInfo *b = &binds[i];
         if (b->set != set) continue;
         if ((b->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && b->binding >= 32) ||
-            (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && b->binding < 17) || b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
+            (is_ubo(b->type) && b->binding < 17) || b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
             plan->regular[plan->nregular++] = (uint8_t)i;
-        else if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &&
+        else if (is_ubo(b->type) &&
                  (b->binding == 18 || b->binding == 19 || b->binding == GMAP_BUFFER_INDEX))
             plan->deferred[plan->ndeferred++] = (uint8_t)i;
     }
@@ -2758,7 +2775,7 @@ static void snapshots_flush_fb_dirty(const char *why) {
         if (snap_fb_dirty[i]) { snap_fb_dirty[i] = false; if (snap_ok[i]) { snap_ok[i] = false; snap_why[i] = why; } }
 }
 
-typedef struct { NvnTexture *key; TexBackend copy; } Snap;
+typedef struct { NvnTexture *key; TexBackend copy; VkImage source_image; uint64_t source_generation; } Snap;
 static Snap snaps[16];
 static int nsnaps;
 
@@ -2810,12 +2827,11 @@ static NvnTexture *shader_texture_object(int stage, ShaderTexture *st_) {
 static bool view_overlaps_rt(const NvnTexEntry *e, const NvnTextureView *rv, bool has_rv) {
     uint32_t r_lv = has_rv && (rv->setmask & 1) ? rv->base_level : 0;
     uint32_t r_ly = has_rv && (rv->setmask & 2) ? rv->min_layer : 0;
-    if (r_lv != 0 || r_ly != 0) return false;
     uint32_t lv0 = e->has_view && (e->view.setmask & 1) ? e->view.base_level : 0;
-    uint32_t nlv = e->has_view && (e->view.setmask & 1) && e->view.num_levels ? e->view.num_levels : (e->tex->levels > lv0 ? e->tex->levels - lv0 : 1);
+    uint32_t nlv = e->has_view && (e->view.setmask & 1) ? e->view.num_levels : 0;
     uint32_t ly0 = e->has_view && (e->view.setmask & 2) ? e->view.min_layer : 0;
-    uint32_t nly = e->has_view && (e->view.setmask & 2) && e->view.num_layers ? e->view.num_layers : 1;
-    return r_lv >= lv0 && r_lv < lv0 + nlv && r_ly >= ly0 && r_ly < ly0 + nly;
+    uint32_t nly = e->has_view && (e->view.setmask & 2) ? e->view.num_layers : 0;
+    return vk_sampled_view_overlaps(e->tex->levels, e->tex->layout.layers, lv0, nlv, ly0, nly, r_lv, r_ly);
 }
 
 static bool is_attachment_entry(const NvnTexEntry *e) {
@@ -2840,6 +2856,8 @@ static TexBackend *snapshot_image(NvnTexture *t, TexBackend *src) {
         s->key = t;
     }
     TexBackend *d = &s->copy;
+    s->source_image = src->image;
+    s->source_generation = src->image_generation;
     // Every layer and level of a 2D / array texture. BOTW's terrain builds its height array (1024x1024x8 R16, 4 levels)
     // by sampling the array while it renders into it: each layer from the previous one (fs 91fe757c), each level from
     // the level above (fs 35da1c5a), both through a sampler2DArray. A one-layer copy can't be bound there - those
@@ -3165,7 +3183,9 @@ static void resolve_feedback(Prog *pr) {
             for (int k = 0; k < nsnaps; k++) if (snaps[k].key == t && snaps[k].copy.image) existing = &snaps[k];
             VkImageAspectFlags sa = src->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : src->aspect;
             static const VkComponentMapping id = {0};
-            if (!nosnap && si >= 0 && snap_ok[si] && existing) {
+            if (!nosnap && si >= 0 && snap_ok[si] && existing &&
+                feedback_identity_matches((uint64_t)(uintptr_t)existing->source_image, existing->source_generation,
+                                          (uint64_t)(uintptr_t)src->image, src->image_generation)) {
                 feedback_tex[nfeedback] = t;
                 feedback_snap[nfeedback] = &existing->copy;
                 feedback_view[nfeedback++] = vk_image_view(&existing->copy, VK_IMAGE_VIEW_TYPE_2D, src->format, 0, 1, 0, 1, id, sa);
@@ -3452,7 +3472,7 @@ static uint64_t gmem_tried;  // heap size the import was last attempted for (gme
 // own bytes, as with the desktop's import - no CPU copies (gcopy_prepare), and what a compute pass writes the next
 // draw reads (the game's lighting: lights listed by compute, read by the fragment shaders). Freed on reset (vkFreeMemory
 // unmaps it; runtime/main.c then remaps the whole window). LARECOMP_VK_NO_PLACED=1: off (CPU copies).
-bool vk_heap_place(uint64_t size) {
+static bool try_heap_place(uint64_t size) {
 #ifdef __ANDROID__
     extern void vk_async_drain(void);
     vk_async_drain();  // (the render thread idle: vulkan/async.c)
@@ -3522,6 +3542,16 @@ bool vk_heap_place(uint64_t size) {
         (unsigned long long)(size >> 20), (unsigned long long)HEAP_BASE, type, (unsigned)mp.memoryTypes[type].propertyFlags,
         (unsigned long long)(g_vk.props.limits.maxStorageBufferRange >> 20), gwin_mode ? "; draws reach global memory through windows" : "");
     return true;
+}
+
+bool vk_heap_place(uint64_t size) {
+    bool placed = try_heap_place(size);
+    // The extension can be present while this path is disabled by Driver compatibility, or placement can fail.
+    // Copy mode still needs write tracking for its vertex cache and texture checks. Testing only map_placed in
+    // vk_exec_init left those caches disabled on an Adreno 740 with Turnip's extension available but heap = Auto.
+    // Do this after the placement decision: CPU page protection must not be enabled on a directly mapped GPU heap.
+    if (size && !placed && gcopy_mode) plat_write_tracking_enable(HEAP_BASE, HEAP_BASE + HEAP_MAX);
+    return placed;
 }
 #endif
 
@@ -4536,8 +4566,6 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
 // pre_ii: texture descriptors already resolved by the caller (draw: fragment textures, needed earlier for the
 // viewport decision), or NULL.
 static float g_mirror_w;  // mirror mode's composite: its render target width (rscale[65].x; 0 otherwise)
-
-static bool is_ubo(VkDescriptorType t) { return t == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || t == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC; }
 
 // dyn / ndyn: the set's dynamic uniform buffer offsets, in binding order (its bindings of that type: compile_program)
 static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t set, int stage, ShaderInfo *si, const float *rscale_row0,

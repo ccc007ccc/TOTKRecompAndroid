@@ -4,6 +4,7 @@
 #include <float.h>
 #include <math.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -361,6 +362,8 @@ void vk_collect_dead(void) {
 }
 
 static void create_image(NvnTexture *t, TexBackend *b) {
+    static _Atomic uint64_t next_generation;
+    b->image_generation = atomic_fetch_add_explicit(&next_generation, 1, memory_order_relaxed) + 1;
     VkFmt mf = fmt_of(t->format);
     b->scalable = b->rs_group != RS_NONE;
     b->sx = g_rs[b->rs_group][0];

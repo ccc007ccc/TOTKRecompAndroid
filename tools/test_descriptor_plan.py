@@ -11,17 +11,22 @@ root = Path(__file__).resolve().parents[1]
 out = root / 'build' / 'descriptor-plan-tests'
 out.mkdir(parents=True, exist_ok=True)
 bin_dir = Path(sys.argv[1])
+exe = '.exe' if sys.platform == 'win32' else ''
 source = (root / 'runtime/nvn/vulkan/exec.c').read_text()
+ubo_start = source.index('static bool is_ubo(')
+ubo_helper = source[ubo_start:source.index('\n', ubo_start)]
 start = source.index('typedef struct { uint8_t regular[MAX_BIND]')
 helper = source[start:source.index('\n#endif', start)]
 prefix = r'''
 typedef unsigned char uint8_t;
 typedef unsigned int uint32_t;
+typedef _Bool bool;
 #define MAX_BIND 96
 #define GMAP_BUFFER_INDEX 20
-enum { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-       VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, UNUSED_STORAGE_IMAGE, UNUSED_SAMPLER };
-typedef struct { uint32_t set, binding, type; } VkBindingInfo;
+typedef enum { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+       VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+       UNUSED_STORAGE_IMAGE, UNUSED_SAMPLER } VkDescriptorType;
+typedef struct { uint32_t set, binding; VkDescriptorType type; } VkBindingInfo;
 '''
 test = r'''
 static unsigned rng;
@@ -30,13 +35,13 @@ int check(unsigned seed, int count, unsigned set) {
     VkBindingInfo binds[MAX_BIND], original[MAX_BIND];
     rng = seed;
     for (int i = 0; i < count; i++) {
-        binds[i] = (VkBindingInfo){(next() >> 16) % 3, (next() >> 16) % 100, (next() >> 16) % 5};
+        binds[i] = (VkBindingInfo){(next() >> 16) % 3, (next() >> 16) % 100, (next() >> 16) % 6};
         original[i] = binds[i];
     }
     // Include all special bindings and boundary cases regularly, across both sets.
     const unsigned boundary[] = {0, 16, 17, 18, 19, 20, 21, 31, 32, 95};
     for (int i = 0; i < count && i < 10; i++) {
-        binds[i].binding = boundary[i]; binds[i].type = seed % 5; binds[i].set = set;
+        binds[i].binding = boundary[i]; binds[i].type = seed % 6; binds[i].set = set;
         original[i] = binds[i];
     }
     int legacy[MAX_BIND], n = 0;
@@ -44,12 +49,13 @@ int check(unsigned seed, int count, unsigned set) {
         const VkBindingInfo *b = &binds[i];
         if (b->set != set) continue;
         if (b->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && b->binding >= 32) legacy[n++] = i;
-        else if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && b->binding < 17) legacy[n++] = i;
+        else if ((b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) &&
+                 b->binding < 17) legacy[n++] = i;
         else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) legacy[n++] = i;
     }
     for (int i = 0; i < count; i++) {
         const VkBindingInfo *b = &binds[i];
-        if (b->set != set || b->type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
+        if (b->set != set || (b->type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && b->type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) ||
             (b->binding != 18 && b->binding != 19 && b->binding != GMAP_BUFFER_INDEX)) continue;
         legacy[n++] = i;
     }
@@ -69,10 +75,10 @@ int check(unsigned seed, int count, unsigned set) {
     return 0;
 }
 '''
-(out / 'test.c').write_text(prefix + helper + test)
-subprocess.run([str(bin_dir / 'clang.exe'), '--target=wasm32', '-O2', '-nostdlib', '-c',
+(out / 'test.c').write_text(prefix + ubo_helper + '\n' + helper + test)
+subprocess.run([str(bin_dir / ('clang' + exe)), '--target=wasm32', '-O2', '-nostdlib', '-c',
                 str(out / 'test.c'), '-o', str(out / 'test.o')], check=True)
-subprocess.run([str(bin_dir / 'ld.lld.exe'), '-flavor', 'wasm', '--no-entry', '--export=check',
+subprocess.run([str(bin_dir / ('ld.lld' + exe)), '-flavor', 'wasm', '--no-entry', '--export=check',
                 str(out / 'test.o'), '-o', str(out / 'test.wasm')], check=True)
 (out / 'run.cjs').write_text(r'''
 const fs = require('fs');
