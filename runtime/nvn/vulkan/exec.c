@@ -85,9 +85,22 @@ static bool in_pass;
 static uint32_t pass_written;  // (the attachments this pass's draws wrote so far: draw_writes)
 static uint32_t pass_dup_null;  // (color slots left unbound: their image is bound in another slot - begin_pass)
 
+static VkResult timeline_counter(uint64_t *value) {
+#ifdef __ANDROID__
+    // Old KGSL Turnip builds can block inside this nominally nonblocking query (Mesa MR 44838).
+    // Measure it separately from explicit timeline waits so driver serialization is visible in timing traces.
+    uint64_t start = vk_timing_trace_on() ? SDL_GetTicksNS() : 0;
+#endif
+    VkResult result = vkGetSemaphoreCounterValue(g_vk.dev, g_vk.timeline, value);
+#ifdef __ANDROID__
+    if (start) vk_timing_trace_wait(VK_TIMING_POLL, SDL_GetTicksNS() - start);
+#endif
+    return result;
+}
+
 uint64_t vk_completed_seq(void) {
     uint64_t v = 0;
-    vkGetSemaphoreCounterValue(g_vk.dev, g_vk.timeline, &v);
+    timeline_counter(&v);
     return v;
 }
 
@@ -223,7 +236,7 @@ double vk_frame_gpu_ms(void) {
 void vk_pace_frame(void) {
     {   // (write-backs of passes the GPU has finished since: the game may read them this frame)
         uint64_t v = 0;
-        if (vkGetSemaphoreCounterValue(g_vk.dev, g_vk.timeline, &v) == VK_SUCCESS) wb_apply(v);
+        if (timeline_counter(&v) == VK_SUCCESS) wb_apply(v);
     }
     if (pace_on < 0) { const char *e = getenv("LARECOMP_PACE"); pace_on = !e || atoi(e) != 0; }
     static uint64_t last, last_wait;
@@ -4587,6 +4600,9 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
         const char *e = getenv("LARECOMP_VK_DESCRIPTOR_PLAN");
         planned = e && atoi(e) != 0;  // experimental: keep the measured stable path as the default
     }
+    extern int vk_ab(const char *what);
+    int plan_ab = vk_ab("plan");
+    bool use_plan = plan_ab >= 0 ? plan_ab != 0 : planned != 0;
     const DescriptorPlan *plan = &p->descriptor_plans[set];
 #endif
 #ifdef __ANDROID__
@@ -4597,9 +4613,9 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
     rs[65][0] = g_mirror_w;
 #endif
 #ifdef __ANDROID__
-    int regular_count = planned ? plan->nregular : p->nbinds;
+    int regular_count = use_plan ? plan->nregular : p->nbinds;
     for (int i = 0; i < regular_count; i++) {
-        VkBindingInfo *b = &p->binds[planned ? plan->regular[i] : i];
+        VkBindingInfo *b = &p->binds[use_plan ? plan->regular[i] : i];
 #else
     for (int i = 0; i < p->nbinds; i++) {
         VkBindingInfo *b = &p->binds[i];
@@ -4656,9 +4672,9 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
         n++;
     }
 #ifdef __ANDROID__
-    int deferred_count = planned ? plan->ndeferred : p->nbinds;
+    int deferred_count = use_plan ? plan->ndeferred : p->nbinds;
     for (int i = 0; i < deferred_count; i++) {
-        VkBindingInfo *b = &p->binds[planned ? plan->deferred[i] : i];
+        VkBindingInfo *b = &p->binds[use_plan ? plan->deferred[i] : i];
 #else
     for (int i = 0; i < p->nbinds; i++) {
         VkBindingInfo *b = &p->binds[i];
@@ -6535,7 +6551,8 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
 // change); LARECOMP_LOG_PACE tags each frame "ab 0/1". Switches: split (no long-pass split), ubo (constant buffers
 // read in place), sgsr (Snapdragon GSR 1 for the scene instead of the setting's upscaler), nobarrier (no barrier at
 // the start of a pass: unsafe, what they cost), copy (feedback copies instead of in-place reads), chunk (submissions
-// every 0.5 ms of translation instead of LARECOMP_VK_CHUNK_US). -1: not under test.
+// every 0.5 ms of translation instead of LARECOMP_VK_CHUNK_US), plan (precomputed descriptor binding lists).
+// -1: not under test.
 int vk_ab(const char *what) {
     static int n = -1;
     static char w[32];
