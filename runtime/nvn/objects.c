@@ -946,7 +946,10 @@ NVN(nvnTextureViewGetTarget) { *(uint32_t *)AP(1) = TV->target; RET(!!(TV->setma
 NVN(nvnTextureViewCompare) { RET(memcmp(AP(0), AP(1), sizeof(NvnTextureView)) == 0); }
 // (From SavageWindRecomp, MIT; a smaller layout fits the older NVN versions too.)
 
-static void texture_write(Cpu *c, uint64_t row_stride, uint64_t image_stride) {
+// CPU texture storage transfers. In particular, TOTK reads packaged BC4 data
+// back into linear blocks before assembling its ambient-occlusion atlas.
+// GPU-written texture invalidation/readback remains a separate backend concern.
+static void texture_transfer(Cpu *c, uint64_t row_stride, uint64_t image_stride, bool write) {
     NvnTexture *t = HOST(NvnTexture, A(0));
     const NvnTextureView *v = A(1) ? AP(1) : NULL;
     const int32_t *r = AP(2);
@@ -955,23 +958,28 @@ static void texture_write(Cpu *c, uint64_t row_stride, uint64_t image_stride) {
     uint64_t stride = (t->flags & 0x10) ? t->stride : 0;
     int32_t array_region[6];
     if (t->target == 3 && r) {  // 1D arrays address layers through y/height, not z/depth.
-        if (r[2] || r[5] != 1 || t->layout.fmt->bh != 1) FATAL("invalid 1D-array WriteTexels region\n");
+        if (r[2] || r[5] != 1 || t->layout.fmt->bh != 1) FATAL("invalid 1D-array %sTexels region\n", write ? "Write" : "Read");
         memcpy(array_region, r, sizeof array_region);
         array_region[1] = 0; array_region[4] = 1; array_region[2] = r[1]; array_region[5] = r[4];
         image_stride = row_stride ? row_stride : (uint64_t)((r[3] + t->layout.fmt->bw - 1) / t->layout.fmt->bw) * t->layout.fmt->bpb;
         r = array_region;
     }
-    if (!tegra_write_region(&t->layout, level, layer, r, (uint8_t *)(uintptr_t)t->addr, stride, AP(3), row_stride, image_stride))
-        FATAL("invalid WriteTexels region at mip %u layer %u\n", level, layer);
-    backend_pool_written(t->addr, tegra_total_size(&t->layout));
-    static int n;
-    if (n++ < 16) LOG("[nvn] WriteTexels %ux%u f%#x mip %u layer %u region %d,%d,%d %dx%dx%d\n",
-                     t->width, t->height, t->format, level, layer, r[0], r[1], r[2], r[3], r[4], r[5]);
+    uint8_t *storage = (uint8_t *)(uintptr_t)t->addr;
+    bool ok = write ? tegra_write_region(&t->layout, level, layer, r, storage, stride, AP(3), row_stride, image_stride)
+                    : tegra_read_region(&t->layout, level, layer, r, storage, stride, AP(3), row_stride, image_stride);
+    if (!ok) FATAL("invalid %sTexels region at mip %u layer %u\n", write ? "Write" : "Read", level, layer);
+    if (write) backend_pool_written(t->addr, tegra_total_size(&t->layout));
+    static unsigned counts[2];
+    if (__atomic_fetch_add(&counts[write], 1, __ATOMIC_RELAXED) < 16 || getenv("LARECOMP_TRACE_TEXELS"))
+        LOG("[nvn] %sTexels %ux%u f%#x flags %#x @%llx mip %u layer %u region %d,%d,%d %dx%dx%d linear %llx strides %llu/%llu\n",
+            write ? "Write" : "Read", t->width, t->height, t->format, t->flags, (unsigned long long)t->addr,
+            level, layer, r[0], r[1], r[2], r[3], r[4], r[5], (unsigned long long)A(3),
+            (unsigned long long)row_stride, (unsigned long long)image_stride);
 }
-NVN(nvnTextureWriteTexels) { texture_write(c, 0, 0); }
-NVN(nvnTextureWriteTexelsStrided) { texture_write(c, A(4), A(5)); }
-NVN(nvnTextureReadTexels) { LOG("[nvn] ReadTexels not implemented\n"); (void)c; }
-NVN(nvnTextureReadTexelsStrided) { LOG("[nvn] ReadTexelsStrided not implemented\n"); (void)c; }
+NVN(nvnTextureWriteTexels) { texture_transfer(c, 0, 0, true); }
+NVN(nvnTextureWriteTexelsStrided) { texture_transfer(c, A(4), A(5), true); }
+NVN(nvnTextureReadTexels) { texture_transfer(c, 0, 0, false); }
+NVN(nvnTextureReadTexelsStrided) { texture_transfer(c, A(4), A(5), false); }
 
 // ================================================================== samplers
 // SamplerBuilder: the game's NVNsamplerBuilder is only 64 bytes in NVN 55 (BOTW 1.8.2 builds one on the stack

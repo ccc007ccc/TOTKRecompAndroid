@@ -347,6 +347,7 @@ void plat_exec(char *const argv[]) { (void)argv; }  // (an app process can't rep
 // The fatal path stays on the calling thread. Keep its reason through the backtrace so an Android tester can
 // capture the actual error without needing adb; raw signal faults still use the generic notice below.
 static __thread char fatal_message[1024];
+static __thread int fatal_signal;
 void rt_fatal_message(const char *format, ...) {
     va_list args;
     va_start(args, format);
@@ -383,14 +384,52 @@ static bool driver_error_dialog(const char *text) {
     return shown;
 }
 
+static bool runtime_error_dialog(const char *text, bool native_crash) {
+    JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
+    jobject act = (jobject)SDL_GetAndroidActivity();
+    if (!env || !act) return false;
+    jclass cls = (*env)->GetObjectClass(env, act);
+    jmethodID method = (*env)->GetStaticMethodID(env, cls, "runtimeErrorDialog", "(Ljava/lang/String;Z)Z");
+    jstring message = (*env)->NewStringUTF(env, text);
+    bool shown = false;
+    if (method && message) shown = (*env)->CallStaticBooleanMethod(env, cls, method, message, native_crash);
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); shown = false; }
+    if (message) (*env)->DeleteLocalRef(env, message);
+    (*env)->DeleteLocalRef(env, cls);
+    (*env)->DeleteLocalRef(env, act);
+    return shown;
+}
+
 void plat_fatal_notice(void) {
     fflush(stderr);
-    char message[1400];
-    snprintf(message, sizeof message, "TOTKRecompAndroid stopped because of an error.\n\n%s\n\n"
-             "Please include a screenshot of this message and your app/driver version in your bug report.\n"
-             "More details: logcat, tag TOTKRecompAndroid.", fatal_message[0] ? fatal_message : "The runtime encountered a fatal error.");
-    if (strcasestr(fatal_message, "vulkan") && driver_error_dialog(message)) return;  // (the driver's own errors)
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "TOTKRecompAndroid", message, NULL);
+    const char *message = fatal_message[0] ? fatal_message : "The runtime encountered an error.";
+    // A runtime check has stopped this caller; it does not mean every game
+    // thread crashed. Give up its virtual core and retain the stopped call stack
+    // after dismissal instead of letting rt_fatal_trace abort the entire app.
+    if (!fatal_signal) {
+        extern void kernel_blocking_begin(void);
+        kernel_blocking_begin();
+    }
+    bool shown = !fatal_signal && strcasestr(message, "vulkan") && driver_error_dialog(message);
+    if (!shown) shown = runtime_error_dialog(message, fatal_signal != 0);
+    if (!shown) {
+        const SDL_MessageBoxButtonData buttons[] = {
+            {SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 0, "OK"}, {0, 1, "Copy"}
+        };
+        const SDL_MessageBoxData box = {.flags=SDL_MESSAGEBOX_ERROR, .title="TOTKRecompAndroid",
+            .message=message, .numbuttons=2, .buttons=buttons};
+        int selected;
+        while (SDL_ShowMessageBox(&box, &selected) && selected == 1) SDL_SetClipboardText(message);
+    }
+    if (!fatal_signal) {
+        LOG("[error] dialog dismissed; failed thread retained without terminating the app\n");
+        for (;;) {
+            rt_unwind_point(); // an explicit in-app reboot may still unwind a guest thread
+            plat_sleep_until_ns(plat_now_ns() + 100000000ull);
+        }
+    }
+    // A real SIGSEGV/SIGBUS/etc. cannot resume its faulting instruction. Only
+    // that path returns to rt_fatal_trace's process termination.
 }
 
 const char *rt_host_fn_name(uint64_t pc, uint64_t *offset);  // runtime/dispatch.c
@@ -440,6 +479,9 @@ static void crash_handler(int sig, siginfo_t *si, void *ctx) {
     }
     if (rt_fault_watch(fa, pc)) return;  // (debugging watches first: a watched page may be write-tracked too)
     if (sig == SIGSEGV && si->si_code == SEGV_ACCERR && wt_fault(fa)) return;  // (write tracking)
+    fatal_signal = sig;
+    snprintf(fatal_message, sizeof fatal_message, "Native signal %d accessing %#llx\nhost pc %llx, host lr %llx", sig,
+             (unsigned long long)fa, (unsigned long long)pc, (unsigned long long)lr);
     char what[32];
     snprintf(what, sizeof what, "signal %d", sig);
     rt_fault_report(what, fa, pc, lr);

@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="runtime_error_title">运行时错误</string>
+    <string name="runtime_error_intro">游戏的部分运行遇到了错误。OK 只关闭此提示，应用会保持打开；部分游戏功能可能无法继续。</string>
+    <string name="native_crash_title">游戏已崩溃</string>
+    <string name="native_crash_intro">游戏发生了无法继续的原生崩溃。关闭提示前可以复制错误详情。</string>
+    <string name="error_copy">复制</string>
+    <string name="error_copied">已复制错误详情</string>
+    <string name="error_copy_failed">无法复制错误详情</string>
     <string name="shortcut_watch_map">手表地图</string>
     <string name="shortcut_watch_map_long">设置手表小地图</string>
     <string name="shortcut_system_driver">系统驱动</string>

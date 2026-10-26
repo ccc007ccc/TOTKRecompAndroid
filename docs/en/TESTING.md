@@ -68,3 +68,28 @@ clang -O2 -ffunction-sections -fdata-sections tools/test_render_condition.c \
   -Wl,--gc-sections -pthread -o .work/totk-port/scratch/test-render-condition
 .work/totk-port/scratch/test-render-condition
 ```
+
+The CPU texture test covers independent GOB bytes, mips, arrays, 3D, strides, compressed atlas tails and rejected bounds:
+
+```bash
+clang -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Wno-format \
+  -ffunction-sections -fdata-sections -Wl,--gc-sections -Iruntime \
+  tools/test_texture_read.c runtime/nvn/tegra.c runtime/nvn/formats.c \
+  -o .work/totk-port/scratch/test_texture_read
+.work/totk-port/scratch/test_texture_read
+```
+
+The device dialog check launches the Activity, triggers a controlled JNI runtime error, and clicks Copy and OK.
+It verifies the clipboard, dialog, Activity and retained worker; Android ends the instrumentation process afterward.
+This does not test recovery from native signal crashes.
+
+```bash
+cd android/botwrecompandroid
+bash gradlew --no-daemon --max-workers=4 assembleDebug assembleDebugAndroidTest
+adb -s "$ANDROID_SERIAL" install --streaming -r app/build/outputs/apk/debug/app-debug.apk
+adb -s "$ANDROID_SERIAL" install --streaming -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+adb -s "$ANDROID_SERIAL" shell am instrument -w \
+  com.totkrecomp.android.test/com.botwrecompandroid.RuntimeErrorDialogCheck </dev/null
+```
+
+The output must include `PASS: Copy preserved the dialog`; the adb exit code alone is insufficient.

@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="runtime_error_title">執行階段錯誤</string>
+    <string name="runtime_error_intro">遊戲的部分執行遇到了錯誤。OK 只關閉此提示，應用程式會保持開啟；部分遊戲功能可能無法繼續。</string>
+    <string name="native_crash_title">遊戲已崩潰</string>
+    <string name="native_crash_intro">遊戲發生了無法繼續的原生崩潰。關閉提示前可以複製錯誤詳情。</string>
+    <string name="error_copy">複製</string>
+    <string name="error_copied">已複製錯誤詳情</string>
+    <string name="error_copy_failed">無法複製錯誤詳情</string>
     <string name="shortcut_watch_map">手錶地圖</string>
     <string name="shortcut_watch_map_long">設定手錶小地圖</string>
     <string name="shortcut_system_driver">系統驅動程式</string>

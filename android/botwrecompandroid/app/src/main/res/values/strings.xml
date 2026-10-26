@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="runtime_error_title">Runtime error</string>
+    <string name="runtime_error_intro">An error interrupted part of the game. OK closes this message and keeps the app open. Some game functions may be unable to continue.</string>
+    <string name="native_crash_title">Game crashed</string>
+    <string name="native_crash_intro">The game encountered a native crash and cannot continue. You can copy these details before closing the message.</string>
+    <string name="error_copy">Copy</string>
+    <string name="error_copied">Error details copied</string>
+    <string name="error_copy_failed">Could not copy error details</string>
     <string name="shortcut_watch_map">Watch map</string>
     <string name="shortcut_watch_map_long">Configure the watch minimap</string>
     <string name="shortcut_system_driver">System driver</string>

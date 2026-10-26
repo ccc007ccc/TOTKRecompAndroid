@@ -63,3 +63,27 @@ clang -O2 -ffunction-sections -fdata-sections tools/test_render_condition.c \
   -Wl,--gc-sections -pthread -o .work/totk-port/scratch/test-render-condition
 .work/totk-port/scratch/test-render-condition
 ```
+
+纹理 CPU 读写测试覆盖独立 GOB 字节、mip／数组／3D／步长、压缩尾块图集和越界拒绝：
+
+```bash
+clang -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Wno-format \
+  -ffunction-sections -fdata-sections -Wl,--gc-sections -Iruntime \
+  tools/test_texture_read.c runtime/nvn/tegra.c runtime/nvn/formats.c \
+  -o .work/totk-port/scratch/test_texture_read
+.work/totk-port/scratch/test_texture_read
+```
+
+错误弹窗的实机检查会启动测试 Activity、触发受控 JNI 运行时错误，并自动点击复制与 OK。
+检查剪贴板、弹窗、Activity 和失败线程；测试完成后由 Android 结束测试进程。它不验证真实信号崩溃恢复。
+
+```bash
+cd android/botwrecompandroid
+bash gradlew --no-daemon --max-workers=4 assembleDebug assembleDebugAndroidTest
+adb -s "$ANDROID_SERIAL" install --streaming -r app/build/outputs/apk/debug/app-debug.apk
+adb -s "$ANDROID_SERIAL" install --streaming -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+adb -s "$ANDROID_SERIAL" shell am instrument -w \
+  com.totkrecomp.android.test/com.botwrecompandroid.RuntimeErrorDialogCheck </dev/null
+```
+
+输出须包含 `PASS: Copy preserved the dialog`；不要仅根据 adb 退出码判定通过。

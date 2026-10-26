@@ -141,9 +141,9 @@ void tegra_swizzle(const uint8_t *src, uint8_t *dst, uint32_t wb, uint32_t hb, u
     copy_surface(src, dst, wb, hb, d, bpb, bh_log2, bd_log2, false);
 }
 
-bool tegra_write_region(const TexLayout *t, uint32_t level, uint32_t layer, const int32_t r[6],
-                        uint8_t *storage, uint64_t stride, const uint8_t *src, uint64_t row, uint64_t image) {
-    if (!t || !t->fmt || !t->fmt->bpb || !t->fmt->bw || !t->fmt->bh || !r || !storage || !src || level >= t->levels) return false;
+static bool transfer_region(const TexLayout *t, uint32_t level, uint32_t layer, const int32_t r[6],
+                            const uint8_t *src, uint8_t *dst, uint64_t stride, uint64_t row, uint64_t image, bool to_linear) {
+    if (!t || !t->fmt || !t->fmt->bpb || !t->fmt->bw || !t->fmt->bh || !r || !dst || !src || level >= t->levels) return false;
     for (int i = 0; i < 6; i++) if (r[i] < 0) return false;
     if (!r[3] || !r[4] || !r[5]) return true;
     LevelLayout l = tegra_level(t, level);
@@ -153,8 +153,10 @@ bool tegra_write_region(const TexLayout *t, uint32_t level, uint32_t layer, cons
         (uint32_t)r[1] > l.h || (uint32_t)r[4] > l.h - r[1] ||
         (uint64_t)layer + r[2] + r[5] > limit) return false;
     uint32_t bw = t->fmt->bw, bh = t->fmt->bh, bpb = t->fmt->bpb;
-    if (r[0] % bw || r[1] % bh || (r[3] % bw && (uint32_t)(r[0] + r[3]) != l.w) ||
-        (r[4] % bh && (uint32_t)(r[1] + r[4]) != l.h)) return false;
+    // CPU texel transfers copy whole compressed blocks. A partial final block
+    // need not end at the destination texture's edge: TOTK places 510-row BC4
+    // mip images into a larger atlas. Round the extent up in blocks below.
+    if (r[0] % bw || r[1] % bh) return false;
     uint32_t rows = div_up((uint32_t)r[4], bh), start_x = (uint32_t)r[0] / bw * bpb, start_y = (uint32_t)r[1] / bh;
     uint64_t bytes = (uint64_t)div_up((uint32_t)r[3], bw) * bpb;
     if (!row) row = bytes;
@@ -168,16 +170,33 @@ bool tegra_write_region(const TexLayout *t, uint32_t level, uint32_t layer, cons
     for (uint32_t z = 0; z < (uint32_t)r[5]; z++) {
         uint64_t base = l.offset + (volume ? 0 : (layer + r[2] + z) * layer_bytes);
         for (uint32_t y = 0; y < rows; y++) {
-            const uint8_t *from = src + z * image + y * row;
-            if (stride) { memcpy(storage + (start_y + y) * stride + start_x, from, bytes); continue; }
+            uint64_t linear = z * image + y * row;
+            if (stride) {
+                uint64_t at = (start_y + y) * stride + start_x;
+                if (to_linear) memcpy(dst + linear, src + at, bytes);
+                else memcpy(dst + at, src + linear, bytes);
+                continue;
+            }
             for (uint64_t x = 0; x < bytes;) {
                 uint32_t xb = start_x + (uint32_t)x, n = 16 - (xb & 15);
                 if (n > bytes - x) n = (uint32_t)(bytes - x);
                 uint64_t at = gob_offset(xb, start_y + y, volume ? r[2] + z : 0, width_gobs,
                                          l.block_height_log2, l.block_depth_log2, blocks_rows);
-                memcpy(storage + base + at, from + x, n); x += n;
+                if (to_linear) memcpy(dst + linear + x, src + base + at, n);
+                else memcpy(dst + base + at, src + linear + x, n);
+                x += n;
             }
         }
     }
     return true;
+}
+
+bool tegra_write_region(const TexLayout *t, uint32_t level, uint32_t layer, const int32_t r[6],
+                        uint8_t *storage, uint64_t stride, const uint8_t *src, uint64_t row, uint64_t image) {
+    return transfer_region(t, level, layer, r, src, storage, stride, row, image, false);
+}
+
+bool tegra_read_region(const TexLayout *t, uint32_t level, uint32_t layer, const int32_t r[6],
+                       const uint8_t *storage, uint64_t stride, uint8_t *dst, uint64_t row, uint64_t image) {
+    return transfer_region(t, level, layer, r, storage, dst, stride, row, image, true);
 }

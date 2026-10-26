@@ -682,9 +682,13 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
         }
     }
 
-    // ---- a graphics driver error that stops the app (runtime/platform/android.c plat_fatal_notice): the driver is
+    public static boolean runtimeErrorDialog(String text, boolean nativeCrash) {
+        return RuntimeErrorDialog.show(self, text, nativeCrash);
+    }
+
+    // ---- a graphics driver error that stops startup (runtime/platform/android.c plat_fatal_notice): the driver is
     // loaded before the start screen, so the Settings rows that choose it can't be reached when it fails. This dialog
-    // installs a driver package, or goes back to the system's driver, and starts the app again; else it closes. Blocks
+    // installs a driver package, or goes back to the system's driver, and starts the app again; Close dismisses it. Blocks
     // the calling (native) thread until the player closes it. LAS Recomp for Android 1c05238, from
     // LASRecomp-Android-Plus (MIT); the app icon's long-press "Choose driver" (DriverPickActivity) does the same.
     private static final Object dlgLock = new Object();
@@ -708,7 +712,7 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
         // (the native message is in English: what to do comes first, in the phone's language - issue #13)
         String msg = getString(R.string.driver_error_intro) + "\n" + dlgText + (extra != null ? "\n\n" + extra : "");
         AlertDialog.Builder b = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle(R.string.driver_error_title).setMessage(msg).setCancelable(false)
+            .setTitle(R.string.driver_error_title).setCancelable(false)
             .setPositiveButton(R.string.driver_install, (d, w) -> {
                 Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
                 i.addCategory(Intent.CATEGORY_OPENABLE);
@@ -726,6 +730,7 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
         File[] custom = new File(getExternalFilesDir(null), "drivers").listFiles((dir, n) -> DRIVER_FILE.matcher(n).find());
         if (custom != null && custom.length > 0)
             b.setNeutralButton(R.string.driver_system, (d, w) -> { dropCustomDriver(); restartApp(); });
+        b.setView(RuntimeErrorDialog.messageView(b.getContext(), msg));
         b.show();
     }
 

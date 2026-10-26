@@ -8,6 +8,7 @@ plugins {
 val repo: File = rootDir.resolve("../..").canonicalFile
 val deps: File = repo.resolve("android/deps/out")  // android/deps/build_deps.sh
 val gen = layout.buildDirectory.dir("generated/botwrecompandroid")
+val dialogTestJni = layout.buildDirectory.dir("generated/dialog-test-jni")
 // The release key: outside the repository, in ~/.totkrecompandroid/keystore.properties (storeFile, storePassword, keyAlias,
 // keyPassword); without it, release builds are signed with the debug key
 val releaseKey: File = File(System.getProperty("user.home"), ".totkrecompandroid/keystore.properties")
@@ -23,6 +24,7 @@ android {
         targetSdk = 36
         versionCode = 13
         versionName = "0.1.0-totk-dev"
+        testInstrumentationRunner = "com.botwrecompandroid.RuntimeErrorDialogCheck"
         ndk {
             abiFilters += "arm64-v8a"
         }
@@ -47,6 +49,7 @@ android {
             assets.srcDirs(gen.get().asFile.resolve("assets"))
             res.srcDirs("src/main/res", gen.get().asFile.resolve("res"))
         }
+        getByName("androidTest").jniLibs.srcDir(dialogTestJni)
     }
 
     // aapt's default without "<dir>_*": the game code's builder needs Python's folders named _* (zipfile/_path, ...)
@@ -83,6 +86,30 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+}
+
+// A test-only JNI caller triggers the real native error path. The helper is
+// packaged only in the instrumentation APK, never in the game application.
+val dialogTestNdk = androidComponents.sdkComponents.ndkDirectory
+val buildDialogTestNative by tasks.registering(Exec::class) {
+    val source = layout.projectDirectory.file("src/androidTest/cpp/error_dialog_test.c")
+    val output = dialogTestJni.get().file("arm64-v8a/liberror_dialog_test.so").asFile
+    inputs.file(source)
+    inputs.property("ndkVersion", android.ndkVersion)
+    outputs.file(output)
+    doFirst {
+        output.parentFile.mkdirs()
+        val prebuilt = dialogTestNdk.get().asFile.resolve("toolchains/llvm/prebuilt")
+        val compiler = prebuilt.listFiles().orEmpty().flatMap { host ->
+            listOf(host.resolve("bin/clang"), host.resolve("bin/clang.exe"))
+        }.single { it.isFile }
+        commandLine(compiler.absolutePath, "--target=aarch64-linux-android30",
+            "-shared", "-fPIC", "-Wl,-z,max-page-size=16384", source.asFile.absolutePath,
+            "-ldl", "-o", output.absolutePath)
+    }
+}
+tasks.matching { it.name.startsWith("merge") && it.name.endsWith("AndroidTestJniLibFolders") }.configureEach {
+    dependsOn(buildDialogTestNative)
 }
 
 // What the native build and the APK need: the SMAA shader as a C string (smaa_hlsl.inc),
