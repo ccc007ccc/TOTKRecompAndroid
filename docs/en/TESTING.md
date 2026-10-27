@@ -122,7 +122,8 @@ It fills all three budgets to check graceful omission, successful event saving a
 
 Real-game validation on OnePlus 13 / Banner Turnip r5 captured the blue spawn-platform black patch at frame 1906:
 the selected single-frame event is 4,837,160 bytes (about 4.6 MiB), with 202 stage images and no image/input omissions.
-Verbose bindings were partly omitted; all 1,537 draw attempt/result summaries remained. This validates capture usability, not a black-patch fix.
+Verbose bindings were partly omitted; all 1,537 draw attempt/result summaries remained. This validated capture usability;
+the subsequent material-stage investigation traced the black patch to texture tiling, as described below.
 
 Image difference regression:
 
@@ -190,6 +191,21 @@ clang -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Wno-format \
   -o .work/totk-port/scratch/test_texture_read
 .work/totk-port/scratch/test_texture_read
 ```
+
+The default Tegra tile-height regression uses synthetic 160x160 BC3 data at independent fixed GOB addresses.
+It checks rounding boundaries, all 1,600 blocks, mip offsets, and explicit/3D layout overrides:
+
+```bash
+cc -O1 -g -fsanitize=address,undefined tools/test_tegra_tile_height.c runtime/nvn/tegra.c \
+  -o .work/totk-port/scratch/test_tegra_tile_height
+.work/totk-port/scratch/test_tegra_tile_height
+```
+
+The real spawn-platform texture has 40 compressed rows: 1.5 times that height is 60 rows, or seven complete GOBs.
+Rounding up to eight selected an eight-GOB tile, while the data uses four. The old layout read 480 of the 1,600 blocks
+as zero padding; the corrected layout recovers all blocks. A separate 82x164 BC3 texture confirms the same boundary.
+Changing only this texture's layout and re-uploading it in the same running OnePlus 13 game/view removed the rectangles,
+without suppressing draws or substituting material colors.
 
 The device dialog check launches the Activity, triggers a controlled JNI runtime error, and clicks Copy and OK.
 It verifies the clipboard, dialog, Activity and retained worker; Android ends the instrumentation process afterward.

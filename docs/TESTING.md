@@ -113,7 +113,7 @@ ANDROID_SERIAL=<手机序列号> REPLAY_DRIVER=<手机驱动路径> bash tools/t
 
 一加13 / Banner Turnip r5 已实机抓到蓝色出生圆盘黑块的第1906帧：选中的单帧事件共4,837,160字节（约4.6 MiB），
 包含202张阶段图，图像和输入均无省略；详细绑定日志有省略，1537次绘制的尝试/结果摘要完整。
-这证明轻量抓取已可用，不代表黑块已修复。
+这次抓取证明轻量模式已可用；随后黑块沿材质阶段定位到纹理分块布局，修复验证见下。
 
 检测逻辑的独立回归：
 
@@ -176,6 +176,18 @@ clang -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Wno-format \
   -o .work/totk-port/scratch/test_texture_read
 .work/totk-port/scratch/test_texture_read
 ```
+
+默认 Tegra 分块高度回归使用独立固定地址的 160×160 BC3 数据，检查临界高度、全部1600块、mip偏移及显式布局／3D覆盖：
+
+```bash
+cc -O1 -g -fsanitize=address,undefined tools/test_tegra_tile_height.c runtime/nvn/tegra.c \
+  -o .work/totk-port/scratch/test_tegra_tile_height
+.work/totk-port/scratch/test_tegra_tile_height
+```
+
+真实出生点纹理有40个压缩块行，1.5倍高度为60行，即7个完整GOB；向上取整成8会错误选择8个GOB高的块，实际数据使用4个。
+旧布局将1600个有效块中的480个读成零填充；修正后全部恢复。另一张82×164 BC3纹理也验证了同一边界。
+一加13同进程／同视角仅调整该纹理布局并重新上传，出生圆盘左右黑矩形消失。此验证没有跳过绘制或替换材质颜色。
 
 错误弹窗的实机检查会启动测试 Activity、触发受控 JNI 运行时错误，并自动点击复制与 OK。
 检查剪贴板、弹窗、Activity 和失败线程；测试完成后由 Android 结束测试进程。它不验证真实信号崩溃恢复。

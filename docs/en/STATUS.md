@@ -20,6 +20,7 @@ The validated device is a OnePlus 13 (PJZ110, Adreno 830); this branch has no ac
 | Water reflections and lighting | Explicit fragment depth preserves arithmetic precision, restoring water material selection; the user confirmed the fix in run46 |
 | Vertical strips on sky islands | Corrected row strides for linear height/mask textures; the user confirmed the fix in run48 |
 | Blocky cloud coverage | Corrected TMML query component order; the user confirmed the fix in run50 |
+| Black rectangles on the blue spawn platform | Corrected the default Tegra tile-height rounding boundary; same-process/view comparison removed the rectangles, and the user confirmed the fix |
 | Shader control flow | Qualcomm proprietary-driver switch fallthrough failure reproduced and fixed; remaining image faults persisted |
 | Synchronization | Nonzero NVN barriers now issue GPU dependencies; independent synchronization checks passed |
 | Service initialization | Physical mapping, audio workspace, cache and temporary-directory startup blockers cleared |
@@ -39,7 +40,7 @@ The user confirmed that this device build fixed the reported halo clipping and s
 
 ## Remaining validation
 
-- User samples confirm missing loading UI layers, single-frame scene blackouts, and distance-dependent clipping of dark blocks on the blue spawn platform. Their causes remain unresolved. The two controls now default to lightweight before/changed or single-frame diagnostics with stage thumbnails, draw records, shaders and bounded uniform inputs; full replay is an advanced option; see [testing](TESTING.md#on-device-flicker-capture).
+- Missing loading UI layers and single-frame scene blackouts remain unresolved. Correcting the texture layout removed the blue spawn-platform rectangles; this does not establish a fix for the other two faults. The capture controls provide lightweight stage/state diagnostics by default, with full replay as an advanced option; see [testing](TESTING.md#on-device-flicker-capture).
 - Broader scenes, ordinary shadows, transparency and long sessions still need coverage. Current scene acceptance does not cover every game area or device.
 - Some views previously encountered an unimplemented vertex `DMUL`; this change does not address it, and its relation to the fixed faults was not established.
 - Other audio scenes, effect types not yet observed, input flows, save transactions/crash recovery and performance remain unverified.

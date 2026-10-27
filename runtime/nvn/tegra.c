@@ -8,8 +8,10 @@
 static uint32_t div_up(uint32_t a, uint32_t b) { return (a + b - 1) / b; }
 static uint64_t align_up(uint64_t a, uint64_t b) { return (a + b - 1) / b * b; }
 
-// The driver's tile size (deko3d's pickTileSize, which follows NVN): the largest power of two of GOBs, up to 16,
-// that 1.5x the extent still fills.
+// The largest power of two of GOBs, up to 16, that 1.5x the extent still fills.
+// Count complete GOBs before choosing the power of two. Rounding up here turns
+// 40 compressed rows into 8 GOBs instead of 7 and selects an oversized tile:
+// TOTK's 160x160 warp-platform texture then samples padding as black rectangles.
 static uint32_t pick_tile_log2(uint32_t units) {
     return units >= 16 ? 4 : units >= 8 ? 3 : units >= 4 ? 2 : units >= 2 ? 1 : 0;
 }
@@ -23,7 +25,7 @@ uint32_t tegra_default_block_height_log2(uint32_t height_in_blocks) {
         while ((1u << log2) < gobs && log2 < 4) log2++;
         return log2;
     }
-    return pick_tile_log2(div_up(height_in_blocks + height_in_blocks / 2, 8));
+    return pick_tile_log2((height_in_blocks + height_in_blocks / 2) / 8);
 }
 
 // 3D textures tile in depth only: one GOB high blocks (deko3d sets just the tile depth for them). With the 2D rule
