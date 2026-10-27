@@ -55,6 +55,37 @@ Android 可通过 `adb -s "$ANDROID_SERIAL" shell input keyevent KEYCODE_F9` 发
 插入着色器诊断也可能改变驱动优化。独立回放通过只证明相同输入下的结果，不能证明游戏中的绑定与同步均正确。
 私有 GPU 数据、生成着色器和回放文件不要提交 Git。
 
+## 手机本地闪屏抓取
+
+游戏内打开设置 → **视频 → 闪屏抓取**，点击“开始闪屏抓取”；完成后在同处点击“停止闪屏抓取”。
+默认关闭，开始后顶部显示保存组数。变化阈值默认 8%，可调 2%–40%；数值越低越容易捕获局部变化，
+也越容易把快速转镜头或正常转场记为候选。检测比较游戏最终图像，不包含触控、设置和 FPS 浮层。
+
+手机保留三个有界 GPU 回读槽：异常前一帧、异常期间变化最大的一帧、恢复或稳定后的一帧。
+最长等待 1.5 秒；未恢复时会标注 `settled` / `timeout`，停止或打开设置时标注 `stopped` / `interrupted`。
+这不是闪屏根因判断。GPU 回读未完成或正在写 PNG 时跳过采集，界面显示累计漏采帧数，文件记录真实帧号与时间。
+每张图宽度最多 960 像素，普通 16:9 场景的三个回读槽合计约 6 MiB，另有缩小图像和 PNG 编码开销。
+每次会话达到 64 组或 256 MiB 后停止；关闭并排空待处理工作后释放抓取图像内存。
+
+保存路径：`/storage/emulated/0/Android/data/com.totkrecomp.android/files/flicker/<日期时间>/`。
+
+- `status.txt`：开关状态、阈值、保存数量、漏采数和错误。
+- `events.tsv`：候选目录、前／中／后帧号、变化分数和结束原因。
+- `event-0001/01-before.png`、`02-peak.png`、`03-after.png`：同次异常的三张图。
+- `event-0001/preview.png`：从左到右为变化前、峰值、变化后，绿／红／蓝色条对应三张图。
+- `event-0001/event.json`：时间、帧号、图像尺寸、阈值和结束原因。
+
+先在手机看预览，或只取 `events.tsv` 和选中事件的 `preview.png`；确认候选后再取该事件三张图片。
+不要拉取整个会话目录或长视频。该功能不会自动传输任何文件，也不写全程图片。
+
+检测逻辑的独立回归：
+
+```bash
+cc -O1 -g -fsanitize=address,undefined tools/test_flicker_detect.c -lm \
+  -o .work/totk-port/scratch/test-flicker
+.work/totk-port/scratch/test-flicker
+```
+
 TMML 纹理细节级别查询的回归执行正式翻译器输出，检查绑定／无绑定纹理、返回分量掩码、
 负数与小数定点值以及采样器限制。Maxwell 返回“计算值、实际层级”，GLSL 的顺序相反：
 

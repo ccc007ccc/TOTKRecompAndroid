@@ -60,6 +60,41 @@ Readback changes timing. Deferred capture reduces per-pass CPU waits but is not 
 Shader instrumentation can also alter driver optimization. A successful independent replay verifies those inputs, not every live binding or synchronization dependency.
 Keep private GPU inputs, generated shader sources and replay data out of Git.
 
+## On-device flicker capture
+
+Open the in-game settings → **Video → Flicker capture**, then use the start/stop button. Capture defaults to off;
+the active overlay shows the saved-event count. The change threshold defaults to 8%, adjustable from 2% to 40%.
+Lower thresholds catch smaller local changes and more normal motion/cuts. Analysis uses the final game image,
+excluding touch controls, settings and FPS overlays.
+
+Three bounded GPU readback slots retain the frame before the event, its strongest change, and its recovery or
+settled frame. After 1.5 seconds the event is finalized even without recovery. Reasons distinguish `recovered`,
+`settled`, `timeout`, `stopped` and `interrupted`; candidates are not proof of a rendering defect.
+Pending GPU readback or PNG writes can skip capture frames; the UI counts these, and files retain actual frame
+numbers/timestamps. Images are at most 960 pixels wide: the three slots total about 6 MiB for 16:9, plus the
+downscaled GPU image and PNG encoding overhead. Each session stops at 64 events or 256 MiB. Stopping and draining
+pending work releases the capture images.
+
+Files stay in `/storage/emulated/0/Android/data/com.totkrecomp.android/files/flicker/<timestamp>/`:
+
+- `status.txt`: activity, threshold, saved/skipped counts and errors.
+- `events.tsv`: event directories, three frame numbers, scores and completion reasons.
+- `event-0001/01-before.png`, `02-peak.png`, `03-after.png`: the three images from one event.
+- `event-0001/preview.png`: left to right, before/peak/after, with green/red/blue strips.
+- `event-0001/event.json`: timestamps, frame numbers, dimensions, threshold and reason.
+
+Review previews on the phone or retrieve only the index and selected previews, then the three images of a
+confirmed candidate. Do not pull the entire session or long videos. Capture performs no automatic file transfer
+and does not store every frame.
+
+The independent detector regression runs with:
+
+```bash
+cc -O1 -g -fsanitize=address,undefined tools/test_flicker_detect.c -lm \
+  -o .work/totk-port/scratch/test-flicker
+.work/totk-port/scratch/test-flicker
+```
+
 The TMML regression executes the production emitter's output for bound/bindless textures, result masks,
 signed fractional fixed-point values and sampler clamps. Maxwell returns computed LOD followed by
 accessed mip level; GLSL returns them in the opposite order:

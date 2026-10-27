@@ -12,6 +12,7 @@
 #include "../../settings.h"
 #include "../../ui/menu.h"
 #include "vk.h"
+#include "flicker.h"
 #include "timing_trace.h"
 #include "device_compat.h"
 #include "../output_scale.h"
@@ -1270,6 +1271,8 @@ void backend_present(NvnTexture *t) {
     vk_end_pass();
     extern void vk_capture_finish(NvnTexture *presented);
     vk_capture_finish(t);
+    extern void vk_flicker_frame(TexBackend *, uint64_t, bool);
+    vk_flicker_frame(b, total_frames, !menu_is_open());
     static const float black[4] = {0, 0, 0, 1};
     uint64_t t0 = SDL_GetTicksNS();
     bool have = vk_frame_begin(black);
@@ -1837,6 +1840,7 @@ void backend_reset(void) {
     vkDeviceWaitIdle(g_vk.dev);
     extern void vk_textures_reset(void);
     extern void vk_exec_reset(void);
+    flicker_reset();
     vk_textures_reset();
     vk_exec_reset();
     g_last_presented = NULL;

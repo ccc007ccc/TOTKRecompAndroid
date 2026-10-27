@@ -17,6 +17,9 @@
 #include "option_rows.h"
 #include "imgui_internal.h"  // (NavCursorVisible)
 #include "osk.h"
+#ifdef __ANDROID__
+#include "../nvn/vulkan/flicker.h"
+#endif
 #ifdef __APPLE__
 #include "imgui_impl_metal.h"
 #else
@@ -516,6 +519,23 @@ extern "C" double output_scale_dynamic_factor(void);
 static void tab_display(void) {
     float scale = ImGui::GetFontSize() / 34;
     opt_begin("##video", scale);
+#ifdef __ANDROID__
+    opt_section("Flicker capture");
+    FlickerStatus capture = flicker_status();
+    ImGui::BeginDisabled(capture.saving && !capture.active);
+    if (ImGui::Button(tr(capture.active ? "Stop flicker capture" : "Start flicker capture"), ImVec2(-1, 56 * scale))) {
+        if (capture.active) flicker_stop(); else flicker_start();
+        capture = flicker_status();
+    }
+    ImGui::EndDisabled();
+    int sensitivity = (int)lroundf(capture.threshold * 100);
+    if (ImGui::SliderInt(tr("Change threshold (%)"), &sensitivity, 2, 40)) flicker_set_threshold(sensitivity / 100.0f);
+    ImGui::Text(tr("Saved events: %u  |  Skipped frames: %u"), capture.saved, capture.skipped);
+    if (capture.saving) ImGui::TextUnformatted(tr("Saving the before / during / after images..."));
+    if (capture.error[0]) ImGui::TextWrapped("%s", tr(capture.error));
+    ImGui::TextWrapped("%s", tr("Keeps three images in memory. Saves before, peak and after an abrupt change, with preview.png. Lower thresholds catch smaller changes and more normal motion."));
+    if (capture.directory[0]) ImGui::TextWrapped("%s", capture.directory);
+#endif
     opt_section("Display");
     const char *aspects[] = {"Unlocked", "Original 16:9"};
     opt_choice("Aspect ratio", &g_settings.aspect, aspects, 2, ASPECT_UNLOCKED,
@@ -1246,10 +1266,15 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     bool kbd = g_kbd.load() == 1;
 #ifdef __ANDROID__
     bool touch = touch_controls_visible();
+    FlickerStatus capture_badge = flicker_status();
 #else
     bool touch = false;
 #endif
-    if (!open && !kbd && !g_settings.show_fps && !touch) {
+    if (!open && !kbd && !g_settings.show_fps && !touch
+#ifdef __ANDROID__
+        && !capture_badge.active && !capture_badge.saving
+#endif
+        ) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         return;
     }
@@ -1295,6 +1320,11 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     ImGui::NewFrame();
 
 #ifdef __ANDROID__
+    if (!open && (capture_badge.active || capture_badge.saving)) {
+        char label[128]; snprintf(label, sizeof label, tr("Flicker capture: %u saved"), capture_badge.saved);
+        ImVec2 size = ImGui::CalcTextSize(label);
+        ImGui::GetForegroundDrawList()->AddText(ImVec2((tw-size.x)*0.5f, 100*scale), IM_COL32(255,190,60,255), label);
+    }
     if (g_settings.show_fps) {  // (the full performance overlay: ui/perf_overlay.mm)
         extern void perf_overlay_draw(ImVec2 display, float scale);
         perf_overlay_draw(io.DisplaySize, scale);
