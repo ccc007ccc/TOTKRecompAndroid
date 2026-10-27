@@ -1,0 +1,102 @@
+diff --git a/renderdoc/core/core.cpp b/renderdoc/core/core.cpp
+index 3147447..949fb2c 100644
+--- a/renderdoc/core/core.cpp
++++ b/renderdoc/core/core.cpp
+@@ -26,6 +26,10 @@
+ #include "core/core.h"
+ #include <time.h>
+ #include <algorithm>
++#if defined(__ANDROID__)
++#include <atomic>
++#include <fcntl.h>
++#endif
+ #include "api/replay/version.h"
+ #include "common/common.h"
+ #include "common/threading.h"
+@@ -49,6 +53,20 @@
+ 
+ extern "C" const rdcstr VulkanLayerJSONBasename = STRINGIZE(RDOC_BASE_NAME);
+ 
++#if defined(__ANDROID__)
++// The embedding application owns an anonymous memfd for the whole capture.
++// RDCFile reopens it through procfs while writing sections, retaining the
++// standard compressed RDC format without a persistent staging file.
++static std::atomic<int> captureFileFD{-1};
++extern "C" __attribute__((visibility("default"))) int RENDERDOC_SetCaptureFileFD(int fd)
++{
++  if(fd >= 0 && fcntl(fd, F_GETFD) < 0)
++    return 0;
++  captureFileFD.store(fd);
++  return 1;
++}
++#endif
++
+ RDOC_DEBUG_CONFIG(bool, Capture_Debug_SnapshotDiagnosticLog, false,
+                   "Snapshot the diagnostic log at capture time and embed in the capture.");
+ 
+@@ -1675,6 +1693,12 @@ RDCFile *RenderDoc::CreateRDC(RDCDriver driver, uint32_t frameNum, const FramePi
+ 
+   m_CurrentLogFile = StringFormat::Fmt("%s%s.rdc", m_CaptureFileTemplate.c_str(), suffix.c_str());
+ 
++#if defined(__ANDROID__)
++  const int memoryFD = captureFileFD.load();
++  if(memoryFD >= 0)
++    m_CurrentLogFile = StringFormat::Fmt("/proc/self/fd/%d", memoryFD);
++#endif
++
+   // make sure we don't stomp another capture if we make multiple captures in the same frame.
+   {
+     SCOPED_LOCK(m_CaptureLock);
+@@ -1706,7 +1730,10 @@ RDCFile *RenderDoc::CreateRDC(RDCDriver driver, uint32_t frameNum, const FramePi
+   ret->SetData(driver, ToStr(driver).c_str(), OSUtility::GetMachineIdent(), &outThumb, m_TimeBase,
+                m_TimeFrequency);
+ 
+-  FileIO::CreateParentDirectory(m_CurrentLogFile);
++#if defined(__ANDROID__)
++  if(memoryFD < 0)
++#endif
++    FileIO::CreateParentDirectory(m_CurrentLogFile);
+ 
+   ret->Create(m_CurrentLogFile.c_str());
+ 
+@@ -2215,6 +2242,18 @@ void RenderDoc::FinishCaptureWriting(RDCFile *rdc, uint32_t frameNumber)
+       delete w;
+     }
+ 
++#if defined(__ANDROID__)
++    if(captureFileFD.load() >= 0)
++    {
++      // The app selects and saves its three candidates. Do not advertise an
++      // ephemeral procfs path to remote clients or retain it in m_Captures.
++      RDCLOG("Written to application capture memory: %s", m_CurrentLogFile.c_str());
++      m_CaptureTitle.clear();
++      delete rdc;
++      RenderDoc::Inst().SetProgress(CaptureProgress::FileWriting, 1.0f);
++      return;
++    }
++#endif
+     RDCLOG("Written to disk: %s", m_CurrentLogFile.c_str());
+ 
+     CaptureData cap;
+diff --git a/renderdoc/driver/vulkan/vk_android.cpp b/renderdoc/driver/vulkan/vk_android.cpp
+index 00285a7..487e531 100644
+--- a/renderdoc/driver/vulkan/vk_android.cpp
++++ b/renderdoc/driver/vulkan/vk_android.cpp
+@@ -107,7 +107,17 @@ void VulkanReplay::GetOutputWindowDimensions(uint64_t id, int32_t &w, int32_t &h
+   h = ANativeWindow_getHeight(outw.wnd);
+ }
+ 
++// A standalone replay host can supply the same adrenotools loader used to
++// capture. Loading the system ICD cannot replay custom-driver memory layouts.
++static void *replayVulkanLibrary = nullptr;
++extern "C" __attribute__((visibility("default"))) void RENDERDOC_SetReplayVulkanLibrary(void *library)
++{
++  replayVulkanLibrary = library;
++}
++
+ void *LoadVulkanLibrary()
+ {
++  if(replayVulkanLibrary)
++    return replayVulkanLibrary;
+   return Process::LoadModule("libvulkan.so");
+ }

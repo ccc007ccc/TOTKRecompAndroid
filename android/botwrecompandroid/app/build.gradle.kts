@@ -120,7 +120,7 @@ val prepareBotwRecompAndroid by tasks.registering {
     val icon = repo.resolve("assets/artwork/triforce-icon-v2.png")
     val background = repo.resolve("assets/artwork/great-plateau-background-v2.png")
     val touchSkin = repo.resolve("assets/artwork/sheikah-touch-atlas-v1.png")
-    val libs = listOf("libSDL3.so", "libshaderc_shared.so", "libavcodec.so", "libavformat.so", "libavutil.so", "libswscale.so")
+    val libs = listOf("libSDL3.so", "libshaderc_shared.so", "libavcodec.so", "libavformat.so", "libavutil.so", "libswscale.so", "libVkLayer_GLES_RenderDoc.so")
     inputs.files(smaa, font, icon, background, touchSkin)
     inputs.files(libs.map { deps.resolve("lib/$it") }.filter { it.exists() })
     if (deps.resolve("gen").exists()) inputs.dir(deps.resolve("gen"))  // (the game code's builder, below)

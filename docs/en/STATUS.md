@@ -39,7 +39,7 @@ The user confirmed that this device build fixed the reported halo clipping and s
 
 ## Remaining validation
 
-- The user subsequently reported random flashes, with whole-scene and local changes not yet distinguished. A manual on-device capture now retains before/peak/after images and a preview only for abrupt-change candidates. The flashes themselves still need captured evidence; see [testing](TESTING.md#on-device-flicker-capture).
+- User samples confirm missing loading UI layers, single-frame scene blackouts, and distance-dependent clipping of dark blocks on the blue spawn platform. Their causes remain unresolved. Two capture controls now provide threshold-selected before/changed GPU frame pairs or a single complete GPU capture, with previews; see [testing](TESTING.md#on-device-flicker-capture).
 - Broader scenes, ordinary shadows, transparency and long sessions still need coverage. Current scene acceptance does not cover every game area or device.
 - Some views previously encountered an unimplemented vertex `DMUL`; this change does not address it, and its relation to the fixed faults was not established.
 - Other audio scenes, effect types not yet observed, input flows, save transactions/crash recovery and performance remain unverified.

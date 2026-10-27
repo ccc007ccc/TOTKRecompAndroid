@@ -1628,6 +1628,7 @@ void backend_present(NvnTexture *t) {
         frames = 0;
         last_fps_time = now;
     }
+    flicker_next_frame(!menu_is_open());
 }
 
 // ================================================================== UI thread
@@ -1887,6 +1888,7 @@ int ui_run(void) {
             if (input_user_blocked(&e)) continue;  // scripted test runs: the real keyboard / mouse / pads do nothing (as metal.m)
 #ifdef __ANDROID__
             extern bool touch_controls_event(const SDL_Event *e);  // (ui/touch_controls.mm: fingers, the back button)
+            if (menu_capture_event(&e)) continue;
             if (touch_controls_event(&e)) continue;
 #endif
             if (menu_handle_event(&e)) continue;

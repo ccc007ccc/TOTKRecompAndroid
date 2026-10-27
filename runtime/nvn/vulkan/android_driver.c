@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "vk.h"
+#include "renderdoc_bridge.h"
 
 // Does this driver offer a Vulkan GPU at all? (Turnip v26.0.0 R8, built for the A7xx: none on an Adreno 830 - the app
 // stopped at "no Vulkan device" on every start, its settings out of reach.) 1.1 and up: below 1.3 device.c checks the
@@ -74,5 +75,14 @@ void vk_android_load(void) {
     if (!lib) FATAL("no Vulkan driver: %s\n", dlerror());
     PFN_vkGetInstanceProcAddr gipa = (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr");
     if (!gipa) FATAL("the Vulkan driver has no vkGetInstanceProcAddr\n");
+    // The capture layer must see resources from their creation, before the user
+    // presses either capture button. Keep the selected ICD underneath it.
+    if (!getenv("LARECOMP_DISABLE_GPU_CAPTURE")) {
+        char library[1024], error[512];
+        snprintf(library, sizeof library, "%s/libVkLayer_GLES_RenderDoc.so", hooks ? hooks : "");
+        PFN_vkGetInstanceProcAddr capture = rd_layer_load(gipa, library, error, sizeof error);
+        if (capture) { gipa = capture; LOG("[capture] RenderDoc memory capture ready\n"); }
+        else LOG("[capture] unavailable: %s\n", error);
+    }
     volkInitializeCustom(gipa);
 }

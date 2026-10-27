@@ -54,6 +54,52 @@ struct QEvent {
 static pthread_mutex_t q_lock = PTHREAD_MUTEX_INITIALIZER;
 static std::vector<QEvent> q_events;
 static float g_pixel_density = 1;
+#ifdef __ANDROID__
+static std::atomic<unsigned> g_capture_requests{0};
+static float capture_rect[2][4]; // normalised, guarded by q_lock
+#endif
+
+bool menu_capture_event(const SDL_Event *e) {
+#ifdef __ANDROID__
+    static SDL_FingerID finger;
+    static bool finger_down, mouse_down;
+    const bool down = e->type == SDL_EVENT_FINGER_DOWN;
+    if (finger_down && (e->type == SDL_EVENT_FINGER_MOTION || e->type == SDL_EVENT_FINGER_UP ||
+                        e->type == SDL_EVENT_FINGER_CANCELED) && e->tfinger.fingerID == finger) {
+        if (e->type != SDL_EVENT_FINGER_MOTION) finger_down=false;
+        return true;
+    }
+    if (mouse_down && e->type == SDL_EVENT_MOUSE_BUTTON_UP) { mouse_down=false; return true; }
+    if (g_open.load()) return false;
+    if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat &&
+        (e->key.scancode == SDL_SCANCODE_F8 || e->key.scancode == SDL_SCANCODE_F10)) {
+        g_capture_requests.fetch_or(e->key.scancode == SDL_SCANCODE_F8 ? 1u : 2u); return true;
+    }
+    if (!down && e->type != SDL_EVENT_MOUSE_BUTTON_DOWN) return false;
+    float x,y;
+    if (down) { x=e->tfinger.x; y=e->tfinger.y; }
+    else {
+        int w=0,h=0; SDL_GetWindowSize(SDL_GetWindowFromID(e->button.windowID), &w, &h);
+        if (w<=0 || h<=0) return false;
+        x=e->button.x/w; y=e->button.y/h;
+    }
+    int hit=-1;
+    pthread_mutex_lock(&q_lock);
+    for (int i=0;i<2;i++) {
+        const float *r=capture_rect[i];
+        if (r[2]>r[0] && x>=r[0] && x<=r[2] && y>=r[1] && y<=r[3]) hit=i;
+    }
+    pthread_mutex_unlock(&q_lock);
+    if (hit<0) return false;
+    if (down) { finger_down=true; finger=e->tfinger.fingerID; }
+    else mouse_down=true;
+    // SDL's synthetic mouse event belongs to the same already-handled finger.
+    if (down || e->button.which != SDL_TOUCH_MOUSEID) g_capture_requests.fetch_or(1u << hit);
+    return true;
+#else
+    (void)e; return false;
+#endif
+}
 
 static void push(const QEvent &e) {
     pthread_mutex_lock(&q_lock);
@@ -523,17 +569,21 @@ static void tab_display(void) {
     opt_section("Flicker capture");
     FlickerStatus capture = flicker_status();
     ImGui::BeginDisabled(capture.saving && !capture.active);
-    if (ImGui::Button(tr(capture.active ? "Stop flicker capture" : "Start flicker capture"), ImVec2(-1, 56 * scale))) {
+    if (ImGui::Button(tr(capture.active ? "Stop continuous capture" : "Continuous capture"), ImVec2(-1, 56 * scale))) {
         if (capture.active) flicker_stop(); else flicker_start();
         capture = flicker_status();
+        if (capture.active) set_open(false);
     }
+    ImGui::EndDisabled();
+    ImGui::BeginDisabled(capture.saving || capture.single_pending);
+    if (ImGui::Button(tr("Capture current frame"), ImVec2(-1, 56 * scale))) { flicker_single(); set_open(false); }
     ImGui::EndDisabled();
     int sensitivity = (int)lroundf(capture.threshold * 100);
     if (ImGui::SliderInt(tr("Change threshold (%)"), &sensitivity, 2, 40)) flicker_set_threshold(sensitivity / 100.0f);
     ImGui::Text(tr("Saved events: %u  |  Skipped frames: %u"), capture.saved, capture.skipped);
-    if (capture.saving) ImGui::TextUnformatted(tr("Saving the before / during / after images..."));
+    if (capture.saving) ImGui::TextUnformatted(tr("Saving GPU capture..."));
     if (capture.error[0]) ImGui::TextWrapped("%s", tr(capture.error));
-    ImGui::TextWrapped("%s", tr("Keeps three images in memory. Saves before, peak and after an abrupt change, with preview.png. Lower thresholds catch smaller changes and more normal motion."));
+    ImGui::TextWrapped("%s", tr("Continuous capture keeps two complete GPU frames in memory and saves changes above the threshold, with preview.png. Capture current frame saves once. Full GPU capture slows the game while active."));
     if (capture.directory[0]) ImGui::TextWrapped("%s", capture.directory);
 #endif
     opt_section("Display");
@@ -1265,19 +1315,19 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     bool open = g_open.load();
     bool kbd = g_kbd.load() == 1;
 #ifdef __ANDROID__
-    bool touch = touch_controls_visible();
+    unsigned request = g_capture_requests.exchange(0);
+    if (request & 1) { if (flicker_status().active) flicker_stop(); else flicker_start(); }
+    if (request & 2) flicker_single();
     FlickerStatus capture_badge = flicker_status();
 #else
     bool touch = false;
 #endif
-    if (!open && !kbd && !g_settings.show_fps && !touch
-#ifdef __ANDROID__
-        && !capture_badge.active && !capture_badge.saving
-#endif
-        ) {
+#ifndef __ANDROID__ // Android always draws the two capture buttons during gameplay.
+    if (!open && !kbd && !g_settings.show_fps && !touch) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         return;
     }
+#endif
 #ifdef __APPLE__
     if (!g_inited) init(dev);
 #else
@@ -1320,8 +1370,28 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     ImGui::NewFrame();
 
 #ifdef __ANDROID__
-    if (!open && (capture_badge.active || capture_badge.saving)) {
+    pthread_mutex_lock(&q_lock);
+    memset(capture_rect, 0, sizeof capture_rect);
+    if (!open && !kbd) {
+        float bw=280*scale, gap=12*scale, y=14*scale, bh=54*scale;
+        float x=((float)tw-2*bw-gap)/2;
+        const char *labels[]={tr(capture_badge.active ? "Stop continuous capture" : "Continuous capture"),tr("Capture current frame")};
+        ImDrawList *draw=ImGui::GetForegroundDrawList();
+        for (int i=0;i<2;i++) {
+            float left=x+i*(bw+gap);
+            capture_rect[i][0]=left/tw; capture_rect[i][1]=y/th;
+            capture_rect[i][2]=(left+bw)/tw; capture_rect[i][3]=(y+bh)/th;
+            draw->AddRectFilled(ImVec2(left,y),ImVec2(left+bw,y+bh),
+                i==0 && capture_badge.active ? IM_COL32(128,50,36,230) : IM_COL32(22,34,42,220),8*scale);
+            ImVec2 text=ImGui::CalcTextSize(labels[i]);
+            draw->AddText(ImVec2(left+(bw-text.x)/2,y+(bh-text.y)/2),IM_COL32(255,238,190,255),labels[i]);
+        }
+    }
+    pthread_mutex_unlock(&q_lock);
+    if (!open && (capture_badge.active || capture_badge.saving || capture_badge.single_pending || capture_badge.saved || capture_badge.error[0])) {
         char label[128]; snprintf(label, sizeof label, tr("Flicker capture: %u saved"), capture_badge.saved);
+        if (capture_badge.error[0]) snprintf(label,sizeof label,"%s",tr(capture_badge.error));
+        else if (capture_badge.saving) snprintf(label,sizeof label,"%s",tr("Saving GPU capture..."));
         ImVec2 size = ImGui::CalcTextSize(label);
         ImGui::GetForegroundDrawList()->AddText(ImVec2((tw-size.x)*0.5f, 100*scale), IM_COL32(255,190,60,255), label);
     }
