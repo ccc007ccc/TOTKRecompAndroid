@@ -35,6 +35,7 @@ void input_reset(void);
 void controls_bindings_draw(float scale);  // controls_ui.mm
 #include "../input_bind.h"
 #include "../paths.h"
+#include "../test_session.h"
 }
 
 // ------------------------------------------------------------------ state shared with the main thread
@@ -54,6 +55,32 @@ struct QEvent {
 static pthread_mutex_t q_lock = PTHREAD_MUTEX_INITIALIZER;
 static std::vector<QEvent> q_events;
 static float g_pixel_density = 1;
+
+// Controls stay responsive on the event thread while rendering is paused.
+static float test_rect[2][4];
+bool menu_test_session_event(const SDL_Event *e) {
+    if (!test_session_enabled()) return false;
+    static SDL_FingerID finger;
+    static bool held;
+    if (held && (e->type == SDL_EVENT_FINGER_UP || e->type == SDL_EVENT_FINGER_CANCELED ||
+                 e->type == SDL_EVENT_FINGER_MOTION) && e->tfinger.fingerID == finger) {
+        if (e->type != SDL_EVENT_FINGER_MOTION) held = false;
+        return true;
+    }
+    if (e->type != SDL_EVENT_FINGER_DOWN) return false;
+    int hit = -1;
+    pthread_mutex_lock(&q_lock);
+    for (int i = 0; i < 2; i++) {
+        const float *r = test_rect[i];
+        if (r[2] > r[0] && e->tfinger.x >= r[0] && e->tfinger.x <= r[2] &&
+            e->tfinger.y >= r[1] && e->tfinger.y <= r[3]) hit = i;
+    }
+    pthread_mutex_unlock(&q_lock);
+    if (hit < 0) return false;
+    held = true; finger = e->tfinger.fingerID;
+    test_session_manual(hit == 1);
+    return true;
+}
 #ifdef __ANDROID__
 static std::atomic<unsigned> g_capture_requests{0};
 static float capture_rect[2][4]; // normalised, guarded by q_lock
@@ -1370,6 +1397,23 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     ImGui_ImplVulkan_NewFrame();
 #endif
     ImGui::NewFrame();
+
+    if (test_session_enabled()) {
+        const char *labels[] = {tr("Pause test"), tr("Resume game")};
+        float y = (float)th * .085f, h = (float)th * .055f;
+        float w = (float)tw * .14f, x = (float)tw * .355f, gap = (float)tw * .01f;
+        ImDrawList *dl = ImGui::GetForegroundDrawList();
+        pthread_mutex_lock(&q_lock);
+        for (int i = 0; i < 2; i++) {
+            float left = x + i * (w + gap);
+            test_rect[i][0] = left / tw; test_rect[i][1] = y / th;
+            test_rect[i][2] = (left + w) / tw; test_rect[i][3] = (y + h) / th;
+            dl->AddRectFilled(ImVec2(left, y), ImVec2(left + w, y + h), IM_COL32(72, 54, 16, 235), 8 * scale);
+            ImVec2 size = ImGui::CalcTextSize(labels[i]);
+            dl->AddText(ImVec2(left + (w - size.x) / 2, y + (h - size.y) / 2), IM_COL32(255, 231, 172, 255), labels[i]);
+        }
+        pthread_mutex_unlock(&q_lock);
+    }
 
 #ifdef __ANDROID__
     pthread_mutex_lock(&q_lock);

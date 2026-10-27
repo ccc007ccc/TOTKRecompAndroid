@@ -26,6 +26,9 @@ The inherited `tools/test_lift.py` depends on macOS/ARM64 and was not run succes
 
 ## Device evidence
 
+See [persistent phone performance sessions](PHONE-PERFORMANCE.md) for direct save selection, cooling in place,
+fixed-frame samples, and the current device-validation status and limitations.
+
 Record the commit/APK, driver and version, environment, scene, user feedback, valid frame range and logs for each run.
 Always select the correct OnePlus ADB target. The log tag is `TOTKRecompAndroid`.
 Upstream device results are not this branch's acceptance results. Short normal sequences do not disprove intermittent user reports.

@@ -67,6 +67,9 @@ bash android/build_gamelib.sh .work/totk-port/game/exefs
 
 The library is `totkgame.so` with identity sidecars. Normal builds use `-O1`, with exceptionally large functions at `-O0`.
 `GAMELIB_FAST_COMPILE=ON` sets all functions to `-O0` for diagnosis and is not a performance configuration.
+See [phone performance tests](PHONE-PERFORMANCE.md) for measured NDK r30 compiler outliers.
+`GAMELIB_DISABLE_LICM_PROMOTION` defaults to ON; `GAMELIB_EXTRA_HEAVY_SOURCES` accepts an explicit semicolon-separated
+list of additional O0 units and defaults to empty. Record these build parameters with performance results.
 
 Deployment uses the normal APK/Activity/JNI route. Data lives in `Android/data/com.totkrecomp.android/files/`, isolated from BOTW.
 No helper is placed in `/data/local/tmp`. Complete on-phone compilation is not part of the currently validated workflow.

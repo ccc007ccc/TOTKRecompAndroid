@@ -79,8 +79,11 @@ static void vertex_debug_instrument(ShaderInfo *si, const ShaderKey *key, uint64
 }
 
 static bool vertex_debug_capturing(void) {
+    // Constant-buffer binding calls this for every vertex stage. Ordinary
+    // frames need no environment lookup; debug frames retain dynamic settings.
+    if (!g_debug_frame) return false;
     bool multi = getenv("LARECOMP_DUMP_VERTEX_FRAMES") != NULL;
-    return g_debug_frame && (multi ? vertex_debug_saved_frame != renderer_present_count() : !vertex_debug_saved) &&
+    return (multi ? vertex_debug_saved_frame != renderer_present_count() : !vertex_debug_saved) &&
            vertex_debug_selected(getenv("LARECOMP_DUMP_VERTEX_OUTPUT"), st.program->stages[0].code_addr, false);
 }
 

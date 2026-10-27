@@ -543,3 +543,5 @@
 {"Full GPU replay capture", "完整 GPU 回放抓帧"},
 {"Full replay capture is enabled at startup and can use several GiB.", "本次启动启用了完整回放抓帧，可能占用数 GiB。"},
 {"Saves stage thumbnails, draw state, shader code and bounded uniform inputs with the before/after previews. Large resources are not copied. Omitted data is listed; this diagnostic bundle cannot replay a full GPU frame.", "保存阶段缩略图、绘制状态、着色器原码和有上限的常量输入，并附变化前后预览。不会复制全部大资源；省略内容会标明。此诊断包不能直接回放整帧。"},
+{"Pause test", "暂停测试"},
+{"Resume game", "继续游戏"},

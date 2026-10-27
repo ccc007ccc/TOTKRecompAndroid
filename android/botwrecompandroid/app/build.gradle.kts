@@ -9,6 +9,7 @@ val repo: File = rootDir.resolve("../..").canonicalFile
 val deps: File = repo.resolve("android/deps/out")  // android/deps/build_deps.sh
 val gen = layout.buildDirectory.dir("generated/botwrecompandroid")
 val dialogTestJni = layout.buildDirectory.dir("generated/dialog-test-jni")
+val performanceTest = providers.gradleProperty("performanceTest").orNull == "true"
 // The release key: outside the repository, in ~/.totkrecompandroid/keystore.properties (storeFile, storePassword, keyAlias,
 // keyPassword); without it, release builds are signed with the debug key
 val releaseKey: File = File(System.getProperty("user.home"), ".totkrecompandroid/keystore.properties")
@@ -19,7 +20,9 @@ android {
     ndkVersion = "30.0.16248370"
 
     defaultConfig {
-        applicationId = "com.totkrecomp.android"
+        applicationId = if (performanceTest) "com.totkrecomp.android.perftest" else "com.totkrecomp.android"
+        manifestPlaceholders["runtimeLabel"] = if (performanceTest) "TOTK Performance Test" else "TOTKRecompAndroid"
+        resValue("string", "application_package", applicationId!!)
         minSdk = 30
         targetSdk = 36
         versionCode = 13

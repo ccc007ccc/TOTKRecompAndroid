@@ -12,6 +12,8 @@
 #include "../hle.h"
 #include "../ipc.h"
 #include "../romfs_build.h"
+#include "../test_boot.h"
+#include "../test_session.h"
 #include "fs.h"
 
 #define FS_PATH_NOT_FOUND MAKE_RESULT(2, 1)
@@ -72,6 +74,24 @@ static bool mods_override(const char *path, char *out, size_t cap) {
     snprintf(out, cap, "%s/romfs/%s", d, path);
     struct stat sb;
     return stat(out, &sb) == 0 && S_ISREG(sb.st_mode);
+}
+
+static bool test_boot_override(int fd, const RomFile *file, char *out, size_t cap) {
+    int slot = test_session_save_slot();
+    if (slot < 0 || !test_boot_target(file->path)) return false;
+    if (file->size > 32768) FATAL("Unsupported direct-load sequence: %s\n", file->path);
+    uint8_t *data = malloc((size_t)file->size);
+    if (!data || pread(fd, data, file->size, (off_t)file->off) != (ssize_t)file->size ||
+        test_boot_patch(file->path, data, (size_t)file->size, slot) != 1)
+        FATAL("Direct loading requires the original TotK 1.4.3 sequence: %s\n", file->path);
+    int n = snprintf(out, cap, "%s/boot-%s", test_session_directory(), strrchr(file->path, '/') + 1);
+    if (n < 0 || (size_t)n >= cap) FATAL("Direct-load path is too long\n");
+    FILE *f = fopen(out, "wb");
+    if (!f || fwrite(data, 1, file->size, f) != file->size || fclose(f))
+        FATAL("Cannot write direct-load sequence: %s\n", out);
+    free(data);
+    LOG("[test-session] direct slot %02d: %s\n", slot, file->path);
+    return true;
 }
 
 static int rom_cmp(const void *a, const void *b) {
@@ -276,7 +296,8 @@ static void rom_index(int fd) {
     mods_scan();
     for (int i = 0; i < rom_nfiles; i++) {
         char host[1200];
-        if (!mods_override(rom_files[i].path, host, sizeof host) && !mods_romfs_override(rom_files[i].path, host, sizeof host))
+        if (!test_boot_override(fd, &rom_files[i], host, sizeof host) &&
+            !mods_override(rom_files[i].path, host, sizeof host) && !mods_romfs_override(rom_files[i].path, host, sizeof host))
             continue;
         struct stat sb;
         if (stat(host, &sb)) continue;

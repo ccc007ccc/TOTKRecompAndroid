@@ -10,6 +10,7 @@
 
 #include "../../paths.h"
 #include "../../settings.h"
+#include "../../test_session.h"
 #include "../../ui/menu.h"
 #include "vk.h"
 #include "flicker.h"
@@ -1334,7 +1335,14 @@ void backend_present(NvnTexture *t) {
         static long win_shot = -1;
         if (win_shot < 0) win_shot = getenv("LARECOMP_WINDOW_SHOT") ? atol(getenv("LARECOMP_WINDOW_SHOT")) : 0;
         bool shot = win_shot && (long)total_frames + 1 == win_shot;
-        vk_frame_end(shot ? "build/window.png" : NULL);
+        char test_path[1200];
+        const char *shot_path = "build/window.png";
+        if (test_session_take_shot_request()) {
+            snprintf(test_path, sizeof test_path, "%s/window.png", test_session_directory());
+            shot_path = test_path;
+            shot = true;
+        }
+        vk_frame_end(shot ? shot_path : NULL);
         if (shot && getenv("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
     } else {
         renderer_submit();
@@ -1379,6 +1387,7 @@ void backend_present(NvnTexture *t) {
         extern bool g_gpuprof_frame;
         extern void vk_gpuprof_report(void);
         if (g_gpuprof_frame) { g_gpuprof_frame = false; vk_gpuprof_report(); }
+        if(test_session_take_gpu_request())g_gpuprof_frame=true;
         const char *e = getenv("LARECOMP_GPUPROF_AT");
         for (const char *p = e; p && *p;) {
             long at = strtol(p, (char **)&p, 10);
@@ -1865,7 +1874,11 @@ int ui_run(void) {
     ui_window_init();
     atomic_store(&ui_ready, true);
     for (;;) {
-        if (rt_reboot_requested()) return rt_reboot_requested();  // (runtime/main.c tears the game down)
+        if (rt_reboot_requested()) {
+            test_session_end(); // release a paused render queue before guest teardown waits on it
+            return rt_reboot_requested();
+        }
+        test_session_poll();
         SDL_Event e;
 #ifdef __ANDROID__
         // (SDL's wait doesn't sleep on Android: it kept a core busy updating joysticks and reading the clock - 40% of
@@ -1884,6 +1897,7 @@ int ui_run(void) {
                 LOG("window closed\n");
                 exit(0);
             }
+            if (menu_test_session_event(&e)) continue;
             extern bool input_user_blocked(const SDL_Event *e);
             if (input_user_blocked(&e)) continue;  // scripted test runs: the real keyboard / mouse / pads do nothing (as metal.m)
 #ifdef __ANDROID__

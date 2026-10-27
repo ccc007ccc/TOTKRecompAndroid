@@ -20,6 +20,7 @@
 #include "../render_control.h"
 #include "../../settings.h"
 #include "../../paths.h"
+#include "../../test_session.h"
 
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 static uint64_t stat_feedback_reads;  // (attachments sampled as they are: only read, resolve_feedback)
@@ -1648,11 +1649,28 @@ static uint32_t level_extent(uint32_t v, uint32_t lv) { v >>= lv; return v ? v :
 // keeps the title screen and loading screens - no scene - at 16:9
 static volatile uint64_t g_scene_frame;
 uint64_t vk_scene_frame(void) { return g_scene_frame; }
+static uint64_t g_test_scene_frame;
+uint64_t vk_test_scene_frame(void) {
+    static uint64_t previous_draws;
+    uint64_t draws = cum_draws - previous_draws;
+    previous_draws = cum_draws;
+    // TotK's title mural is itself a 3D scene (~280 draws). The loaded save
+    // draws > 1000; require 600 draws as well as a G-buffer to exclude the title.
+    return draws >= 600 ? g_test_scene_frame : 0;
+}
 
 static void begin_pass(void) {
     if (in_pass && !st.rt_dirty) return;
     pipeline_dirty = true;
     vk_end_pass();
+    // Test readiness must also work with NO_SCALE, which assigns RS_NONE to all
+    // textures. Observe the guest G-buffer dimensions without changing scaling.
+    if (test_session_enabled() && st.rt.depth && st.rt.ncolor >= 3 && st.rt.color[0]) {
+        const NvnTexture *t = st.rt.color[0];
+        if (t->width >= 640 && t->height >= 360 &&
+            t->width * 100 >= t->height * 174 && t->width * 100 <= t->height * 181)
+            g_test_scene_frame = renderer_present_count();
+    }
     if (st.rt.depth && st.rt.ncolor >= 3 && st.rt.color[0] && vk_texture_scale_group(st.rt.color[0]) == RS_SCENE) {
         g_scene_frame = renderer_present_count();
         static float last_w, last_h;  // (LARECOMP_LOG_SCENE=1: the game's dynamic resolution, the G-buffer's size)

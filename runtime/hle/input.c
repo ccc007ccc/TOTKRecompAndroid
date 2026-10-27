@@ -15,6 +15,7 @@
 #include "../nvn/renderer.h"
 #include "../settings.h"
 #include "../input_bind.h"
+#include "../test_session.h"
 
 enum {
     BTN_A = 0, BTN_B, BTN_X, BTN_Y, BTN_LSTICK, BTN_RSTICK, BTN_L, BTN_R, BTN_ZL, BTN_ZR, BTN_PLUS, BTN_MINUS,
@@ -213,6 +214,7 @@ void input_handle_event(const SDL_Event *e) {
 // MINUS,LEFT,UP,RIGHT,DOWN, or STICK_UP/DOWN/LEFT/RIGHT, RSTICK_UP/DOWN/LEFT/RIGHT, STICK_<degrees>: full tilt at
 // that angle, 0 = right, 90 = up).
 static _Atomic uint64_t script_buttons;
+static _Atomic uint64_t session_buttons;
 static _Atomic int32_t script_lx, script_ly, script_rx, script_ry;
 
 // Tests of the bindings, through them like a real player:
@@ -353,6 +355,7 @@ static uint64_t g_pad_obj;
 volatile int g_inject_plus;  // frames to hold Plus for the game (movie.c: A/B skip a skippable movie)
 RT_ON_RESET(input_reboot_reset) { g_pad_obj = 0; g_inject_plus = 0; }  // (reboot: the controller object was guest memory)
 void input_frame(uint64_t frame) {
+    session_buttons=test_session_buttons(frame);
     if (g_pad_obj && getenv("LARECOMP_DUMP_PAD") && frame % 600 == 0) {
         const uint8_t *m = (const uint8_t *)(uintptr_t)(g_pad_obj - 0x98);
         LOG("[pad] mgr %llx 4e0=%u 4e4=%u 4e8=%u 548=%#x 54c..=%02x %02x %02x 56c=%02x\n", g_pad_obj - 0x98,
@@ -421,7 +424,7 @@ extern _Atomic int32_t g_touch_lx, g_touch_ly, g_touch_rx, g_touch_ry;
 #define TOUCH_RX 0
 #define TOUCH_RY 0
 #endif
-uint64_t input_buttons_now(void) { return (menu_input_captured() ? 0 : key_buttons | pad_buttons | TOUCH_BUTTONS) | script_buttons; }
+uint64_t input_buttons_now(void) { return (menu_input_captured() ? 0 : key_buttons | pad_buttons | TOUCH_BUTTONS) | script_buttons | session_buttons; }
 
 static int32_t clamp_axis(int32_t v) { return v > 32767 ? 32767 : v < -32767 ? -32767 : v; }
 
@@ -445,7 +448,7 @@ static void fill_state(Cpu *c) {
         LOG("[input] watching controller object %llx\n", c->x[1] - 8);
     }
     bool menu = menu_input_captured();  // the overlay menu / name entry has the controls (typing there isn't for the game)
-    uint64_t b = menu ? script_buttons : key_buttons | pad_buttons | TOUCH_BUTTONS | script_buttons;
+    uint64_t b = (menu ? script_buttons : key_buttons | pad_buttons | TOUCH_BUTTONS | script_buttons) | session_buttons;
     {   // injected Plus: held for ~10 presented frames (the game polls several times per frame)
         extern uint64_t renderer_present_count(void);
         static uint64_t until;

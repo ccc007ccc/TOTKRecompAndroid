@@ -239,6 +239,9 @@ int main(int argc, char **argv) {
         else if (argv[i][0] != '-') root = arg_root;
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
+    // Initialize isolated test saves before the guest can mount them.
+    extern bool test_session_enabled(void);
+    test_session_enabled();
     for (bool title = !skip_launcher;;) {
         if (title) {  // start screen (runtime/ui/launcher.mm): game files setup, settings
             extern void launcher_run(const char *root);

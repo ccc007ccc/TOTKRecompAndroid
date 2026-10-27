@@ -12,7 +12,7 @@
         android:shortcutLongLabel="@string/shortcut_pick_driver_long">
         <intent
             android:action="com.botwrecompandroid.action.PICK_DRIVER"
-            android:targetPackage="com.totkrecomp.android"
+            android:targetPackage="@string/application_package"
             android:targetClass="com.botwrecompandroid.DriverPickActivity" />
     </shortcut>
     <shortcut
@@ -23,7 +23,7 @@
         android:shortcutLongLabel="@string/shortcut_watch_map_long">
         <intent
             android:action="com.botwrecompandroid.action.WATCH_MAP"
-            android:targetPackage="com.totkrecomp.android"
+            android:targetPackage="@string/application_package"
             android:targetClass="com.botwrecompandroid.BOTWRecompAndroidActivity" />
     </shortcut>
     <shortcut
@@ -34,7 +34,7 @@
         android:shortcutLongLabel="@string/shortcut_system_driver_long">
         <intent
             android:action="com.botwrecompandroid.action.SYSTEM_DRIVER"
-            android:targetPackage="com.totkrecomp.android"
+            android:targetPackage="@string/application_package"
             android:targetClass="com.botwrecompandroid.BOTWRecompAndroidActivity" />
     </shortcut>
 </shortcuts>

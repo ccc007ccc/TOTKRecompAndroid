@@ -13,7 +13,7 @@
     <uses-permission android:name="android.permission.INTERNET" />
 
     <application
-        android:label="TOTKRecompAndroid"
+        android:label="${runtimeLabel}"
         android:icon="@mipmap/ic_launcher"
         android:allowBackup="false"
         android:appCategory="game"

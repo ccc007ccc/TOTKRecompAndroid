@@ -85,4 +85,8 @@ SH
 默认游戏库使用 `-O1`，超大跳转表函数单独 `-O0`。`GAMELIB_FAST_COMPILE=ON` 会把全部函数设为 `-O0`，
 适合定位启动问题，不适合性能验收。NDK 版本、依赖或生成器变化后，需按脚本输入签名重新构建相应产物。
 
+NDK r30 的巨型控制流编译问题和已验证的例外见[手机性能测试](PHONE-PERFORMANCE.md)。
+`GAMELIB_DISABLE_LICM_PROMOTION` 默认 ON；`GAMELIB_EXTRA_HEAVY_SOURCES` 可明确指定分号分隔的额外 O0 单元，默认空。
+这些是构建参数，必须记录在性能结果中；不要用全量 O0 代替性能构建。
+
 清理前保留所需输入、游戏库、存档和有效实验日志。不要为腾空间删除尚未分析的抓取，或删除手机原始 `Games/TotK/`。

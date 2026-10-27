@@ -52,7 +52,9 @@ echo "heavy (at -O0): $(tr '\n' ' ' < "$GEN/heavy.txt")"
 "$CMAKE_DIR/cmake$EXE" -S "$R/android/gamelib" -B "$W" -G Ninja -DCMAKE_MAKE_PROGRAM="$CMAKE_DIR/ninja$EXE" \
     -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-30 \
     -DCMAKE_BUILD_TYPE=Release -DLAS_GEN="$GEN" -DLAS_LIBMAIN="$LIBMAIN" \
-    -DTOTK_FAST_COMPILE="${GAMELIB_FAST_COMPILE:-OFF}"
+    -DTOTK_FAST_COMPILE="${GAMELIB_FAST_COMPILE:-OFF}" \
+    -DTOTK_DISABLE_LICM_PROMOTION="${GAMELIB_DISABLE_LICM_PROMOTION:-ON}" \
+    -DTOTK_EXTRA_HEAVY_SOURCES="${GAMELIB_EXTRA_HEAVY_SOURCES:-}"
 "$CMAKE_DIR/cmake$EXE" --build "$W" -j"$JOBS"
 mkdir -p "$OUT"
 cp "$W/totkgame.so" "$W/totkgame.so.id" "$OUT/"

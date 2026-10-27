@@ -22,6 +22,8 @@
 #include "../nvn.h"
 #include "../../platform.h"
 #include "../../rt.h"
+#include "../../test_session.h"
+#include "vk.h"
 
 enum { REQ_EXEC, REQ_PRESENT, REQ_FENCE };
 typedef struct { int type; uint64_t a; void *p; uint64_t id; } Req;
@@ -74,6 +76,8 @@ static uint64_t render_cpu_ns(void) {
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+static void test_gpu_idle(void) { vkDeviceWaitIdle(g_vk.dev); }
+
 static void *render_main(void *arg) {
     (void)arg;
     extern void plat_thread_unpin(void);
@@ -106,6 +110,14 @@ static void *render_main(void *arg) {
         q_done = r.id;
         if (r.type == REQ_PRESENT) q_presents--;
         pthread_cond_broadcast(&q_less);
+        if(r.type==REQ_PRESENT&&test_session_enabled()) {
+            pthread_mutex_unlock(&q_lock);
+            extern uint64_t renderer_present_count(void), vk_test_scene_frame(void);
+            uint64_t frame=renderer_present_count();
+            uint64_t scene=vk_test_scene_frame();
+            test_session_frame(frame,scene&&scene+2>=frame,test_gpu_idle);
+            pthread_mutex_lock(&q_lock);
+        }
     }
     return NULL;
 }
