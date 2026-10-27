@@ -155,6 +155,8 @@
  "適用於使用 Turnip 時遊戲畫面出錯的 GPU（文字缺失、顏色怪異、黑塊）。大多數手機用「自動」即可：在 Adreno 8xx GPU 上用最快的方式，在其他 GPU 上用較穩妥的方式。"},
 {"Frame rate",
  "畫面更新率"},
+{"Target frame rate. Game time follows actual frame duration. Auto targets 60 FPS. Actual performance depends on the device and scene; movies stay at 30 FPS.",
+ "目標畫面更新率。遊戲計時跟隨實際畫面耗時；自動以 60 FPS 為目標。實際效能取決於裝置與場景，影片維持 30 FPS。"},
 {"Frees the space BOTWRecompAndroid's copy of the game files takes. Saves and settings are kept, and your own game files aren't touched: you can set the game files up again from them.",
  "釋放 BOTWRecompAndroid 複製的遊戲檔案所佔的空間。存檔和設定會保留，你自己的遊戲檔案不會被動到：之後可以用它們重新設定遊戲檔案。"},
 {"French",

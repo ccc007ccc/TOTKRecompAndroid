@@ -22,6 +22,12 @@
 #include "../../paths.h"
 #include "../../test_session.h"
 
+// LARECOMP_AB (vk_ab, below): AB() costs no call while it is not set - it is asked per constant buffer and per pass
+static int ab_n = -1;  // (LARECOMP_AB's frame count; 0: no A/B)
+int vk_ab(const char *what);
+#define AB(what) (ab_n == 0 ? -1 : vk_ab(what))
+static uint64_t hash_words(uint64_t h, const void *p, size_t n);
+
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 static uint64_t stat_feedback_reads;  // (attachments sampled as they are: only read, resolve_feedback)
 static unsigned diagnostic_range(unsigned kind, uint64_t address, uint64_t size, unsigned limit);
@@ -1414,18 +1420,27 @@ static uint64_t wb_max(void) {  // (LARECOMP_WRITEBACK_MAX=<bytes>: a larger lim
 // Link and the NPCs into the ground without them. LARECOMP_WB_LINEAR=0: off.
 #define WB_LINEAR_MAX (512u * 1024)
 #define WB_SLOT (WB_MAX > WB_LINEAR_MAX ? WB_MAX : WB_LINEAR_MAX)
-#define WB_SLOTS 32
-typedef struct { uint64_t seq, addr, pitch; uint32_t wb, hb, bpb, bh, fmt; bool busy; } WbEntry;  // (pitch: linear rows, 0: block-linear)
+// Two pools of slots: WB_SMALL of WB_MAX bytes for the small targets, WB_BIG of WB_SLOT for the linear ones (the terrain
+// heights). A 1.9.0 frame queues ~30 write-backs (1x1 to 24x24: exposure, depth bounds, the feet's 1x1 targets) and 32
+// slots of 512 KB each - all of them sized for a terrain tile - were full every frame once its previous one was still
+// on the GPU: the CPU waited for the GPU ~12 times a second, and the game stuttered (2026-10-27, 8,700 waits in 20
+// minutes). Now four frames of small ones fit, in about as much memory as before.
+#define WB_SMALL 128
+#define WB_BIG 32
+#define WB_SLOTS (WB_SMALL + WB_BIG)
+typedef struct { uint64_t seq, addr, pitch, off; uint32_t wb, hb, bpb, bh, fmt, size; bool busy; } WbEntry;  // (pitch: linear rows, 0: block-linear; off, size: its slot in wb_buf)
 static WbEntry wb_ent[WB_SLOTS];
-static int wb_next;
+static int wb_next_small, wb_next_big;
+// Preserve GPU copy order across wraparound and across the two pools. Aliasing targets can write the same guest bytes.
+static uint16_t wb_pending[WB_SLOTS];
+static unsigned wb_head, wb_count;
 static VkBuffer wb_buf;
 static VmaAllocation wb_mem;
 static uint8_t *wb_ptr;
 static pthread_mutex_t wb_lock = PTHREAD_MUTEX_INITIALIZER;
 static NvnTexture *wb_pass[8];
 static int wb_npass;
-static uint64_t stat_wb, stat_wb_dropped;
-
+static uint64_t stat_wb, stat_wb_waits, stat_wb_dropped;
 static bool wb_on(void) {
     static int on = -1;
     if (on < 0) on = getenv("LARECOMP_NO_WRITEBACK") == NULL;
@@ -1449,7 +1464,8 @@ static void wb_queue(NvnTexture *t) {
     TexBackend *b = t->backend;
     pthread_mutex_lock(&wb_lock);
     if (!wb_buf) {
-        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = (VkDeviceSize)WB_SLOT * WB_SLOTS,
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                 .size = (VkDeviceSize)WB_MAX * WB_SMALL + (VkDeviceSize)WB_SLOT * WB_BIG,
                                  .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
                                       .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
@@ -1457,19 +1473,66 @@ static void wb_queue(NvnTexture *t) {
         VK_CHECK(vmaCreateBuffer(g_vk.vma, &bi, &ai, &wb_buf, &wb_mem, &info));
         wb_ptr = info.pMappedData;
     }
-    WbEntry *e = &wb_ent[wb_next];
-    if (e->busy) { stat_wb_dropped++; pthread_mutex_unlock(&wb_lock); return; }  // (the GPU is that far behind)
-    int slot = wb_next;
-    wb_next = (wb_next + 1) % WB_SLOTS;
+    // (the slot by the copy's size: a small one when it fits WB_MAX, a big one else)
+    const FormatInfo *qfi = t->layout.fmt;
+    LevelLayout ql = tegra_level(&t->layout, 0);  // (wb_apply reads the level's padded blocks: the larger of the two)
+    uint64_t qbpb = qfi ? qfi->bpb : 16, need = (uint64_t)t->width * t->height * qbpb, padded = (uint64_t)ql.wb * ql.hb * qbpb;
+    bool small = (need > padded ? need : padded) <= WB_MAX;
+    int *next = small ? &wb_next_small : &wb_next_big;
+    int base = small ? 0 : WB_SMALL, count = small ? WB_SMALL : WB_BIG;
+    WbEntry *e = &wb_ent[base + *next];
+    if (e->busy) {
+        // Every slot still waits for the GPU. Dropped, the target's texels never reached memory: a tower's cutscene
+        // draws the region's terrain height tiles (8 levels of 256x256 a tile) in a burst, the heights stayed stale and
+        // the terrain sampled from that memory stood up in "curtains" until the area loaded again (2026-10-26). Now the
+        // GPU is waited for up to the slot's submission and the slot's write-back lands first. LARECOMP_WB_DROP=1: dropped,
+        // as before.
+        static int drop = -1;
+        if (drop < 0) drop = getenv("LARECOMP_WB_DROP") && atoi(getenv("LARECOMP_WB_DROP"));
+        if (drop) stat_wb_dropped++;
+        else stat_wb_waits++;
+        static int nlog;
+        if (nlog++ < 40 || !((stat_wb_waits + stat_wb_dropped) & 255))
+            LOG("[vk] write-back slots full (%llu waits, %llu dropped): %s the GPU (submission %llu)\n",
+                (unsigned long long)stat_wb_waits, (unsigned long long)stat_wb_dropped,
+                drop ? "dropped, not waiting for" : "waiting for", (unsigned long long)e->seq);
+        if (drop) { pthread_mutex_unlock(&wb_lock); return; }
+        uint64_t seq = e->seq;
+        pthread_mutex_unlock(&wb_lock);
+        if (seq >= vk_pending_seq()) renderer_submit();  // (its copy is in the work being recorded: send it)
+        wait_why = "write-back slots full";
+        vk_wait_seq(seq);  // (lands the finished write-backs: cq_resolve_done -> wb_apply)
+        // vk_wait_seq has a bounded wait and can time out. Only read GPU memory confirmed complete by the timeline.
+        wb_apply(vk_completed_seq());
+        pthread_mutex_lock(&wb_lock);
+        e = &wb_ent[base + *next];
+        if (e->busy) {
+            pthread_mutex_unlock(&wb_lock);
+            FATAL("GPU write-back submission %llu did not finish; refusing to reuse an unfinished slot\n",
+                  (unsigned long long)seq);
+        }
+    }
+    int slot = *next;
+    *next = (*next + 1) % count;
+    uint64_t off = small ? (uint64_t)slot * WB_MAX : (uint64_t)WB_MAX * WB_SMALL + (uint64_t)slot * WB_SLOT;
     const FormatInfo *fi = t->layout.fmt;
     LevelLayout l = tegra_level(&t->layout, 0);
     *e = (WbEntry){.seq = submit_seq + 1, .addr = t->addr, .wb = l.wb, .hb = l.hb, .bpb = fi->bpb,
                    .pitch = nvn_texture_row_stride(t, (uint64_t)l.wb * fi->bpb),
-                   .bh = l.block_height_log2, .fmt = t->format, .busy = true};
+                   .bh = l.block_height_log2, .fmt = t->format, .off = off, .size = small ? WB_MAX : WB_SLOT, .busy = true};
+    wb_pending[(wb_head + wb_count++) % WB_SLOTS] = (uint16_t)(base + slot);
     pthread_mutex_unlock(&wb_lock);
+    {   // LARECOMP_LOG_WB_FRAME=<n>: every write-back of every n-th frame - size, format, flags, submission (the frame's
+        // submissions: nvnSyncWait's [synclag-frame] line), to tell which ones the CPU needs before the next frame
+        static int every = -1;
+        if (every < 0) every = getenv("LARECOMP_LOG_WB_FRAME") ? atoi(getenv("LARECOMP_LOG_WB_FRAME")) : 0;
+        if (every > 0 && renderer_present_count() % (uint64_t)every == 0)
+            LOG("[wb-frame] %llu: %ux%u f%#x flags %#x at %llx, submission %llu\n", (unsigned long long)renderer_present_count(),
+                t->width, t->height, t->format, t->flags, (unsigned long long)t->addr, (unsigned long long)e->seq);
+    }
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);
-    VkBufferImageCopy c = {.bufferOffset = (VkDeviceSize)slot * WB_SLOT, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+    VkBufferImageCopy c = {.bufferOffset = (VkDeviceSize)off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                            .imageExtent = {t->width, t->height, 1}};
     vkCmdCopyImageToBuffer(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, wb_buf, 1, &c);
     VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
@@ -1493,20 +1556,20 @@ static void wb_queue(NvnTexture *t) {
 static void wb_apply(uint64_t done) {
     if (!wb_ptr) return;
     pthread_mutex_lock(&wb_lock);
-    for (int i = 0; i < WB_SLOTS; i++) {
-        WbEntry *e = &wb_ent[i];
-        if (!e->busy || e->seq > done) continue;
-        vmaInvalidateAllocation(g_vk.vma, wb_mem, (VkDeviceSize)i * WB_SLOT, WB_SLOT);
+    while (wb_count) {
+        WbEntry *e = &wb_ent[wb_pending[wb_head]];
+        if (e->seq > done) break;
+        vmaInvalidateAllocation(g_vk.vma, wb_mem, (VkDeviceSize)e->off, e->size);
         if (e->pitch)
             for (uint32_t y = 0; y < e->hb; y++)
-                memcpy((uint8_t *)(uintptr_t)(e->addr + y * e->pitch), wb_ptr + (size_t)i * WB_SLOT + (size_t)y * e->wb * e->bpb, (size_t)e->wb * e->bpb);
-        else tegra_swizzle(wb_ptr + (size_t)i * WB_SLOT, (uint8_t *)(uintptr_t)e->addr, e->wb, e->hb, 1, e->bpb, e->bh, 0);
+                memcpy((uint8_t *)(uintptr_t)(e->addr + y * e->pitch), wb_ptr + (size_t)e->off + (size_t)y * e->wb * e->bpb, (size_t)e->wb * e->bpb);
+        else tegra_swizzle(wb_ptr + (size_t)e->off, (uint8_t *)(uintptr_t)e->addr, e->wb, e->hb, 1, e->bpb, e->bh, 0);
         {   // LARECOMP_LOG_WB_NAN=1: the auto exposure's small targets - inf / NaN in them, and a black frame (the
             // 2x2 luminance of the previous image near 0) with the 12x1 parameters and the 1x1 average at that point
             static int on = -1;
             if (on < 0) on = getenv("LARECOMP_LOG_WB_NAN") != NULL;
             static float p12[12][3], p1[3];
-            const uint8_t *px = wb_ptr + (size_t)i * WB_SLOT;
+            const uint8_t *px = wb_ptr + (size_t)e->off;
             if (on && e->fmt == 0x3f && e->hb == 1 && (e->wb == 12 || e->wb == 1)) {  // R11G11B10F
                 for (uint32_t k = 0; k < e->wb; k++) {
                     uint32_t v = ((const uint32_t *)px)[k];
@@ -1540,6 +1603,8 @@ static void wb_apply(uint64_t done) {
             }
         }
         e->busy = false;
+        wb_head = (wb_head + 1) % WB_SLOTS;
+        wb_count--;
     }
     pthread_mutex_unlock(&wb_lock);
 }
@@ -1697,7 +1762,7 @@ static void begin_pass(void) {
             chunk = e ? atol(e) : vk_driver_is_qualcomm() ? 0 : 2000;
         }
         extern int vk_ab(const char *what);
-        long ch = chunk > 0 && vk_ab("chunk") == 1 ? 500 : chunk;
+        long ch = chunk > 0 && AB("chunk") == 1 ? 500 : chunk;
         if (ch > 0 && vk_async_on() && last_submit_ns && SDL_GetTicksNS() - last_submit_ns > (uint64_t)ch * 1000)
             renderer_submit();
     }
@@ -1708,7 +1773,7 @@ static void begin_pass(void) {
     static int no_barrier = -1;  // (LARECOMP_VK_NO_PASS_BARRIER=1: none - unsafe, a measurement of what it costs)
     if (no_barrier < 0) no_barrier = getenv("LARECOMP_VK_NO_PASS_BARRIER") != NULL;
     extern int vk_ab(const char *what);
-    if (!no_barrier && vk_ab("nobarrier") != 1) vk_full_barrier(cb);  // passes, copies and dispatches see each other's results
+    if (!no_barrier && AB("nobarrier") != 1) vk_full_barrier(cb);  // passes, copies and dispatches see each other's results
     {
         NvnTexture *t0n = st.rt.ncolor ? st.rt.color[0] : NULL;
         dl_note("pass %d color %ux%u fmt %#x depth %p", st.rt.ncolor, t0n ? t0n->width : 0, t0n ? t0n->height : 0, t0n ? t0n->format : 0,
@@ -2117,6 +2182,9 @@ typedef struct {
     VkDescriptorSetLayout set_layout[2];
     VkPipelineLayout layout;
     bool vs_uses_vid;
+    uint32_t fs_out_mask;  // fi->out_mask: the render targets the fragment shader writes (read by every draw; in
+                           // ShaderInfo it sits 1.4 KB in, past the 64 textures - a cache miss each draw, ~7% of the
+                           // render thread on the POCO F7 Ultra: draw_writes)
     _Atomic int state;  // 0 building, 1 ready, 2 failed
 } Prog;
 
@@ -2296,6 +2364,7 @@ static void translate_program(void *arg) {
     if (p->vi->msl) {
         p->fkey.vs_out_mask = p->vi->out_mask;
         p->fi = maxwell_translate_bounded((const uint8_t *)(uintptr_t)p->code[1], p->cmax[1], p->const_bytes[1], STAGE_FRAGMENT, &p->fkey);
+        p->fs_out_mask = p->fi ? p->fi->out_mask : 0;
     }
     pthread_mutex_unlock(&translate_lock);
     if (!p->vi->msl) {
@@ -2353,8 +2422,7 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     last_vkey = *vkey, last_fkey = *fkey;
     uint64_t h = 0xcbf29ce484222325ull;
     for (int i = 0; i < 2; i++) { uint64_t a = np->stages[i].code_addr; for (int k = 0; k < 8; k++) { h ^= (a >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; } }
-    const uint8_t *vb = (const uint8_t *)vkey;
-    for (size_t i = 0; i < sizeof *vkey; i++) { h ^= vb[i]; h *= 0x100000001B3ull; }
+    h = hash_words(h, vkey, sizeof *vkey);  // (8 bytes a step: the table is in memory only)
     for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
 #ifdef __ANDROID__
     if (fkey->no_ds_write) { h ^= 0xE1; h *= 0x100000001B3ull; }  // (keys without it hash as before)
@@ -3101,12 +3169,12 @@ static void alias_draw_check(void) {
 static uint32_t draw_writes(const Prog *pr) {
     uint32_t w = 0;
     for (int i = 0; i < st.rt.ncolor; i++)
-        if (st.rt.color[i] && ((pr->fi->out_mask >> (i * 4)) & 0xF) && ((st.channel_mask >> (i * 4)) & 0xF)) w |= 1u << i;
+        if (st.rt.color[i] && ((pr->fs_out_mask >> (i * 4)) & 0xF) && ((st.channel_mask >> (i * 4)) & 0xF)) w |= 1u << i;
     if (st.rt.depth && ((st.ds[0] && st.ds[1]) || (st.ds[3] && ((st.stencil_mask[0] | st.stencil_mask[1]) & 0xFF)))) w |= 1u << 8;
     return w;
 }
 
-static void resolve_feedback(Prog *pr) {
+static void resolve_feedback(Prog *pr, uint32_t draw_written) {
     nfeedback = 0;
     ninplace = 0;
     static int off = -1;
@@ -3118,7 +3186,7 @@ static void resolve_feedback(Prog *pr) {
     // 1600x900 targets (~2.5 ms of GPU) each time it changed. LARECOMP_FEEDBACK_ALWAYS=1: a copy whenever bound.
     static int always = -1;
     if (always < 0) always = getenv("LARECOMP_FEEDBACK_ALWAYS") != NULL;
-    uint32_t written = draw_writes(pr) | (in_pass && !st.rt_dirty ? pass_written : 0);
+    uint32_t written = draw_written | (in_pass && !st.rt_dirty ? pass_written : 0);
     ShaderInfo *infos[2] = {pr->vi, pr->fi};
     for (int sg = 0; sg < 2; sg++)
         for (int i = 0; i < infos[sg]->ntex; i++) {
@@ -3161,7 +3229,7 @@ static void resolve_feedback(Prog *pr) {
                         g_settings.inplace_reads < 0 ? "automatic" : "settings");
                 }
                 extern int vk_ab(const char *what);
-                if (!g_inplace_copy && bit && bit < 1u << 8 && vk_ab("copy") != 1) {
+                if (!g_inplace_copy && bit && bit < 1u << 8 && AB("copy") != 1) {
                     int si = -1;
                     for (int k = 0; k < 8; k++) if (snap_tex[k] == t) si = k;
                     if (si < 0 || !snap_ok[si]) {
@@ -3420,7 +3488,7 @@ static bool ubo_direct(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out
     static int on = -1;
     if (on < 0) on = getenv("LARECOMP_UBO_DIRECT") && atoi(getenv("LARECOMP_UBO_DIRECT"));
     extern int vk_ab(const char *what);
-    if (!(on || vk_ab("ubo") == 1) || !gmem_placed || addr < HEAP_BASE || addr + size > HEAP_BASE + gmem_size) return false;
+    if (!(on || AB("ubo") == 1) || !gmem_placed || addr < HEAP_BASE || addr + size > HEAP_BASE + gmem_size) return false;
     uint64_t off = addr - HEAP_BASE;
     if ((off & (g_vk.props.limits.minUniformBufferOffsetAlignment - 1)) || size > g_vk.props.limits.maxUniformBufferRange)
         return false;
@@ -3482,27 +3550,32 @@ bool vk_heap_place(uint64_t size) {
     if (!size) return false;
     vk_wait_ready();
     if (gmem_buf) return true;
-    if (!g_vk.map_placed || getenv("LARECOMP_VK_NO_PLACED")) return false;
+    // Not placed: the heap stays CPU memory copied for the GPU, and the vertex cache and the texture checks need the
+    // OS's write tracking - vk_exec_init turns it on only without placed memory at all, so a Turnip that has it but
+    // isn't an Adreno 8xx (Automatic) had neither: every vertex and index buffer copied each frame, ~150 MB, 7-9 fps
+    // on an Adreno 730 (issue #31). A page not tracked yet counts as written, so turning it on late is safe.
+#define NOT_PLACED() (gcopy_mode ? plat_write_tracking_enable(HEAP_BASE, HEAP_BASE + HEAP_MAX) : (void)0, false)
+    if (!g_vk.map_placed || getenv("LARECOMP_VK_NO_PLACED")) return NOT_PLACED();
     extern bool vk_turnip_path_on(int setting);
     if (!vk_turnip_path_on(g_settings.gpu_heap)) {
         // (the start screen's Driver compatibility: Automatic leaves it to the Adreno 8xx it was made on)
         LOG("[vk] guest heap as GPU memory: off (%s) - shader global memory through CPU copies\n",
             g_settings.gpu_heap < 0 ? "automatic: not an Adreno 8xx" : "settings");
-        return false;
+        return NOT_PLACED();
     }
     uint64_t align = g_vk.placed_align > 65536 ? g_vk.placed_align : 65536;
     size = (size + align - 1) & ~(align - 1);
     if ((HEAP_BASE & (align - 1)) || size > HEAP_MAX) {
         LOG("[vk] heap placement: %llx / %llu MB doesn't fit (alignment %llu)\n", (unsigned long long)HEAP_BASE,
             (unsigned long long)(size >> 20), (unsigned long long)align);
-        return false;
+        return NOT_PLACED();
     }
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size,
                              .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                                       VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT};  // (ubo_direct)
     VkBuffer buf;
-    if (vkCreateBuffer(g_vk.dev, &bi, NULL, &buf) != VK_SUCCESS) return false;
+    if (vkCreateBuffer(g_vk.dev, &bi, NULL, &buf) != VK_SUCCESS) return NOT_PLACED();
     VkMemoryRequirements mr;
     vkGetBufferMemoryRequirements(g_vk.dev, buf, &mr);
     VkPhysicalDeviceMemoryProperties mp;
@@ -3532,7 +3605,7 @@ bool vk_heap_place(uint64_t size) {
         if (mem) vkFreeMemory(g_vk.dev, mem, NULL);  // (freeing a placed map unmaps it: the window gets its pages back)
         if (p == (void *)(uintptr_t)HEAP_BASE) plat_reset_guest(HEAP_BASE, HEAP_BASE + size);
         vkDestroyBuffer(g_vk.dev, buf, NULL);
-        return false;
+        return NOT_PLACED();
     }
     gmem_buf = buf;
     gmem_mem = mem;
@@ -3545,6 +3618,7 @@ bool vk_heap_place(uint64_t size) {
         (unsigned long long)(g_vk.props.limits.maxStorageBufferRange >> 20), gwin_mode ? "; draws reach global memory through windows" : "");
     return true;
 }
+#undef NOT_PLACED
 #endif
 
 static VkDescriptorBufferInfo gmem_info(void) {
@@ -5204,7 +5278,10 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     if (ct_on()) ct_draw(pr, "draw");
     alias_draw_check();
-    resolve_feedback(pr);
+    // (the attachments this draw writes: once a draw - the targets and masks don't change before it is recorded; three
+    // computations of it were ~8% of the render thread on the POCO F7 Ultra)
+    const uint32_t draw_w = draw_writes(pr);
+    resolve_feedback(pr, draw_w);
     scene_upscale(pr, r);
     snap_reason = "draw-depthwrite";
     if (st.rt.depth && st.ds[0] && st.ds[1]) {
@@ -5214,10 +5291,10 @@ static void draw_(CmdRec *r, bool indexed) {
         if (fb) snapshots_mark_fb_dirty(st.rt.depth);
         else snapshots_invalidate(st.rt.depth);
     }
-    if (in_pass && (draw_writes(pr) & pass_dup_null)) st.rt_dirty = true;  // (writes a slot begin_pass left unbound)
+    if (in_pass && (draw_w & pass_dup_null)) st.rt_dirty = true;  // (writes a slot begin_pass left unbound)
     snap_reason = "draw-colorwrite";
     for (int i = 0; i < st.rt.ncolor; i++) {
-        if (st.rt.color[i] && ((pr->fi->out_mask >> (i * 4)) & 0xF) && ((st.channel_mask >> (i * 4)) & 0xF)) {
+        if ((draw_w >> i) & 1) {
             bool fb = false;
             for (int k = 0; k < nfeedback; k++) fb |= feedback_tex[k] == st.rt.color[i];
             for (int k = 0; k < ninplace; k++) fb |= inplace_tex[k] == st.rt.color[i];
@@ -5353,7 +5430,7 @@ static void draw_(CmdRec *r, bool indexed) {
             if (!st.rt.color[i] || k.color[i] == VK_FORMAT_UNDEFINED) continue;
             // Targets the fragment shader doesn't output keep their contents on Metal, but are undefined in Vulkan
             // (NVIDIA writes black): mask them. Foliage depth pre-passes left black silhouettes (user 2026-10-08).
-            k.write_mask[i] = ((pr->fi->out_mask >> (i * 4)) & 0xF) ? (st.channel_mask >> (i * 4)) & 0xF : 0;
+            k.write_mask[i] = ((pr->fs_out_mask >> (i * 4)) & 0xF) ? (st.channel_mask >> (i * 4)) & 0xF : 0;
             if (((st.color_state[0] >> i) & 1) && !rt_kind(st.rt.color[i]->format)) {
                 k.blend_on |= (uint8_t)(1u << i);
                 memcpy(k.blend[i], st.blend[i], 8);
@@ -5665,7 +5742,7 @@ static void draw_(CmdRec *r, bool indexed) {
     if(vk_diag_active())diagnostic_draw(pr,r,indexed);
     if (!use_index) vkCmdDraw(cb, count, inst, first, base_inst);
     else vkCmdDrawIndexed(cb, icount, inst, 0, base_vertex, base_inst);
-    pass_written |= draw_writes(pr);
+    pass_written |= draw_w;
     stat_draws++;
     cum_draws++;
     if (g_gpuprof_frame && gp_n) {
@@ -6433,7 +6510,7 @@ static void scene_upscale(Prog *pr, CmdRec *r) {
     if (on < 0) on = getenv("LARECOMP_SCENE_UPSCALE") ? atoi(getenv("LARECOMP_SCENE_UPSCALE")) : 1;
     int mode = g_settings.upscaler;
     extern int vk_ab(const char *what);
-    if (vk_ab("sgsr") == 1) mode = UPSCALE_SGSR1;
+    if (AB("sgsr") == 1) mode = UPSCALE_SGSR1;
     if (!on || (mode != UPSCALE_FSR1 && mode != UPSCALE_SGSR1)) return;
     NvnTexture *rt = st.rt.ncolor ? st.rt.color[0] : NULL;
     if (!rt || r->x[2] > 6 || !pr->fi->ntex || vk_texture_scale_group(rt) != RS_OUT) return;
@@ -6608,12 +6685,13 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
 // the start of a pass: unsafe, what they cost), copy (feedback copies instead of in-place reads), chunk (submissions
 // every 0.5 ms of translation instead of LARECOMP_VK_CHUNK_US). -1: not under test.
 int vk_ab(const char *what) {
-    static int n = -1;
+    int n = ab_n;
     static char w[32];
     if (n < 0) {
         const char *e = getenv("LARECOMP_AB"), *c = e ? strchr(e, ':') : NULL;
         n = e ? atoi(e) : 0;
         snprintf(w, sizeof w, "%s", c ? c + 1 : "");
+        ab_n = n > 0 ? n : 0;
     }
     if (n <= 0 || (what && strcmp(what, w))) return -1;
     return (int)((renderer_present_count() / (uint64_t)n) & 1);
@@ -6629,7 +6707,7 @@ static void split_long_pass(void) {
     }
     extern bool vk_async_on(void);
     static unsigned n;  // (the clock every 32 draws: a clock read per draw showed up in the profile)
-    if (split > 0 && in_pass && !(++n & 31) && vk_ab("split") != 1 && vk_async_on() && last_submit_ns &&
+    if (split > 0 && in_pass && !(++n & 31) && AB("split") != 1 && vk_async_on() && last_submit_ns &&
         SDL_GetTicksNS() - last_submit_ns > (uint64_t)split * 1000)
         renderer_submit();
 #endif

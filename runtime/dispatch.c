@@ -286,15 +286,42 @@ static const char *host_sym(uint64_t pc, uint64_t *offset) {
     return s ? s : plat_symbol(pc, offset);
 }
 
+// One crash report at a time: two of the game's threads crashed together (issue #24: the same null pointer, 33 ms
+// apart), their lines interleaved, and the first one's abort cut both off in the host backtrace, before the guest
+// registers. Another thread waits here for that abort; the same thread (a fault inside its own report) goes on.
+static void fatal_gate(void) {
+    static uintptr_t owner;  // (plain: clang's __atomic builtins take no _Atomic operand)
+    uintptr_t me = (uintptr_t)pthread_self(), none = 0;
+    if (__atomic_compare_exchange_n(&owner, &none, me, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST) || none == me) return;
+    for (;;) plat_sleep_until_ns(plat_now_ns() + 1000000000ull);
+}
+
 void rt_fatal_trace(void) {
-    fprintf(stderr, "host backtrace (guest functions are f_<addr>):\n");
-    plat_print_backtrace();
+    fatal_gate();
     Cpu *c = kernel_current_cpu();
-    if (c) {
+    if (c) {  // (first: the host backtrace below is slow, and the guest's registers name the game's caller)
         fprintf(stderr, "guest: sp=%llx lr=%llx\n", c->sp, c->x[30]);
         for (int i = 0; i < 31; i += 4)
             fprintf(stderr, "  x%-2d %016llx  x%-2d %016llx  x%-2d %016llx  x%-2d %016llx\n", i, c->x[i], i + 1,
                     c->x[i + 1], i + 2, c->x[i + 2], i + 3, c->x[i + 3]);
+        // the game's callers, by its frame chain (x29: [fp] the caller's frame, [fp + 8] the return address) - they map
+        // to the game's code without the phone's own build of it. (Once: a fault while walking it ends up here again.)
+        static volatile int walked;
+        if (!walked++) {
+            uint64_t fp = c->x[29];
+            fprintf(stderr, "guest frames:");
+            for (int i = 0; i < 24 && fp >= GUEST_LO && fp <= GUEST_HI - 16 && !(fp & 7); i++) {
+                uint64_t next = *(const uint64_t *)(uintptr_t)fp, ret = *(const uint64_t *)(uintptr_t)(fp + 8);
+                fprintf(stderr, " %llx", (unsigned long long)ret);
+                if (next <= fp) break;
+                fp = next;
+            }
+            fprintf(stderr, "\n");
+        }
+    }
+    fprintf(stderr, "host backtrace (guest functions are f_<addr>):\n");
+    plat_print_backtrace();
+    if (c) {
         // LARECOMP_CRASH_MEM=<reg>:<hex offset>:<hex length>[:<hex deref offset>]: guest memory at x<reg> + offset at
         // the crash (with a 4th field: first follow the pointer at x<reg> + that offset), 8 bytes a line
         const char *e = getenv("LARECOMP_CRASH_MEM");
@@ -481,6 +508,7 @@ bool rt_fault_watch(uint64_t fa, uint64_t pc) {
 }
 
 void rt_fault_report(const char *what, uint64_t fa, uint64_t pc, uint64_t lr) {
+    fatal_gate();
     uint64_t po = 0, lo = 0;
     const char *ps = host_sym(pc, &po), *ls = host_sym(lr, &lo);
     fprintf(stderr, "\n*** %s accessing %#llx\n    host pc %llx (%s+%llx)\n    host lr %llx (%s)\n", what,

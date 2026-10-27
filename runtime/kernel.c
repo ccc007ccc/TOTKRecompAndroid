@@ -134,6 +134,11 @@ int kernel_data_regions(uint64_t *addr, uint64_t *size, int max) {
     return n;
 }
 
+// [addr, addr+size) inside the guest window, without overflowing addr+size.
+static bool guest_range_ok(uint64_t addr, uint64_t size) {
+    return addr >= GUEST_LO && addr <= GUEST_HI && size <= GUEST_HI - addr;
+}
+
 static int region_add_locked(uint64_t addr, uint64_t size, uint32_t type, uint32_t perm) {
     if (nregions == MAX_REGIONS) FATAL("too many regions\n");
     plat_commit(addr, size);  // back it before the OS writes there (Windows: file reads into the heap)
@@ -991,11 +996,25 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     }
     case 0x02: case 0x03: x[0] = R_OK; break;  // SetMemoryPermission / SetMemoryAttribute
     case 0x04:  // MapMemory(dst, src, size): src is inaccessible while mapped, so copying is equivalent
+        // (an address outside the guest window, as a null stack from an allocation the game didn't check (issue #31),
+        // is the kernel's InvalidAddress, not a copy from it)
+        if (!guest_range_ok(x[0], x[2]) || !guest_range_ok(x[1], x[2])) {
+            LOG("[kernel] MapMemory dst=%llx src=%llx size=%llx: outside the guest's memory\n",
+                (unsigned long long)x[0], (unsigned long long)x[1], (unsigned long long)x[2]);
+            x[0] = R_INVALID_ADDRESS;
+            break;
+        }
         memcpy((void *)x[0], (void *)x[1], x[2]);
         region_add(x[0], x[2], 0xB, 3);
         x[0] = R_OK;
         break;
     case 0x05:  // UnmapMemory(dst, src, size): copy back
+        if (!guest_range_ok(x[0], x[2]) || !guest_range_ok(x[1], x[2])) {
+            LOG("[kernel] UnmapMemory dst=%llx src=%llx size=%llx: outside the guest's memory\n",
+                (unsigned long long)x[0], (unsigned long long)x[1], (unsigned long long)x[2]);
+            x[0] = R_INVALID_ADDRESS;
+            break;
+        }
         memcpy((void *)x[1], (void *)x[0], x[2]);
         region_remove(x[0]);
         x[0] = R_OK;

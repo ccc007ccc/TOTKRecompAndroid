@@ -1364,7 +1364,7 @@ NVN(nvnWindowSetPresentInterval) {
     if (force > 0) c->x[1] = (uint64_t)force;
     // BOTW 1.8.2's frame loop (lr 0x7001012a34, x19 = the framework; [fw+0x234] the highest interval it may pick):
     // never 3 while the runtime sets the game's clock (runtime/hle/framepace.c), as SavageWindRecomp does
-    if (framepace_on() && c->x[30] == GUEST_LO + 0x1012a34ull) {
+    if (g_game_version == 182 && framepace_on() && c->x[30] == GUEST_LO + 0x1012a34ull) {
         uint32_t *max_iv = (uint32_t *)(uintptr_t)(c->x[19] + 0x234);
         if (*max_iv > 2) *max_iv = 2;
     }
@@ -1407,7 +1407,7 @@ NVN(nvnQueuePresentTexture) {
         int cap = g_settings.fps_mode == 2 ? 1 : 2;
         int n = w->interval > cap ? w->interval : cap;
         if (on && framepace_on()) {
-            // BOTW 1.8.2 (runtime/hle/framepace.c): a steady grid at the chosen frame rate, whatever the interval;
+            // A steady grid at the chosen frame rate, including 45 and 120: independent of the integer VI interval.
             // after a long frame the grid starts again. framepace.c sets the game's clock from when it went out.
             static uint64_t last;
             uint64_t period = framepace_period_ns(), target = last + period, t0 = plat_now_ns();
@@ -1415,12 +1415,14 @@ NVN(nvnQueuePresentTexture) {
             uint64_t t1 = plat_now_ns();
             g_blocked_ns += t1 - t0;
             last = last && t1 < target + period ? target : t1;
-            framepace_presented(last, last == target);
+            framepace_presented(g_game_version == 143 ? t1 : last, last == target);
         } else if (on) {
             uint64_t want = last_vs + (uint64_t)n, t0 = plat_now_ns();
             while (__atomic_load_n(&g_vsync_count, __ATOMIC_RELAXED) < want) usleep(500);
             g_blocked_ns += plat_now_ns() - t0;
             last_vs = __atomic_load_n(&g_vsync_count, __ATOMIC_RELAXED);
+        } else if (framepace_on()) {
+            framepace_presented(plat_now_ns(), false);
         }
     }
     if (i >= 0 && i < w->num) backend_present(HOST(NvnTexture, w->textures[i]));

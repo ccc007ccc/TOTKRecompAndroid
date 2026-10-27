@@ -7,6 +7,10 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __ANDROID__
+#include <android/native_window.h>
+#include "../../framepace.h"
+#endif
 
 #include "../../paths.h"
 #include "../../settings.h"
@@ -514,12 +518,18 @@ static void create_device(void) {
     // reported to LASRecomp-Android-Plus; LAS Recomp for Android 4a8749f turned it off on every GPU). Here only on
     // Xclipse: without it BOTW's heap goes through CPU copies (~4 GB every 2 s), and Mali drivers may take it.
     // LARECOMP_VK_HOST_IMPORT=0 / 1: off / on on any GPU.
+    // Mali-G2-Ultra (Xring O3, driver r56p0): with the import and the global-memory arena (exec.c gres_init) the game's
+    // text went missing from every menu; with both off it is all there (issue #44, the reporter's own tests). Both off
+    // there unless LARECOMP_VK_HOST_IMPORT / LARECOMP_VK_NO_GRES say otherwise.
+    bool mali_g2 = strstr(g_vk.props.deviceName, "Mali-G2-Ultra") != NULL;
+    if (mali_g2) setenv("LARECOMP_VK_NO_GRES", "1", 0);
     if (g_vk.host_import) {
         const char *e = getenv("LARECOMP_VK_HOST_IMPORT");
         bool xclipse = strstr(g_vk.props.deviceName, "Xclipse") || g_vk.props.vendorID == 0x144D;  // (Samsung)
-        if (e ? !atoi(e) : xclipse) {
+        if (e ? !atoi(e) : xclipse || mali_g2) {
             g_vk.host_import = false;
-            LOG("[vk] guest heap import left off (%s)\n", e ? "LARECOMP_VK_HOST_IMPORT=0" : "Xclipse: its first submission fails");
+            LOG("[vk] guest heap import left off (%s)\n", e ? "LARECOMP_VK_HOST_IMPORT=0" :
+                xclipse ? "Xclipse: its first submission fails" : "Mali-G2-Ultra: the game's text went missing");
         }
     }
 #endif
@@ -822,10 +832,11 @@ static void create_device(void) {
                                   .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = g_vk.qfam};
     VK_CHECK(vkCreateCommandPool(g_vk.dev, &pi, NULL, &g_vk.pool));
 
-    // pipeline cache: cache/vk_pipelines.bin (written by vk_pipeline_cache_save)
+    // pipeline cache: cache/vk_pipelines.bin (written by vk_pipeline_cache_save; LARECOMP_VK_NO_PIPELINE_CACHE=1: neither
+    // read nor written - every pipeline compiled cold, for measuring)
     size_t sz = 0;
     void *data = NULL;
-    FILE *fp = fopen("cache/vk_pipelines.bin", "rb");
+    FILE *fp = getenv("LARECOMP_VK_NO_PIPELINE_CACHE") ? NULL : fopen("cache/vk_pipelines.bin", "rb");
     if (fp) {
 #ifdef __ANDROID__  // (a size cap and the public header checked: a file from another driver or a cut-off write)
         long length = -1;
@@ -860,6 +871,7 @@ static void create_device(void) {
 }
 
 void vk_pipeline_cache_save(void) {
+    if (getenv("LARECOMP_VK_NO_PIPELINE_CACHE")) return;
     size_t sz = 0;
     if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, NULL) != VK_SUCCESS || !sz) return;
     void *data = malloc(sz);
@@ -1865,6 +1877,18 @@ void backend_clear_window(void) {
 }
 
 #ifdef __ANDROID__
+static int requested_frame_rate = -1;
+static void window_frame_rate(void) {
+    int fps = framepace_on() ? framepace_target() : 0;
+    if (fps == requested_frame_rate) return;
+    ANativeWindow *native = SDL_GetPointerProperty(SDL_GetWindowProperties(window),
+                                                    SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, NULL);
+    if (!native) return; // surface not ready; retry after Android recreates it
+    int result = ANativeWindow_setFrameRate(native, (float)fps, ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT);
+    requested_frame_rate = fps;
+    LOG("[framepace] Android surface requests %d fps (result %d)\n", fps, result);
+}
+
 void vk_wait_ready(void) {
     while (!atomic_load(&ui_ready)) SDL_Delay(1);
 }
@@ -1892,6 +1916,7 @@ int ui_run(void) {
 #endif
 #ifdef __ANDROID__
             if (e.type == SDL_EVENT_WILL_ENTER_BACKGROUND && g_vk.dev) vk_pipeline_cache_save();  // (may not come back)
+            if (e.type == SDL_EVENT_DID_ENTER_FOREGROUND) requested_frame_rate = -1;
 #endif
             if (e.type == SDL_EVENT_QUIT) {
                 LOG("window closed\n");
@@ -1912,12 +1937,13 @@ int ui_run(void) {
         motion_open();
         menu_apply_window_requests(window);
 #ifdef __ANDROID__
+        window_frame_rate(); // tell Android about 45/60/120; the system decides the available display mode
         {   // the pipeline cache to disk now and then while it grows: an app is killed rather than exited, so
             // quick_exit_handler never saves it (every start compiled every shader again: missing objects at first)
             static uint64_t last;
             static size_t saved;
             uint64_t now = SDL_GetTicks();
-            if (g_vk.dev && now - last > 30000) {
+            if (g_vk.dev && now - last > 30000 && !getenv("LARECOMP_VK_NO_PIPELINE_CACHE")) {
                 last = now;
                 size_t sz = 0;
                 if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, NULL) == VK_SUCCESS && sz > saved + 65536) {

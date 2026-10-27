@@ -416,8 +416,13 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
         long size;
     }
 
+    // A folder's entries, each name once: a Huawei phone's file provider listed every file of the game twice (issue
+    // #31: 79,356 files, twice 1.0.0's, a 28.84 GB image of a 14.44 GB folder, and the game then failed to allocate)
+    private int listedTwice;  // (entries left out, since importGame began)
+
     private List<Doc> children(Uri tree, String id) {
         List<Doc> out = new ArrayList<>();
+        java.util.HashSet<String> seen = new java.util.HashSet<>();
         Uri u = DocumentsContract.buildChildDocumentsUriUsingTree(tree, id);
         String[] cols = {DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME,
                          DocumentsContract.Document.COLUMN_MIME_TYPE, DocumentsContract.Document.COLUMN_SIZE};
@@ -428,6 +433,7 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
                 d.name = c.getString(1);
                 d.dir = DocumentsContract.Document.MIME_TYPE_DIR.equals(c.getString(2));
                 d.size = c.isNull(3) ? -1 : c.getLong(3);  // (-1: the provider doesn't say - listFiles refuses it)
+                if (d.name != null && !seen.add(d.name)) { listedTwice++; continue; }
                 out.add(d);
             }
         }
@@ -577,6 +583,7 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
         try {
             exefs = romfs = null;
             preLib = preId = preGame = null;
+            listedTwice = 0;
             packages = false;
             Doc root = new Doc();
             root.id = DocumentsContract.getTreeDocumentId(tree);
@@ -602,6 +609,7 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
             romfsFiles.clear();
             romfsPaths.clear();
             listFiles(tree, romfs, "");
+            if (listedTwice > 0) Log.w(TAG, "the file provider listed " + listedTwice + " entries twice: once each kept");
             int vt = romfsPaths.indexOf("System/Version.txt");  // (its version against the exefs/'s, and its file count)
             if (!nativeCheckRomfs(version, romfsPaths.toArray(new String[0]), vt >= 0 ? readText(tree, romfsFiles.get(vt)) : "")) {
                 romfsFiles.clear();

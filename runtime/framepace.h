@@ -1,4 +1,4 @@
-// Frame rate and the game's clock for BOTW 1.8.2 (runtime/hle/framepace.c).
+// Frame rate and the game's clock for TotK 1.4.3 and BOTW 1.8.2 (runtime/hle/framepace.c).
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>

@@ -25,9 +25,12 @@ import struct
 PATCHES = {}      # v1.0.0 (main build 2094f152...)
 PATCHES_160 = {}  # v1.6.0 (main build 8e9978d5...): the same fixes at that build's addresses
 PATCHES_182 = {}  # v1.8.2 (main build de0b6ac4...)
+PATCHES_143 = {}  # TotK v1.4.3; never use BOTW's VFR layout for this build
+PRE_PATCHES_143 = {}
 BUILD_1_0_0 = '2094f152836683a3632c6153fd84ab80'
 BUILD_1_6_0 = '8e9978d50bdd20b4c8395a106c27ffde'
 BUILD_1_8_2 = 'de0b6ac4efc1dda7f80f6d7598ec7a7d'
+BUILD_TOTK_1_4_3 = '277178b7dba1b6d4949a84778d4abc58'
 
 
 def _clustered_dl_heap_null(gen, a):
@@ -128,4 +131,63 @@ PATCHES_182[0x7000da13d8] = _persp_get_aspect_182
 
 def patches_for(build_id):
     """The patches for a module, by its build id (sdk and anything unknown: none)."""
-    return {BUILD_1_0_0: PATCHES, BUILD_1_6_0: PATCHES_160, BUILD_1_8_2: PATCHES_182}.get(build_id[:32], {})
+    return {BUILD_1_0_0: PATCHES, BUILD_1_6_0: PATCHES_160, BUILD_1_8_2: PATCHES_182,
+            BUILD_TOTK_1_4_3: PATCHES_143}.get(build_id[:32], {})
+
+
+def prepatches_for(build_id):
+    """Instrumentation immediately before the original instruction; BLs stay normal generated calls."""
+    return PRE_PATCHES_143 if build_id[:32] == BUILD_TOTK_1_4_3 else {}
+
+
+# Locations and controller replacements adapted from MacNativeGames (MIT),
+# games/totk/runtime/game_patches_v143.c @ ff63a162b35d8b486b941191785d8e957c1f5df2.
+# See runtime/hle/LICENSE-MacNativeGames.txt. Checked against our own 1.4.3 input.
+# UltraTears PR #27 exposes FPS controls, but its runtime says these game patches are not ported yet.
+# The original instructions remain available with LARECOMP_FRAMEPACE=0.
+def _totk_controller(original, replacement):
+    def patch(gen, a):
+        w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+        assert w == original, f'TotK controller {a:#x}: {w:#x} != {original:#x}'
+        old, new = gen.lifter.lift(w, a), gen.lifter.lift(replacement, a)
+        assert old.kind == new.kind == 'op'
+        return ('{ extern int rt_frame_wait(void); if (rt_frame_wait()) { ' + new.code +
+                ' } else { ' + old.code + ' } }')
+    return patch
+
+
+for _off, _old, _new in (
+    (0x2db204, 0x6b08015f, 0x7100055f),
+    (0x2db208, 0x1a89b10a, 0x1a9fa52a),
+    (0x2db22c, 0xb940468a, 0xd503201f),
+    (0x2db360, 0x6b0801bf, 0x710005bf),
+    (0x2db36c, 0x1a88c1ac, 0x1a9fc5ac),
+    (0x2db340, 0xb9400288, 0x52800028),
+    (0x2db34c, 0x2a0a03f5, 0x1a9fa555),
+):
+    PATCHES_143[0x7000000000 + _off] = _totk_controller(_old, _new)
+
+
+def _totk_before(site, guards):
+    def patch(gen, a):
+        for off, original in guards:
+            word = struct.unpack_from('<I', gen.nso.image, off)[0]
+            assert word == original, f'TotK timing {off:#x}: {word:#x} != {original:#x}'
+        return f'{{ extern void rt_totk_frame_hook(Cpu *, int); rt_totk_frame_hook(c, {site}); }}'
+    return patch
+
+
+# Replace the producer's nominal interval BEFORE its 0.5/1.0 selector. Patching FrameRateMgr's callee would lose it.
+PRE_PATCHES_143[0x70003e5658] = _totk_before(0, [(0x3e5658, 0x1e210808)])
+# Controller hold/repeat counter: the existing fmul by 0.5 converts the measured 60 Hz interval to a 30 Hz ratio.
+PRE_PATCHES_143[0x70002daa78] = _totk_before(1, [
+    (0x2daa54, 0xbd425260), (0x2daa58, 0x52a84e08), (0x2daa6c, 0x5e21d800),
+    (0x2daa70, 0x1e201820), (0x2daa74, 0x1e2c1001), (0x2daa78, 0x1e210800)])
+# Independent cloth/hair clock. The third caller already passes measured seconds: leave it untouched.
+PRE_PATCHES_143[0x7000246eac] = _totk_before(2, [(0x246ea8, 0xbd0367ea), (0x246eac, 0x1e200940)])
+PRE_PATCHES_143[0x7000345904] = _totk_before(3, [(0x3458f8, 0xbd0117e0), (0x345904, 0x1e210801)])
+PRE_PATCHES_143[0x700024944c] = _totk_before(4, [(0x24944c, 0x94015e7d)])
+PRE_PATCHES_143[0x700028bc98] = _totk_before(4, [(0x28bc98, 0x9400546a)])
+# Keep the slow-motion bounce threshold independent of FPS, including 120 FPS.
+PRE_PATCHES_143[0x7000562a68] = _totk_before(5, [
+    (0x562a64, 0xbd402920), (0x562a68, 0x52a85909), (0x562a6c, 0x1e270121)])

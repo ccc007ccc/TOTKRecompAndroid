@@ -64,13 +64,14 @@ body = source[start:source.index('// The hot list for the game in game_dir')]
 ''' + body + r'''
 int main(int argc, char **argv) {
     load_hot(argv[1]);
-    int o0 = 0;
+    int o0 = 0, alone = 0;
     for (int i = 2; i < argc; i++) {
-        bool heavy;
-        if (!mark_cold(argv[i], &heavy)) return 1;
-        o0 += heavy;
+        bool cold, heavy;
+        if (!mark_cold(argv[i], &cold, &heavy)) return 1;
+        o0 += cold;
+        alone += heavy;
     }
-    printf("%llu %llu %llu %zu %d %llu\n", g_cold_fns, g_all_fns, g_heavy_fns, g_nhot, o0, g_cold_files);
+    printf("%llu %llu %llu %zu %d %llu %d\n", g_cold_fns, g_all_fns, g_heavy_fns, g_nhot, o0, g_cold_files, alone);
     return 0;
 }
 ''')
@@ -102,7 +103,7 @@ subprocess.run([args.cc, '-O1', '-std=gnu11', '-Wall', '-Werror', str(out / 'mar
 r = subprocess.run([str(out / 'mark'), str(out / 'list.txt'), str(src), str(gsrc), str(csrc)], check=True, capture_output=True,
                    text=True)
 # (4 cold of 7 definitions, 1 giant; 3 hot loaded; 2 files at -O0: the giant one and the all-cold one)
-assert r.stdout.split() == ['4', '7', '1', '3', '2', '1'], r.stdout
+assert r.stdout.split() == ['4', '7', '1', '3', '2', '1', '1'], r.stdout
 checks += 1
 assert src.read_bytes() == expected.encode(), src.read_text()
 checks += 1
@@ -119,10 +120,16 @@ gsrc.write_bytes(giant.encode())
 mtime, gmtime = src.stat().st_mtime_ns, gsrc.stat().st_mtime_ns
 r = subprocess.run([str(out / 'mark'), str(out / 'missing-list.txt'), str(src), str(gsrc), str(csrc)], check=True,
                    capture_output=True, text=True)
-assert r.stdout.split() == ['0', '7', '1', '0', '1', '0'], r.stdout  # (no list: nothing cold, only the giant file at -O0)
+assert r.stdout.split() == ['0', '7', '1', '0', '1', '0', '1'], r.stdout  # (no list: only the giant file at -O0, alone)
 checks += 1
 assert src.read_bytes() == chunk.encode() and src.stat().st_mtime_ns == mtime, 'a file with nothing to mark was rewritten'
 checks += 1
 assert gsrc.read_bytes() == giant.encode() and gsrc.stat().st_mtime_ns == gmtime, 'the giant file was rewritten'
+checks += 1
+large = out / 'large.c'
+large.write_text('void f_7000005350(Cpu *c) {\n' + '    c->x[0]++;\n' * 60001 + '}\n')
+r = subprocess.run([str(out / 'mark'), str(out / 'missing-list.txt'), str(large)],
+                   check=True, capture_output=True, text=True)
+assert r.stdout.split() == ['0', '1', '1', '0', '1', '0', '1'], r.stdout
 checks += 1
 print(f'{checks} hot/cold build checks passed (production C and tools/hot_functions.py)')

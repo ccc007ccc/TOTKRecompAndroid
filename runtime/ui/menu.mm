@@ -646,7 +646,16 @@ static void tab_display(void) {
 #ifdef __ANDROID__
     opt_toggle("Touch controls", &g_settings.touch_controls, false,
                "On-screen buttons and stick while no controller is connected. The back button opens this menu.");
-    ImGui::TextDisabled("%s", tr("Frame rate: original game timing (up to 30 fps)."));
+    {
+        static const char *rates[] = {"Auto", "30 FPS", "45 FPS", "60 FPS", "120 FPS"};
+        static const int modes[] = {0, 1, 3, 2, 4};
+        int selected = 1;
+        for (int i = 0; i < 5; i++) if (g_settings.fps_mode == modes[i]) selected = i;
+        if (opt_choice("Frame rate", &selected, rates, 5, 1,
+                       "Target frame rate. Game time follows actual frame duration. Auto targets 60 FPS. "
+                       "Actual performance depends on the device and scene; movies stay at 30 FPS.", false))
+            g_settings.fps_mode = modes[selected];
+    }
 
 #endif
 

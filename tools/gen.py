@@ -55,6 +55,7 @@ class Module:
         self.name = name
         self.nso = Nso(path)
         self.patches = patches_for(self.nso.build_id)  # (tools/patches.py: this build's, by its build id)
+        self.pre_patches = prepatches_for(self.nso.build_id)
         self.base = base
         n = self.nso
         self.lo = base + n.text[0]
@@ -62,6 +63,7 @@ class Module:
         self.words = struct.unpack(f'<{n.text[1] // 4}I', bytes(n.image[n.text[0]:n.text[0] + n.text[1]]))
         self.lifter = Lifter(base, simd)
         self.cache = {}
+        self.kinds = bytearray(len(self.words))
         self.stats = Counter()
         self.mu = None
         # the functions as compiled: discovery may split one into several C functions, a jump table spans all of it
@@ -105,6 +107,12 @@ class Module:
                 out.add(a)
         return out
 
+    # Only branches, calls, returns and traps are kept lifted (self.cache); a plain instruction ('op', 'asm') keeps its
+    # kind alone (self.kinds, a byte each) and is lifted again when its C is written. Keeping all of them made the
+    # generator hold every instruction's C from discovery to the end: 3.3 GB for 1.6.0's main, 2.1 GB for 1.8.2's, on
+    # the phone beside the compilers (the build stopped at ~80% for low memory: issues #25, #47, #51).
+    KINDS = ('', 'op', 'asm', 'b', 'bcond', 'bl', 'blr', 'br', 'ret', 'trap')
+
     def lift(self, a):
         ins = self.cache.get(a)
         if ins is None:
@@ -113,8 +121,14 @@ class Module:
             except Unsupported as e:
                 self.stats['unsupported'] += 1
                 ins = Insn('trap', f'rt_udf(c, {gaddr(a)}); /* {e} */')
-            self.cache[a] = ins
+            self.kinds[(a - self.lo) // 4] = self.KINDS.index(ins.kind)
+            if ins.kind not in ('op', 'asm'):
+                self.cache[a] = ins
         return ins
+
+    def kind(self, a):
+        k = self.kinds[(a - self.lo) // 4]
+        return self.KINDS[k] if k else self.lift(a).kind
 
     def boundaries(self):
         n, b = self.nso, self.base
@@ -211,7 +225,7 @@ class Module:
             w = self.word(a)
             if (w & 0x7F80001F) == 0x7100001F:  # SUBS (imm) with Rd = zr, i.e. CMP #imm
                 return None if bits(w, 22, 1) else a
-            if self.lift(a).kind not in ('op', 'asm', 'bcond') or self._sets_flags(a):
+            if self.kind(a) not in ('op', 'asm', 'bcond') or self._sets_flags(a):
                 return None
             a -= 4
         return None
@@ -238,7 +252,7 @@ class Module:
                 for a in range(start, br_pc, 4):
                     if a == set_at:
                         self._set_index(mu, idx_regs, i)
-                    k = self.lift(a).kind
+                    k = self.kind(a)
                     if k == 'bcond':
                         continue
                     if k not in ('op', 'asm'):
@@ -259,7 +273,7 @@ class Module:
         """Form: cmp idx, #N ; b.ls/b.lo table ... table: <address math> ; br"""
         # start of the block holding the br
         s = br_pc
-        while s - 4 >= lo and br_pc - (s - 4) <= 4 * 12 and self.lift(s - 4).kind in ('op', 'asm'):
+        while s - 4 >= lo and br_pc - (s - 4) <= 4 * 12 and self.kind(s - 4) in ('op', 'asm'):
             s -= 4
         for g in range(lo, hi, 4):
             w = self.word(g)
@@ -288,7 +302,7 @@ class Module:
             if (w & 0xFF000010) == 0x54000000 and bits(w, 0, 4) in (8, 2):
                 guard = a
                 break
-            if self.lift(a).kind not in ('op', 'asm', 'bcond'):
+            if self.kind(a) not in ('op', 'asm', 'bcond'):
                 return None
             a -= 4
         if guard is None:
@@ -303,7 +317,7 @@ class Module:
             return None
         # window start: back from cmp to the first control-flow instruction
         start = cmp
-        while start - 4 >= lo and cmp - (start - 4) <= 4 * 12 and self.lift(start - 4).kind in ('op', 'asm'):
+        while start - 4 >= lo and cmp - (start - 4) <= 4 * 12 and self.kind(start - 4) in ('op', 'asm'):
             start -= 4
         return self._emulate_table(br_pc, lo, hi, start, cmp, self._index_regs(start, cmp, bits(w, 5, 5)), count)
 
@@ -315,14 +329,15 @@ class Module:
         a = br_pc - 4
         while a >= entry and br_pc - a <= 4 * 16:
             w = self.word(a)
-            if self.lift(a).kind not in ('op', 'asm'):
+            if self.kind(a) not in ('op', 'asm'):
                 return False
             if (w & 31) == rn:
                 if (w & 0x1F000000) == 0x0B000000:  # ADD/SUB (shifted or extended register)
                     return True
                 if (w & 0x9F000000) == 0x10000000:  # ADR
                     return True
-                return False
+                if self._writes_x(a, w, rn):
+                    return False
             a -= 4
         return False
 
@@ -347,11 +362,28 @@ class Module:
             self.local_branch_cache[key] = regs
         return self.local_branch_cache[key]
 
+    def _writes_x(self, a, w, rn):
+        """Whether the instruction at a writes x<rn>: its low five bits are rn, but in a store or an FP / SIMD load
+        they name the data register. (1.8.2's f_700109c774: `stp s9, s8, [sp, #0x80]` between the table math and
+        `br x9` read as x9's last write, the jump went to plain dispatch, and the game stopped with "no function at
+        0x700109c954" on the way to Kakariko - issues #46, #48.)"""
+        ins = self.lift(a)
+        if ins.kind == 'op':
+            return re.search(r'c->x\[%d\] =' % rn, ins.code) is not None
+        if lifter.is_ldst(w):  # (an FP / SIMD load or store: x<rn> written only as a written-back base)
+            wb = bits(w, 23, 1) if bits(w, 27, 3) == 0b101 else (bits(w, 24, 1) == 0 and bits(w, 10, 1) == 1)
+            return bool(wb) and bits(w, 5, 5) == rn
+        return True
+
     def scan(self, entry, end):
         """Collect labels and external entries referenced by a function."""
         labels, ext, tables = {entry}, set(), {}
         terminated = False
         for a in range(entry, end, 4):
+            k = self.kind(a)
+            if k in ('op', 'asm'):
+                terminated = False
+                continue
             ins = self.lift(a)
             if ins.kind in ('b', 'bcond'):
                 t = ins.target
@@ -429,17 +461,25 @@ class Module:
             refs.add(t)
             return f'__attribute__((musttail)) return {fname(t)}(c);'
 
-        # Functions with jump tables also get the all-instruction fallback: a table whose emulation
-        # missed some cases then still reaches the right instruction instead of aborting.
+        # Unresolved tables need every instruction; resolved tables need only block starts.
+        # Preserve the checked fallback without turning each instruction into an optimizer entry point.
         all_labels = bool(tables)
         if all_labels:
-            labels = set(range(entry, end, 4))
+            if 'all' in tables.values():
+                labels = set(range(entry, end, 4))
+            else:
+                labels = set(labels) | {entry} | {a + 4 for a in range(entry, end - 4, 4)
+                                                   if self.kind(a) in ('b', 'br', 'ret', 'trap')}
         last = None
         for a in range(entry, end, 4):
             ins = self.lift(a)
             if a in labels:
                 flush()
                 out.append(f'L_{a:x}:;')
+            if a in self.pre_patches:
+                # Keep the original instruction, including BL target discovery, LR and SIMD batching semantics.
+                flush()
+                out.append('    ' + rebase_patch(self.pre_patches[a](self, a)))
             if a in self.patches:  # hand-written replacement for one instruction (tools/patches.py)
                 flush()
                 out.append('    ' + rebase_patch(self.patches[a](self, a)))
@@ -496,7 +536,7 @@ class Module:
             out.append('    ' + jump(end) if end < self.hi else f'    rt_udf(c, {gaddr(end)});')
         if all_labels:
             out.append('L_dispatch:')
-            cases = ' '.join(f'case {case_key(t)}: goto L_{t:x};' for t in range(entry, end, 4))
+            cases = ' '.join(f'case {case_key(t)}: goto L_{t:x};' for t in sorted(labels) if entry <= t < end)
             out.append(f'    switch ({switch_on("c->pc")}) {{ {cases} default: break; }}')
             out.append('    __attribute__((musttail)) return rt_dispatch(c);')
         out.append('}')
@@ -506,7 +546,7 @@ class Module:
         return out
 
 
-from patches import patches_for
+from patches import patches_for, prepatches_for
 
 # --dyn-base (lifter.gaddr): jump table and dispatch switches compare window offsets, so their case labels stay
 # constants; the hand-written patches' code addresses move with the window like the lifted ones.
@@ -599,7 +639,7 @@ def discover(m, starts):
         # indirect branches of the final functions: jump tables resolved, all-labels fallback, plain dispatch
         for t in tables.values():
             m.stats['br_all_labels' if t == 'all' else 'jumptables'] += 1
-        m.stats['br_dispatch'] += sum(m.lift(x).kind == 'br' for x in range(a, end, 4)) - len(tables)
+        m.stats['br_dispatch'] += sum(m.kind(x) == 'br' for x in range(a, end, 4)) - len(tables)
     return entries, rounds
 
 

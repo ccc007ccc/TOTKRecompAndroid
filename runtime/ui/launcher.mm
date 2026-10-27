@@ -407,7 +407,7 @@ static void *extract_thread(void *) {
             set_failure(FAIL_NOT_FOUND);
             goto done;
         }
-        rt_remove_game_files(dest.c_str());  // (an earlier or interrupted setup's; removes the folder too)
+        rt_remove_game_files_for_setup(dest.c_str());  // (an earlier or interrupted setup's; its compiled objects stay)
         mkdir(dest.c_str(), 0755);
         unsigned long long rbytes = romfs_dir_bytes(romfs.c_str());
         g_total = 2 * rbytes;
@@ -543,7 +543,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_botwrecompandroid_BOTWRecompAndroi
     g_dest = dest;
     pthread_mutex_unlock(&g_lock);
     if (n) env->ReleaseStringUTFChars(name, n);
-    rt_remove_game_files(dest.c_str());  // (an earlier or interrupted setup's)
+    rt_remove_game_files_for_setup(dest.c_str());  // (an earlier or interrupted setup's; its compiled objects stay)
     if (own) mkdir(vr, 0755);
     mkdir(dest.c_str(), 0755);
     g_done = 0, g_total = 0, g_phase_base = 0, g_build_frac = -1, g_copy_skipped = false;

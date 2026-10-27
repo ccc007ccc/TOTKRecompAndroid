@@ -239,6 +239,17 @@ bool rt_remove_game_files(const char *game_dir) {
     return ok;
 }
 
+bool rt_remove_game_files_for_setup(const char *game_dir) {
+    if (!game_dir_ok(game_dir)) {
+        fprintf(stderr, "[paths] refusing to delete game files in %s (not <data root>/extracted)\n", game_dir);
+        return false;
+    }
+    bool ok = true;
+    for (size_t i = 0; i < sizeof GAME_FILES / sizeof *GAME_FILES; i++)
+        if (strcmp(GAME_FILES[i], ".gamebuild")) ok &= rt_remove_game_file(game_dir, GAME_FILES[i]);
+    return ok;
+}
+
 static unsigned long long tree_size(const char *p) {
     struct stat st;
     if (is_link(p) || stat(p, &st) != 0) return 0;

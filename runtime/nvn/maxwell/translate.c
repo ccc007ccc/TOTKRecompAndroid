@@ -202,12 +202,15 @@ static const char *fneg_abs(const char *e, bool neg, bool abs_, char *buf) {
 }
 #define NA(e, n, a) fneg_abs((e), (n), (a), alloca(600))
 
-static const char *fresult(const char *e, bool sat, char *buf) {
-    if (sat) sprintf(buf, "as_type<uint>(saturate(%s))", e);
-    else sprintf(buf, "as_type<uint>(%s)", e);
+// (GLSL: the built-in; the overloaded as_u helper would be a function call per instruction for the driver to inline -
+// SavageWindRecomp's)
+static const char *fresult(const Ctx *c, const char *e, bool sat, char *buf) {
+    const char *cast = c->glsl ? "floatBitsToUint" : "as_type<uint>";
+    if (sat) sprintf(buf, "%s(saturate(%s))", cast, e);
+    else sprintf(buf, "%s(%s)", cast, e);
     return buf;
 }
-#define FRES(e, sat) fresult((e), (sat), alloca(700))
+#define FRES(e, sat) fresult(c, (e), (sat), alloca(700))
 
 static const char *cmp_op(int op) {
     static const char *const ops[] = {"false", "<", "==", "<=", ">", "!=", ">=", "num", "nan",
@@ -631,6 +634,20 @@ static void glsl_sample(Ctx *c, char *out, int slot, const char *const *co, cons
     } else if (n == 2) {
         if (off) snprintf(xs, sizeof xs, "(vec2(%s, %s) + vec2(%s)%s / vec2(tsize%d(%s).xy))", co[0], co[1], off, off_scale(c, slot, 2), slot, L);
         else snprintf(xs, sizeof xs, "vec2(%s, %s)", co[0], co[1]);
+        // Vertex stage: the coordinates rounded to 1/256 of a texel, as the Switch's texture unit weighs a bilinear
+        // lookup (8 bits of sub-texel position). The terrain's tiles read their heights at a shared edge each from its
+        // own texture, at what is meant to be a texel's centre; a hair off from float rounding, the Switch still gets
+        // that texel exactly, while the Adreno's finer weights blended in a trace of the next one - the edges' heights
+        // differed and the ground showed a grid of dotted cracks, denser at higher resolutions (issue #21; with nearest
+        // filtering they were gone, 2026-10-27). LARECOMP_NO_VS_SNAP=1: not rounded.
+        static int snap = -1;
+        if (snap < 0) snap = getenv("LARECOMP_NO_VS_SNAP") == NULL;
+        if (snap && c->stage == STAGE_VERTEX && !t->shadow && lod_kind == 1) {
+            char raw[1600];
+            snprintf(raw, sizeof raw, "%s", xs);
+            snprintf(xs, sizeof xs, "(floor((%s) * vec2(tsize%d(%s).xy) * 256.0f + 0.5f) / (vec2(tsize%d(%s).xy) * 256.0f))",
+                     raw, slot, L, slot, L);
+        }
     } else {
         if (off && !cube) snprintf(xs, sizeof xs, "vec3(vec2(%s, %s) + vec2(%s)%s / vec2(tsize%d(%s).xy), %s)", co[0], co[1], off, off_scale(c, slot, 2), slot, L, co[2]);
         else snprintf(xs, sizeof xs, "vec3(%s, %s, %s)", co[0], co[1], co[2]);  // cube lookups take no offset
@@ -2106,6 +2123,29 @@ static bool is_branch_target_op(uint64_t w) {
 static bool id_start(char ch) { return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_'; }
 static bool id_char(char ch) { return id_start(ch) || (ch >= '0' && ch <= '9'); }
 
+// Whether p is "(" + a uint operand + ")": a register (rN), a constant buffer word (cbN[i][j]) or a literal ending in u.
+static bool uint_operand(const char *p) {
+    if (*p++ != '(') return false;
+    const char *q = p;
+    if (*q == 'r' && q[1] >= '0' && q[1] <= '9') {
+        for (q++; *q >= '0' && *q <= '9'; q++) {}
+    } else if (!strncmp(q, "cb", 2) && q[2] >= '0' && q[2] <= '9') {
+        for (q += 2; *q >= '0' && *q <= '9'; q++) {}
+        for (int k = 0; k < 2; k++) {
+            if (*q++ != '[') return false;
+            if (*q < '0' || *q > '9') return false;
+            while (*q >= '0' && *q <= '9') q++;
+            if (*q++ != ']') return false;
+        }
+    } else if (*q >= '0' && *q <= '9') {
+        while (id_char(*q)) q++;
+        if (q[-1] != 'u') return false;
+    } else {
+        return false;
+    }
+    return *q == ')';
+}
+
 // MSL-spelled instruction body -> GLSL (token-aware; comments and numbers are copied as they are).
 static void glsl_rewrite(Ctx *c, Str *o, const char *src) {
     static const char *const map[][2] = {
@@ -2158,7 +2198,10 @@ static void glsl_rewrite(Ctx *c, Str *o, const char *src) {
             const char *gt = strchr(p, '>');
             if (!gt) { fail(c, "glsl: bad as_type"); return; }
             int tn = (int)(gt - p - 1);
-            if (tn == 5 && !strncmp(p + 1, "float", 5)) sp(o, "as_f");
+            // a register, a constant buffer word or an unsigned literal is a uint: the built-in, not the overloaded
+            // helper (a function call per use, which the driver then inlines: thousands in a big shader)
+            if (tn == 5 && !strncmp(p + 1, "float", 5) && uint_operand(gt + 1)) sp(o, "uintBitsToFloat");
+            else if (tn == 5 && !strncmp(p + 1, "float", 5)) sp(o, "as_f");
             else if (tn == 4 && !strncmp(p + 1, "uint", 4)) sp(o, "as_u");
             else if (tn == 3 && !strncmp(p + 1, "int", 3)) sp(o, "as_i");
             else if (tn == 5 && !strncmp(p + 1, "half2", 5)) sp(o, "unpack_h2");
@@ -2243,6 +2286,68 @@ static const char glsl_prelude[] =
     "vec2 hx(uint v, uint swz) { if (swz == 1u) return vec2(uintBitsToFloat(v)); vec2 h = unpack_h2(v); return swz == 2u ? h.xx : (swz == 3u ? h.yy : h); }\n"
     "uint hpack(vec2 r, uint merge, uint old) { if (merge == 1u) return floatBitsToUint(r.x); uint lo = packHalf2x16(vec2(r.x, 0.0f)), hi = packHalf2x16(vec2(r.y, 0.0f)); if (merge == 2u) return (old & 0xFFFF0000u) | lo; if (merge == 3u) return (old & 0xFFFFu) | (hi << 16); return lo | (hi << 16); }\n"
     "uint prmt(uint a, uint b, uint sel) { uint r = 0u; for (uint i = 0u; i < 4u; i++) { uint s = (sel >> (i * 4u)) & 7u; uint bt = s < 4u ? (a >> (s * 8u)) & 0xFFu : (b >> ((s - 4u) * 8u)) & 0xFFu; r |= bt << (i * 8u); } return r; }\n";
+
+// The prelude, a line each: directives (kept) and helpers by name (kept when called).
+enum { PRELUDE_MAX = 64 };
+typedef struct {
+    const char *line[PRELUDE_MAX];
+    size_t len[PRELUDE_MAX];
+    char name[PRELUDE_MAX][24];  // "" for directives
+    bool keep[PRELUDE_MAX];
+    int n;
+} Prelude;
+
+// Marks the helpers text calls: identifiers followed by '(' that name one (every overload of that name). A name a
+// #define of the shader maps elsewhere (h2f -> h2fn, fmin -> min) still counts as a call: kept, unused - harmless.
+static void prelude_mark_calls(Prelude *pr, const char *text, const char *end) {
+    for (const char *t = text; t < end;) {
+        if (!id_start(*t) || (t > text && id_char(t[-1]))) { t++; continue; }
+        const char *u = t;
+        while (u < end && id_char(*u)) u++;
+        if (u < end && *u == '(')
+            for (int i = 0; i < pr->n; i++)
+                if (!pr->keep[i] && pr->name[i][0] && (size_t)(u - t) == strlen(pr->name[i]) && !memcmp(t, pr->name[i], u - t))
+                    for (int j = i; j < pr->n; j++) if (!strcmp(pr->name[j], pr->name[i])) pr->keep[j] = true;
+        t = u;
+    }
+}
+
+// The shader's GLSL with only the prelude's directives and the helpers the rest calls, directly or through another
+// helper or a directive: glslang parses every function it is given, ~2 ms a shader for all of them (a quarter of an
+// average shader's GLSL -> SPIR-V time; SavageWindRecomp's measure). src holds glsl_prelude once, as written.
+static char *glsl_with_prelude(char *src) {
+    char *at = strstr(src, glsl_prelude);
+    if (!at) return src;
+    const char *rest = at + strlen(glsl_prelude);
+    Prelude pr = {0};
+    for (const char *p = glsl_prelude; *p && pr.n < PRELUDE_MAX; pr.n++) {
+        int i = pr.n;
+        const char *e = strchr(p, '\n');
+        pr.line[i] = p;
+        pr.len[i] = e ? (size_t)(e - p + 1) : strlen(p);
+        p += pr.len[i];
+        const char *par = pr.line[i][0] == '#' ? NULL : memchr(pr.line[i], '(', pr.len[i]);
+        if (!par) { pr.keep[i] = true; continue; }  // (directives, and the #define everything uses)
+        const char *q = par;
+        while (q > pr.line[i] && id_char(q[-1])) q--;
+        snprintf(pr.name[i], sizeof pr.name[i], "%.*s", (int)(par - q), q);
+    }
+    if (pr.n >= PRELUDE_MAX) return src;  // (a prelude grown past the table: all of it, as before)
+    prelude_mark_calls(&pr, rest, rest + strlen(rest));
+    for (bool more = true; more;) {  // helpers (and directives) that call helpers
+        bool before[PRELUDE_MAX];
+        memcpy(before, pr.keep, sizeof before);
+        for (int i = 0; i < pr.n; i++)
+            if (pr.keep[i]) prelude_mark_calls(&pr, pr.line[i], pr.line[i] + pr.len[i]);
+        more = memcmp(before, pr.keep, sizeof before) != 0;
+    }
+    Str s = {0};
+    sp(&s, "%.*s", (int)(at - src), src);
+    for (int i = 0; i < pr.n; i++) if (pr.keep[i]) sp(&s, "%.*s", (int)pr.len[i], pr.line[i]);
+    sp(&s, "%s", rest);
+    free(src);
+    return s.buf;
+}
 
 static const char *glsl_sampler_type(const ShaderTexture *t) {
     static const char *const names[][2] = {
@@ -2844,7 +2949,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         }
     }
     sp(&s, "}\n");
-    info->msl = s.buf;
+    info->msl = glsl_with_prelude(s.buf);  // (only the helpers it calls)
     info->attr_mask = c->in_attr_mask;
     info->out_mask = stage == STAGE_FRAGMENT ? c->omap_target : c->out_attr_mask;
     free(c->body.buf);

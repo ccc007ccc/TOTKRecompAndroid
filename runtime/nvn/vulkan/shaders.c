@@ -131,6 +131,21 @@ static uint32_t *no_contraction(uint32_t *spv, size_t *nwords) {
 // No spirv-opt by default: it rewrote the depth pre-pass and colour-pass vertex shaders differently enough that
 // their depths stopped matching (EQUAL test: black holes in foliage), and it was most of the compile time; the
 // driver optimises anyway. LARECOMP_VK_OPT=1 turns it back on (experiments).
+// Debug names (OpSource, OpSourceExtension, OpName, OpMemberName, OpString, OpLine, OpNoLine, OpModuleProcessed):
+// glslang writes one for every register variable, ~16 % of a translated shader's SPIR-V, read by no driver
+// (SavageWindRecomp's).
+static void strip_names(uint32_t *spv, size_t *nwords) {
+    size_t o = 5;
+    for (size_t i = 5; i < *nwords;) {
+        uint32_t wc = spv[i] >> 16, op = spv[i] & 0xFFFF;
+        if (!wc || i + wc > *nwords) return;  // (malformed: left as it is from here)
+        bool name = op == 3 || op == 4 || op == 5 || op == 6 || op == 7 || op == 8 || op == 317 || op == 330;
+        if (!name) { memmove(spv + o, spv + i, wc * 4); o += wc; }
+        i += wc;
+    }
+    *nwords = o;
+}
+
 uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t *nwords) {
     bool optimized = getenv("LARECOMP_VK_OPT") != NULL;
 #ifdef __ANDROID__
@@ -166,6 +181,7 @@ uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t 
         out = malloc(n);
         memcpy(out, shaderc_result_get_bytes(r), n);
         *nwords = n / 4;
+        strip_names(out, nwords);
         if (stage == STAGE_VERTEX || (stage == STAGE_FRAGMENT && writes_fragment_depth(out, *nwords)))
             out = no_contraction(out, nwords);
         if (!nocache) cache_store(h, out, *nwords);

@@ -49,6 +49,10 @@ bool rt_version_game_lib(int v, char *out, size_t n);
 bool rt_remove_game_file(const char *game_dir, const char *name);
 // All the game files set up there (rt_remove_game_file on each, then the empty folder). Saves and settings stay.
 bool rt_remove_game_files(const char *game_dir);
+// The same before a new setup there, except the game code's compiled objects (.gamebuild): runtime/gamebuild.c keeps
+// them only when they were compiled from the same game code by the same builder, so the folder picked again after a
+// build the app didn't finish goes on from there (issue #25: it started over)
+bool rt_remove_game_files_for_setup(const char *game_dir);
 // Bytes taken by the extracted game files in game_dir (links not followed).
 unsigned long long rt_game_files_size(const char *game_dir);
 

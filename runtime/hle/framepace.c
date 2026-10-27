@@ -1,4 +1,5 @@
-// Frame rate for BOTW 1.8.2: 30, 60 or no limit (Video > Frame rate), and the game's clock the same at every one of
+// TotK 1.4.3: 30/45/60/120 FPS, measured time at the producer and secondary animation clock (TotK section below).
+// BOTW 1.8.2: 30, 60 or no limit (Video > Frame rate), and the game's clock the same at every one of
 // them - from SavageWindRecomp (MIT, runtime/hle/framepace.c), which worked this out for its PC port of 1.8.2.
 //
 // How BOTW 1.8.2 keeps time (main module, canonical addresses):
@@ -28,6 +29,7 @@
 //   LARECOMP_LOG_FRAMEPACE=<n>   every n clock updates: target, frame length, VFR ratio and interval
 //   LARECOMP_NO_CONTROLLER_STEP=1  the controllers count presented frames (as the game does)
 #include <math.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,6 +38,7 @@
 #include "../platform.h"
 #include "../settings.h"
 #include "../framepace.h"
+#include "../frame_clock.h"
 
 volatile int g_movie_playing;  // FFmpeg decoder count; zero in builds without FFmpeg
 
@@ -51,8 +54,8 @@ static int env_int(const char *name, int def) {
 
 bool framepace_on(void) {
     static int on = -1;
-    if (on < 0) on = g_game_version == 182 && env_int("LARECOMP_FRAMEPACE", 1) != 0;
-    return on;
+    if (on < 0) on = env_int("LARECOMP_FRAMEPACE", 1) != 0;
+    return on && (g_game_version == 182 || g_game_version == 143);
 }
 
 // ------------------------------------------------------------------ the frame rate
@@ -97,10 +100,12 @@ int framepace_target(void) {
     if (menu == -2) menu = env_int("LARECOMP_MENU_FPS", 30);
     if (event == -2) event = env_int("LARECOMP_EVENT_FPS", 30);
     // (Video > Frame rate: 30, 60; Auto is 60 here - the clock follows whatever the frames really take)
-    int fps = forced >= 0 ? forced : g_settings.fps_mode == 1 ? 30 : 60;
+    int fps = forced >= 0 ? forced : g_settings.fps_mode == 1 ? 30 :
+              g_settings.fps_mode == 3 ? 45 : g_settings.fps_mode == 4 ? 120 : 60;
+    if (g_game_version == 143 && (fps == 0 || fps > 120)) fps = 120;
     if (movie > 0 && __atomic_load_n(&g_movie_playing, __ATOMIC_RELAXED) > 0 && (fps == 0 || fps > movie)) fps = movie;
-    if (menu > 0 && (fps == 0 || fps > menu) && in_menu()) fps = menu;
-    if (event > 0 && (fps == 0 || fps > event) && in_event()) fps = event;
+    if (g_game_version == 182 && menu > 0 && (fps == 0 || fps > menu) && in_menu()) fps = menu;
+    if (g_game_version == 182 && event > 0 && (fps == 0 || fps > event) && in_event()) fps = event;
     return fps;
 }
 
@@ -124,8 +129,70 @@ int rt_frame_wait(void) { return framepace_on(); }
 static float g_step = 1;   // the last frame's length between presents, in console frames
 static int g_grid_streak;  // presents in a row that kept the pace
 
+// TotK 1.4.3: the generator hooks the time producer, preserving the original half-step selector, FrameRateMgr
+// arithmetic and intentional time multipliers. Cloth/hair has a second clock, corrected only at four actor sites.
+// Addresses/mechanism: MacNativeGames game_patches_v143.c @ff63a162 (MIT; LICENSE-MacNativeGames.txt).
+static FrameClock totk_clock;
+static _Atomic float totk_seconds = 1.0f / 30.0f;
+RT_ON_RESET(framepace_totk_reset) {
+    totk_clock = (FrameClock){0};
+    atomic_store_explicit(&totk_seconds, 1.0f / 30.0f, memory_order_relaxed);
+}
+
+static float frame_s(const Cpu *c, unsigned reg) {
+    float f; memcpy(&f, &c->v[reg], sizeof f); return f;
+}
+static void frame_set_s(Cpu *c, unsigned reg, float value) {
+    c->v[reg] = 0; memcpy(&c->v[reg], &value, sizeof value);
+}
+
+void rt_totk_frame_hook(Cpu *c, int site) {
+    if (g_game_version != 143 || !framepace_on()) return;
+    float seconds = atomic_load_explicit(&totk_seconds, memory_order_relaxed);
+    float ratio = seconds * 30.0f;
+    switch (site) {
+    case 0: // original fmul s8,s0,s1 retains sys+0x1da's half/full selector
+    case 1: // original fmul s0,s0,s1 (s1=0.5) produces the controller's 30 Hz step
+        frame_set_s(c, 0, seconds * 60.0f);
+        break;
+    case 2: { // secondary animation, first inline actor
+        float step = frame_s(c, 10) * ratio;
+        memcpy((void *)(uintptr_t)(c->sp + 0x364), &step, sizeof step);
+        frame_set_s(c, 0, seconds);
+        break;
+    }
+    case 3: { // second inline actor; the ordinary animation arguments remain untouched
+        float step = frame_s(c, 0) * ratio;
+        memcpy((void *)(uintptr_t)(c->sp + 0x114), &step, sizeof step);
+        frame_set_s(c, 1, seconds);
+        break;
+    }
+    case 4: // the two nominal-time callers of 0x2a0e40; preserve the measured-time caller
+        frame_set_s(c, 2, frame_s(c, 2) * ratio);
+        frame_set_s(c, 3, frame_s(c, 3) * ratio);
+        break;
+    case 5: { // X+0x28 is FPS including slow motion. Multiply by X+0x38 to remove the frame-rate component.
+        float step;
+        memcpy(&step, (const void *)(uintptr_t)(c->x[9] + 0x38), sizeof step);
+        frame_set_s(c, 0, frame_s(c, 0) * step);
+        break;
+    }
+    }
+}
+
 void framepace_presented(uint64_t t, bool on_grid) {
     if (!framepace_on()) return;
+    if (g_game_version == 143) {
+        float seconds = (float)frame_clock_update(&totk_clock, t, framepace_period_ns());
+        atomic_store_explicit(&totk_seconds, seconds, memory_order_relaxed);
+        static int every = -1;
+        static uint64_t frames;
+        if (every < 0) every = env_int("LARECOMP_LOG_FRAMEPACE", 0);
+        if (every > 0 && frames++ % (uint64_t)every == 0)
+            LOG("[framepace] TotK target %d fps, measured step %.3f ms, ratio %.4f%s\n",
+                framepace_target(), seconds * 1000.0, seconds * 30.0, on_grid ? ", on grid" : "");
+        return;
+    }
     static uint64_t prev;
     static double smooth;
     double s = prev && t > prev ? (t - prev) / 1e9 : 1.0 / 30;
@@ -150,7 +217,7 @@ void framepace_presented(uint64_t t, bool on_grid) {
 #define VFR_RATIO 0x3c
 
 void rt_vfr_update(uint64_t vfr) {
-    if (!framepace_on()) return;
+    if (g_game_version != 182 || !framepace_on()) return;
     static uint64_t last_t;
     static double real, given;  // seconds of real time and of game time handed out (only their gap matters)
     static double smooth;       // seconds between updates, averaged over about 20

@@ -64,6 +64,6 @@ endif()
 # game thread's time
 target_compile_options(main PRIVATE -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Wno-format  # (as on Linux: %llx for uint64_t)
     $<$<COMPILE_LANGUAGE:CXX>:-std=c++17>)
-target_link_libraries(main PRIVATE SDL3 shaderc_shared adrenotools android log dl m z)
+target_link_libraries(main PRIVATE SDL3 shaderc_shared adrenotools android nativewindow log dl m z)
 # (runtime/hle.h, ipc.h, main.c: tables in named sections found through __start_ / __stop_ symbols)
 target_link_options(main PRIVATE -Wl,-z,nostart-stop-gc)
