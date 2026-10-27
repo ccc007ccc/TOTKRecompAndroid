@@ -39,6 +39,7 @@
 #include "../settings.h"
 #include "../framepace.h"
 #include "../frame_clock.h"
+#include "../test_session.h"
 
 volatile int g_movie_playing;  // FFmpeg decoder count; zero in builds without FFmpeg
 
@@ -100,7 +101,8 @@ int framepace_target(void) {
     if (menu == -2) menu = env_int("LARECOMP_MENU_FPS", 30);
     if (event == -2) event = env_int("LARECOMP_EVENT_FPS", 30);
     // (Video > Frame rate: 30, 60; Auto is 60 here - the clock follows whatever the frames really take)
-    int fps = forced >= 0 ? forced : g_settings.fps_mode == 1 ? 30 :
+    int test_fps = test_session_target_fps();
+    int fps = test_fps > 0 ? test_fps : forced >= 0 ? forced : g_settings.fps_mode == 1 ? 30 :
               g_settings.fps_mode == 3 ? 45 : g_settings.fps_mode == 4 ? 120 : 60;
     if (g_game_version == 143 && (fps == 0 || fps > 120)) fps = 120;
     if (movie > 0 && __atomic_load_n(&g_movie_playing, __ATOMIC_RELAXED) > 0 && (fps == 0 || fps > movie)) fps = movie;
@@ -134,9 +136,11 @@ static int g_grid_streak;  // presents in a row that kept the pace
 // Addresses/mechanism: MacNativeGames game_patches_v143.c @ff63a162 (MIT; LICENSE-MacNativeGames.txt).
 static FrameClock totk_clock;
 static _Atomic float totk_seconds = 1.0f / 30.0f;
+static _Atomic unsigned totk_hook_seen;
 RT_ON_RESET(framepace_totk_reset) {
     totk_clock = (FrameClock){0};
     atomic_store_explicit(&totk_seconds, 1.0f / 30.0f, memory_order_relaxed);
+    atomic_store_explicit(&totk_hook_seen, 0, memory_order_relaxed);
 }
 
 static float frame_s(const Cpu *c, unsigned reg) {
@@ -148,6 +152,11 @@ static void frame_set_s(Cpu *c, unsigned reg, float value) {
 
 void rt_totk_frame_hook(Cpu *c, int site) {
     if (g_game_version != 143 || !framepace_on()) return;
+    if (site < 0 || site > 5) return;
+    unsigned bit = 1u << site;
+    if (!(atomic_load_explicit(&totk_hook_seen, memory_order_relaxed) & bit) &&
+        !(atomic_fetch_or_explicit(&totk_hook_seen, bit, memory_order_relaxed) & bit))
+        LOG("[framepace] TotK timing hook %d active\n", site);
     float seconds = atomic_load_explicit(&totk_seconds, memory_order_relaxed);
     float ratio = seconds * 30.0f;
     switch (site) {

@@ -7,6 +7,8 @@ int g_game_version = 143;
 uint64_t g_guest_lo;
 Settings g_settings = {.fps_mode = 1};
 uint64_t plat_now_ns(void) { return 1; }
+static int test_fps;
+int test_session_target_fps(void) { return test_fps; }
 
 static void near(double actual, double expected, double tolerance) { assert(fabs(actual - expected) < tolerance); }
 static void rate(int fps, int mode) {
@@ -70,6 +72,7 @@ int main(int argc, char **argv) {
     }
     assert(framepace_on());
     rate(30, 1); rate(45, 3); rate(60, 2); rate(120, 4);
+    test_fps=45; assert(framepace_target()==45); test_fps=0; assert(framepace_target()==120);
     // Movie cap changes the target and resets sampling; returning to gameplay restores it.
     g_settings.fps_mode = 4; g_movie_playing = 1; assert(framepace_target() == 30);
     g_movie_playing = 0; assert(framepace_target() == 120);

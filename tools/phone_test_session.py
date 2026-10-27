@@ -33,6 +33,8 @@ def main():
     start.add_argument('--timeout',type=int,default=150,help='Maximum seconds to wait for automatic pause')
     for name in ['status','pause','resume','a','gpu','shot']:
         commands.add_parser(name)
+    fps=commands.add_parser('fps',help='Change the target while paused, without reloading or writing settings')
+    fps.add_argument('rate',type=int,choices=[0,30,45,60,120],help='0 restores the normal setting/environment')
     sample=commands.add_parser('sample')
     sample.add_argument('--frames',type=int,default=120)
     sample.add_argument('--cooldown',type=int,default=0,help='Wait this many seconds while already paused, then sample')
@@ -84,6 +86,7 @@ def main():
         env=['LARECOMP_NO_LAUNCHER=1','LARECOMP_TEST_SESSION='+remote,
              'LARECOMP_VK_PROF=1','LARECOMP_LOG_CBUF_BYTES=1','LARECOMP_TEXTURE_TRACE=1',
              'LARECOMP_LOG_FILE='+remote+'/runtime.log','LARECOMP_DISABLE_GPU_CAPTURE=1',
+             'LARECOMP_LOG_FRAMEPACE=120',
              'LARECOMP_NO_SCALE=1','LARECOMP_GAME_DYNRES=1']
         if args.save_seed:
             check_seed=private if args.save_seed.startswith('/data/user/0/'+package+'/') else shell
@@ -179,7 +182,7 @@ def main():
     elif args.command!='status':
         was_paused=state['phase']=='paused'
         if args.command=='shot':private('rm','-f',remote+'/window.png')
-        state=send(args.command)
+        state=send(args.command,args.rate if args.command=='fps' else 0)
         if args.command in ('shot','gpu') and was_paused:
             deadline=time.monotonic()+30
             while state['phase']!='paused' and time.monotonic()<deadline:

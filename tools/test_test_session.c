@@ -40,12 +40,18 @@ int main(int argc,char**argv){
  }
  wait_status("\"phase\":\"paused\"");assert(atomic_load(&frame)==90&&atomic_load(&idles)==1);
  plat_sleep_until_ns(plat_now_ns()+200000000);assert(atomic_load(&frame)==90);
+ assert(test_session_target_fps()==0);
+ const unsigned rates[]={30,45,60,120};
+ for(unsigned i=0;i<4;i++){char cmd[32];snprintf(cmd,sizeof cmd,"fps %u",rates[i]);command(20+i,cmd);assert(test_session_target_fps()==(int)rates[i]);}
+ command(24,"fps 90");wait_status("Frame rate must be");assert(test_session_target_fps()==120);
  command(1,"sample 30");wait_status("\"sample_id\":1,");wait_status("\"phase\":\"paused\"");
  assert(atomic_load(&frame)==150&&atomic_load(&idles)==2);
  char path[1200],text[1024];snprintf(path,sizeof path,"%s/sample-0001.json",dir);FILE*f=fopen(path,"r");assert(f);size_t n=fread(text,1,sizeof text-1,f);fclose(f);text[n]=0;
  assert(strstr(text,"\"frames\":30,")&&strstr(text,"\"last_frame\":150,"));
+ assert(strstr(text,"\"target_fps\":120,"));
  command(2,"sample 1");wait_status("outside 30..6000");assert(atomic_load(&frame)==150);
  command(3,"resume");wait_status("\"phase\":\"running\"");
+ command(25,"fps 30");wait_status("Pause before changing");assert(test_session_target_fps()==120);
  plat_sleep_until_ns(plat_now_ns()+100000000);assert(atomic_load(&frame)>150);
  command(4,"pause");wait_status("\"phase\":\"paused\"");unsigned last=atomic_load(&frame);
  plat_sleep_until_ns(plat_now_ns()+200000000);assert(atomic_load(&frame)==last);
@@ -55,6 +61,7 @@ int main(int argc,char**argv){
  assert(test_session_take_shot_request()&&!test_session_take_shot_request());
  atomic_store(&stop,true);test_session_end();pthread_join(thread,NULL);
  wait_status("\"phase\":\"ended\"");
+ assert(test_session_target_fps()==0);
  command(7,"sample 30");wait_status("ended for game reboot");
  puts("PASS: pause, responsive control, warmup exclusion, exact samples, diagnostics, resume, invalid commands and shutdown while paused");
 }

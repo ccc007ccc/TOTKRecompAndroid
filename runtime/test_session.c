@@ -3,6 +3,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +22,8 @@ static struct {
     int save_slot;
 } ts={.lock=PTHREAD_MUTEX_INITIALIZER, .wake=PTHREAD_COND_INITIALIZER};
 static pthread_once_t once=PTHREAD_ONCE_INIT;
+static _Atomic int target_fps;
+int test_session_target_fps(void) { return atomic_load_explicit(&target_fps,memory_order_relaxed); }
 static const char *phases[]={"loading","running","paused","warming","sampling","diagnostic","ended"};
 static void status(void);
 
@@ -108,9 +111,9 @@ const char *test_session_directory(void){return test_session_enabled()?ts.direct
 static void status(void) { // lock held; only transitions write to storage
     char path[1200],done[1200];snprintf(path,sizeof path,"%s/status.partial",ts.directory);
     snprintf(done,sizeof done,"%s/status.json",ts.directory);FILE *f=fopen(path,"w");if(!f)return;
-    fprintf(f,"{\"pid\":%d,\"phase\":\"%s\",\"frame\":%llu,\"request\":%llu,\"sample_id\":%u,\"sample_frames\":%u,\"ready\":%s,\"save_slot\":%d,\"error\":\"%s\"}\n",
+    fprintf(f,"{\"pid\":%d,\"phase\":\"%s\",\"frame\":%llu,\"request\":%llu,\"sample_id\":%u,\"sample_frames\":%u,\"ready\":%s,\"save_slot\":%d,\"target_fps\":%d,\"error\":\"%s\"}\n",
         getpid(),phases[ts.phase],(unsigned long long)ts.frame,(unsigned long long)ts.request,ts.sample_id,ts.sample_count,
-        ts.ready?"true":"false",ts.save_slot,ts.error);
+        ts.ready?"true":"false",ts.save_slot,test_session_target_fps(),ts.error);
     if(!fclose(f))rename(path,done);
 }
 static int compare(const void *a,const void *b){double x=*(const double*)a,y=*(const double*)b;return(x>y)-(x<y);}
@@ -121,8 +124,8 @@ static void result(void) {
     FILE *f=fopen(path,"w");if(!f)return;
     unsigned n=ts.sample_count;
     double median=(ts.intervals[(n-1)/2]+ts.intervals[n/2])/2, p95=ts.intervals[(95*n+99)/100-1];
-    fprintf(f,"{\"pid\":%d,\"frames\":%u,\"first_frame\":%llu,\"last_frame\":%llu,\"mean_ms\":%.6f,\"median_ms\":%.6f,\"p95_ms\":%.6f,\"fps\":%.6f,\"mode\":\"frame-timing\"}\n",
-        getpid(),n,(unsigned long long)(ts.frame-n+1),(unsigned long long)ts.frame,sum/n,median,p95,sum>0?n*1000.0/sum:0);
+    fprintf(f,"{\"pid\":%d,\"frames\":%u,\"first_frame\":%llu,\"last_frame\":%llu,\"mean_ms\":%.6f,\"median_ms\":%.6f,\"p95_ms\":%.6f,\"fps\":%.6f,\"target_fps\":%d,\"mode\":\"frame-timing\"}\n",
+        getpid(),n,(unsigned long long)(ts.frame-n+1),(unsigned long long)ts.frame,sum/n,median,p95,sum>0?n*1000.0/sum:0,test_session_target_fps());
     fclose(f);
     fprintf(stderr,"[test-session] sample %u: %u frames %.2f fps, %.2f ms mean, %.2f ms p95\n",ts.sample_id,n,n*1000.0/sum,sum/n,p95);
 }
@@ -148,6 +151,10 @@ void test_session_poll(void) {
     else if(!strcmp(verb,"pause")){ts.want_pause=ts.phase!=PAUSED;}
     else if(!strcmp(verb,"resume")) {
         ts.want_pause=ts.pause_when_ready=false;ts.auto_load=false;ts.phase=RUNNING;
+    } else if(!strcmp(verb,"fps")) {
+        if(ts.phase!=PAUSED)snprintf(ts.error,sizeof ts.error,"Pause before changing the test frame rate");
+        else if(arg!=0&&arg!=30&&arg!=45&&arg!=60&&arg!=120)snprintf(ts.error,sizeof ts.error,"Frame rate must be 0, 30, 45, 60 or 120");
+        else atomic_store_explicit(&target_fps,(int)arg,memory_order_relaxed);
     } else if(!strcmp(verb,"sample")&&arg>=30&&arg<=6000) {
         if(ts.phase!=PAUSED)snprintf(ts.error,sizeof ts.error,"Pause at the test view before sampling");
         else if(!ts.ready)snprintf(ts.error,sizeof ts.error,"Startup has not reached a test scene; resume and inspect before sampling");
@@ -182,6 +189,7 @@ void test_session_end(void) {
     if(!test_session_enabled())return;
     pthread_mutex_lock(&ts.lock);
     ts.phase=ENDED;ts.want_pause=ts.pause_when_ready=ts.auto_load=ts.gpu_request=ts.shot_request=false;
+    atomic_store_explicit(&target_fps,0,memory_order_relaxed);
     ts.buttons=0;status();pthread_cond_broadcast(&ts.wake);pthread_mutex_unlock(&ts.lock);
 }
 void test_session_manual(bool resume) {

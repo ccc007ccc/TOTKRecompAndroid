@@ -5,6 +5,7 @@
 // Explicit developer test sessions. Normal launches perform no control-file I/O.
 bool test_session_enabled(void);
 int test_session_save_slot(void); // -1 unless direct loading was explicitly requested
+int test_session_target_fps(void); // 0: normal setting; explicit test override never writes the player's ini
 const char *test_session_directory(void);
 void test_session_poll(void); // SDL/event thread, also while the renderer is paused
 void test_session_frame(uint64_t frame, bool scene, void (*gpu_idle)(void));
