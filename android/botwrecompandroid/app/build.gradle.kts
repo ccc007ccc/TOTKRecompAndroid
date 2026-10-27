@@ -138,8 +138,15 @@ val prepareBotwRecompAndroid by tasks.registering {
         val inc = lines.joinToString("") { "\"" + it.replace("\\", "\\\\").replace("\"", "\\\"") + "\\n\"\n" }
         out.resolve("inc").mkdirs()
         out.resolve("inc/smaa_hlsl.inc").writeText(inc)
-        for (lib in libs)  // (FFmpeg's only once android/deps/build_ffmpeg.sh made them)
-            if (deps.resolve("lib/$lib").exists()) deps.resolve("lib/$lib").copyTo(out.resolve("jniLibs/arm64-v8a/$lib"), overwrite = true)
+        // Android probes every libVkLayer_*.so during layer enumeration, which
+        // runs RenderDoc constructors even when full capture is disabled.
+        // Keep the optional library out of that scan and load it explicitly.
+        out.resolve("jniLibs/arm64-v8a/libVkLayer_GLES_RenderDoc.so").delete()
+        out.resolve("jniLibs/arm64-v8a/libtotk_renderdoc.so").delete()
+        for (lib in libs) {  // (FFmpeg's only once android/deps/build_ffmpeg.sh made them)
+            val packaged = if (lib == "libVkLayer_GLES_RenderDoc.so") "libtotk_renderdoc.so" else lib
+            if (deps.resolve("lib/$lib").exists()) deps.resolve("lib/$lib").copyTo(out.resolve("jniLibs/arm64-v8a/$packaged"), overwrite = true)
+        }
         font.copyTo(out.resolve("assets/res/Baloo2-SemiBold.ttf"), overwrite = true)
         deps.resolve("fonts/DejaVuSans.ttf").copyTo(out.resolve("assets/res/DejaVuSans.ttf"), overwrite = true)
         icon.copyTo(out.resolve("assets/res/icon.png"), overwrite = true)

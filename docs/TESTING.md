@@ -57,41 +57,63 @@ Android 可通过 `adb -s "$ANDROID_SERIAL" shell input keyevent KEYCODE_F9` 发
 
 ## 手机本地闪屏抓取
 
-游戏画面顶部有两个独立按钮：**持续抓帧**（再次点击停止）和 **抓取当前帧**。
-设置 → 视频中也提供这两个按钮和阈值调节。键盘 F8 开关持续抓取，F10 单次抓取；F9 保留原附件诊断。
-默认关闭，持续抓取只保存变化超过阈值的相邻两帧：变化前、已经发生变化的后一帧。
-“变化后”不代表恢复帧。用户为降低数据量，已将原三帧要求改成两帧。
-单次按钮保存点击后的第一帧完整游戏 GPU 命令及资源，不受阈值限制。
+游戏顶部两个按钮保持不变：**持续抓帧**（再次点击停止）和 **抓取当前帧**。
+默认使用**轻量诊断**，不加载 RenderDoc、不复制整块显存。F8 开关持续抓取，F10 单次；设置 → 视频可调阈值。
+持续模式在手机内存比较最终画面，超过阈值才保存相邻的变化前、变化后两帧；单次不受阈值限制。
+“变化后”是已经发生变化的帧，不表示恢复。游戏自身 UI 包含在内，触控、设置、FPS 浮层不参与比较。
 
-每帧是标准 RenderDoc `.rdc`，包括实际使用的绘制命令、着色器、纹理、缓冲和初始状态；PNG 仅为预览。
-选帧在手机本地完成，候选 RDC 留在匿名 `memfd` 中，正常帧被替换，只有命中阈值或单次请求才落盘。
-阈值默认 8%，可调 2%–40%；低阈值可以捕获更多局部变化，也可能选中正常镜头移动、转场。
-游戏自己的 UI 包含在内；应用触控、设置和 FPS 浮层不参与比较。
+每帧保留如下诊断内容，而不是只有最终截图：
 
-保存路径：`/storage/emulated/0/Android/data/com.totkrecomp.android/files/flicker/<日期时间>/`。
+- 渲染目标切换时，缩略颜色、深度和支持的模板附件，最长边128像素，记录地址、格式、mip、layer、阶段编号。
+- 支持的归一化／浮点颜色以 RGBA16F 保存，保留 HDR 数值；深度保留对应原生深度格式。整数颜色等不支持的格式只记录元数据及省略原因，不执行非法格式转换。文件中的图像是缩略采样，不能代替精细像素或原分辨率输入验收。
+- 绘制/跳过/清除/compute 记录、viewport/scissor、深度/模板/混合相关状态、纹理/采样器/顶点流绑定信息。
+- 着色器原码与翻译参数；按实际使用范围保留有上限的常量 **CPU 镜像**。GPU 写入但尚未回写的输入可能与镜像不同，精确输入需后续定向抓取。
+- 最终画面的960像素宽PNG和前后对照 `preview.png`。
 
-- 连续事件：`event-0001/01-before.rdc`、`02-after.rdc`，各有同名 PNG。
-- 单次事件：`event-0001/frame.rdc`、`frame.png`。
-- `preview.png` 是一帧或两帧对照，`event.json` 记录真实帧号、时间、RDC 字节数、阈值与 `threshold/manual` 原因。
-- 父目录 `status.txt` 和 `events.tsv` 记录状态、保存数量、漏采与候选索引。
-- 写入未完成的目录以 `.partial` 结尾；只有全部文件保存成功才改为正式事件目录。
+每帧的阶段图、常量/着色器、日志预算分别为24、8、4 MiB；一组两帧核心缓冲约80 MiB，驱动和压缩线程另有开销。
+着色器单份最多128 KiB，常量单份最多4 KiB，并记录原长度和实际保存长度。日志给后续绘制/跳过摘要和着色器原码/参数关联预留空间。
+达到某项预算时只省略该项并计数，**不丢弃整个事件**。数据使用gzip压缩；实际文件大小取决于场景。
+默认阈值8%，可调2%–40%。存储达到64组或512 MiB后结束当前轻量会话。
 
-先在手机查看预览，确认候选后只取选中的事件。不要拉取整个会话或大视频。
-完整 GPU 抓帧需要同步 GPU 和保存资源，开启后会明显降低运行速度，也可能改变随机问题的时序。
-后台保存期间暂停采样，之后重新建立相邻帧对照，漏采计数可见。
-两份已序列化 RDC 合计超过 2 GiB 时停止（RenderDoc 临时资源快照另占内存）；每会话保存到 64 组或 8 GiB 后停止。
+保存位置仍为 `/storage/emulated/0/Android/data/com.totkrecomp.android/files/flicker/<日期时间>/`：
 
-构建抓取库：在 `dev` 中执行 `bash android/deps/build_renderdoc.sh`，再构建 APK。
-库使用固定的 RenderDoc 1.45 源码；内存保存及自定义驱动回放补丁、许可证位于 `android/deps/patches/`。
-缺少抓取库时功能明确报告不可用；`LARECOMP_DISABLE_GPU_CAPTURE=1` 可在启动前禁用该层以作对照。
-`.rdc` 可用 RenderDoc 1.45 或更新版本分析，实际回放需要兼容的 GPU 特性和内存布局。
-一加 13 的 Turnip 捕获不能保证直接在桌面 AMD/软件 Vulkan 上回放；随附回放检查器可在手机选择原版 Turnip。
+- 连续事件有 `01-before/`、`02-after/` 子目录和同名PNG；单次为 `frame/`、`frame.png`。
+- 每帧子目录：`diagnostic.json` 索引、`stages.bin.gz` 阶段图、`inputs.bin.gz` 着色器/常量、`draws.txt.gz` 绘制记录。
+- `diagnostic.json` 列出省略数量，图像状态为 `ok/unsupported/budget/allocation`；输入ID为0表示未保存。
+- `event.json` 的格式为 `light-diagnostic-v1`，记录真实帧号、时间、保存字节数和 `threshold/manual` 原因。
+- 父目录有 `status.txt` 和 `events.tsv`。未完成写入使用 `.partial`，全部保存成功才改为正式事件目录。
 
-`tools/test_gpu_capture.c` 对生产抓取代码执行真实 GPU 测试：相同画面不保存、变化帧对、单次、停止、取消和重开。
-`tools/test_gpu_capture_replay.cpp` 使用 RenderDoc 回放并校验预览纹理像素；Android 启动前需设置
-`renderdoc__replay__marker=1`、`REPLAY_DRIVER` 和 `REPLAY_HOOKS`。
-Android 回放检查器不能使用 `-rdynamic`，以免将 adrenotools 内部指针导出为系统加载器函数名。
-桌面检查器需要 `-rdynamic` 导出回放标记。抓帧及回放均不需要重启正在运行的游戏。
+检测和选帧在手机完成，普通帧不落盘。先在手机看预览，再只取选中事件。
+轻量模式仍有额外GPU拷贝和每帧一次完成等待，可能改变随机问题的时序，不能用来测正常性能。
+保存期间暂停采样并计数，随后重新建立相邻帧对照；停止/中断会排空相关GPU工作再释放缓冲。
+
+本地小工具可对选中事件的前后阶段做数值排序，只生成少量对照图：
+
+```bash
+"$PYTHON" tools/analyze_light_capture.py <事件目录> --preview .work/totk-port/stage-changes.png
+```
+
+稳定复现问题可以继续用原有F9附件诊断、`LARECOMP_DUMP_TARGET` 指定原分辨率颜色/深度/模板，
+或 `LARECOMP_SKIP_FSHASH`/`LARECOMP_SKIP_CS` 临时跳过特定shader作对照。先缩小到相关阶段，避免整帧显存快照。
+
+只有确实需要逐条完整回放时，才在启动前设 `LARECOMP_FULL_GPU_CAPTURE=1`。
+该高级模式需要 `bash android/deps/build_renderdoc.sh` 后打包的RenderDoc库，仍输出`.rdc`且可能占用数GiB；
+UI明确显示完整模式。缺少库时回退轻量模式，不妨碍两个按钮使用。`LARECOMP_DISABLE_GPU_CAPTURE=1` 强制不加载该层。
+标准`.rdc`回放依赖兼容GPU和内存布局；同手机同Turnip的独立回放工具及补丁保留在仓库中。
+
+真实GPU回归（先构建APK，在dev中指定一加序列号和手机上的已安装驱动路径）：
+
+```bash
+ANDROID_SERIAL=<手机序列号> REPLAY_DRIVER=<手机驱动路径> bash tools/test_light_capture.sh
+```
+
+该测试覆盖半浮点颜色/深度像素、整数格式安全省略、变化前后、单次、稳定画面不保存、停止时仍有GPU工作、取消/重开；
+也故意填满图像/输入/日志预算，验证事件仍保存且后续关键绘制摘要保留。只取回独立合成测试目录。
+完整模式的 `tools/test_gpu_capture.c` 和 `tools/test_gpu_capture_replay.cpp` 保留作高级回归。
+
+一加13 / Banner Turnip r5 已实机抓到蓝色出生圆盘黑块的第1906帧：选中的单帧事件共4,837,160字节（约4.6 MiB），
+包含202张阶段图，图像和输入均无省略；详细绑定日志有省略，1537次绘制的尝试/结果摘要完整。
+这证明轻量抓取已可用，不代表黑块已修复。
 
 检测逻辑的独立回归：
 

@@ -62,44 +62,67 @@ Keep private GPU inputs, generated shader sources and replay data out of Git.
 
 ## On-device flicker capture
 
-Two independent buttons appear at the top of the game: **Continuous capture** (press again to stop) and
-**Capture current frame**. Settings → Video also provides both buttons and the threshold. F8 toggles monitoring;
-F10 captures once; F9 retains the existing attachment diagnostics. Capture defaults to off.
+The game keeps two independent buttons: **Continuous capture** (press again to stop) and **Capture current frame**.
+F8 toggles monitoring, F10 captures once, and Settings → Video adjusts the threshold.
+The default is now **lightweight diagnostics**, without loading RenderDoc or copying entire GPU allocations.
+Continuous mode compares on-device images and saves the consecutive before/changed pair only above the threshold;
+single capture ignores the threshold. The changed frame is not a recovery frame. Game UI is included; application overlays are excluded.
 
-Following the user's reduced-data requirement, continuous mode saves **two** consecutive complete GPU frames:
-before a change and the frame that crosses the threshold. The latter is the changed frame, not a recovery frame.
-Single capture saves the first complete game frame after the button press, regardless of the threshold.
-Each frame is a standard RenderDoc `.rdc` with commands, shaders, textures, buffers and initial resource state.
-PNG files are previews. Candidates stay in anonymous `memfd` files until selected; normal frames are replaced in memory.
-The threshold defaults to 8% (range 2%–40%). Game UI is included; touch controls, settings and FPS overlays are excluded.
+Each frame includes:
+
+- Color, depth and supported stencil thumbnails at render-target transitions, with addresses, formats, mip/layer and group indices.
+  Their longest side is 128 pixels. Supported normalized/float color uses RGBA16F to preserve HDR values; depth retains its native format.
+  Integer color and other unsupported formats retain metadata and an omission reason without issuing illegal format conversions.
+  These thumbnails do not replace full-resolution pixel/input validation.
+- Draw, skipped draw, clear and compute records; viewport/scissor, depth/stencil state, texture/sampler and vertex bindings.
+- Shader machine code and translation parameters, plus bounded uniform **CPU mirrors**. GPU-written inputs can differ until writeback;
+  use targeted capture when exact inputs are needed.
+- A final-game PNG up to 960 pixels wide and `preview.png` for the selected frame(s).
+
+Per-frame budgets are 24 MiB for stage images, 8 MiB for code/inputs and 4 MiB for logs. The two-frame core buffers use about 80 MiB,
+with additional driver/encoder overhead. Shader records are capped at 128 KiB each and constants at 4 KiB, with original and saved lengths.
+Log space is reserved for later draw/skip summaries and shader code/key associations. Exceeding a data budget records omissions instead of discarding the event.
+Files use gzip; actual size depends on scene contents. The threshold defaults to 8% (2%–40%). A light session stops after 64 events or 512 MiB.
 
 Files remain under `/storage/emulated/0/Android/data/com.totkrecomp.android/files/flicker/<timestamp>/`:
 
-- Continuous: `event-0001/01-before.rdc`, `02-after.rdc`, with matching PNG files.
-- Single: `event-0001/frame.rdc`, `frame.png`.
-- `preview.png` shows the selected one or two frames. `event.json` includes actual frame numbers, timestamps,
-  capture sizes, threshold and `threshold/manual` reason.
-- `status.txt` and `events.tsv` contain status, counts, dropped samples and the event index.
-- Incomplete writes use `.partial` directories; completed events are renamed only after every required file is written.
+- Continuous events have `01-before/`, `02-after/` and matching PNGs; single capture has `frame/` and `frame.png`.
+- Each frame directory contains `diagnostic.json`, `stages.bin.gz`, `inputs.bin.gz` and `draws.txt.gz`.
+- The index reports omitted data; image status is `ok/unsupported/budget/allocation`. Input ID 0 means not saved.
+- `event.json` uses `light-diagnostic-v1` and includes frame numbers, timestamps, stored sizes and `threshold/manual` reason.
+- The session has `status.txt` and `events.tsv`. Incomplete writes use `.partial`, renamed only when complete.
 
-Review previews on the phone first and retrieve only selected events. No automatic transfer or full-session video.
-Complete GPU capture synchronises work and snapshots resources, which substantially slows the game and can alter
-intermittent timing. Sampling pauses while the writer owns the two slots, then starts a fresh consecutive pair.
-Retained serialised RDC data is limited to 2 GiB, with additional transient RenderDoc resource memory.
-A session stops after reaching 64 saved events or 8 GiB.
+Selection stays on the phone; normal frames do not reach storage. Review previews first and retrieve only selected events.
+Light capture still adds GPU copies and one completion wait per frame, so it can affect intermittent timing and is not a performance benchmark.
+Sampling pauses during writes and resumes with a fresh consecutive pair. Stop/interruption drains diagnostic GPU work before releasing buffers.
 
-Build the capture library with `bash android/deps/build_renderdoc.sh` inside `dev`, then build the APK.
-RenderDoc 1.45 is pinned; the memory capture/custom driver replay patch and license are in `android/deps/patches/`.
-A missing library reports capture unavailable. `LARECOMP_DISABLE_GPU_CAPTURE=1` disables the layer at startup for comparisons.
-RenderDoc 1.45 or later can inspect these files; replay additionally requires compatible GPU features and memory layouts.
-A Turnip capture is not guaranteed to replay on desktop AMD or software Vulkan. The provided replay checker supports
-selecting the original Turnip on the phone.
+Rank changes between matched stage images and generate only a few comparisons:
 
-`tools/test_gpu_capture.c` exercises production capture code on a real GPU: stable-frame rejection, the selected pair,
-single capture, stop, discard and restart. `tools/test_gpu_capture_replay.cpp` replays and checks preview texture pixels.
-On Android set `renderdoc__replay__marker=1`, `REPLAY_DRIVER` and `REPLAY_HOOKS` before launch. Do not link the Android
-checker with `-rdynamic`, which exports adrenotools private loader pointers as system function names.
-The desktop checker needs `-rdynamic` to export its replay marker. These checks do not restart the running game.
+```bash
+"$PYTHON" tools/analyze_light_capture.py <event-directory> --preview .work/totk-port/stage-changes.png
+```
+
+For reproducible bugs, the existing F9 attachment diagnostics, `LARECOMP_DUMP_TARGET` (full-resolution color/depth/stencil),
+or `LARECOMP_SKIP_FSHASH`/`LARECOMP_SKIP_CS` comparisons can narrow the relevant stage without a full GPU snapshot.
+
+Full replay is an advanced startup option: `LARECOMP_FULL_GPU_CAPTURE=1`. Build the optional layer using
+`bash android/deps/build_renderdoc.sh` before packaging. This mode still writes `.rdc`, can consume several GiB and is clearly labelled in the UI.
+If the library is absent, the buttons use light diagnostics. `LARECOMP_DISABLE_GPU_CAPTURE=1` prevents layer loading.
+RDC replay needs compatible GPU features/memory layout; the same-phone/Turnip replay checker and patches remain available.
+
+After building the APK, run the real-GPU regression inside `dev` with the intended device and installed driver path:
+
+```bash
+ANDROID_SERIAL=<phone-serial> REPLAY_DRIVER=<driver-path-on-phone> bash tools/test_light_capture.sh
+```
+
+It verifies half-float color/depth pixels, safe integer-format rejection, before/changed selection, single capture, stable-frame rejection, cancellation/restart and stopping with pending GPU work.
+It fills all three budgets to check graceful omission, successful event saving and preservation of late draw summaries, retrieving only synthetic results.
+`tools/test_gpu_capture.c` and `tools/test_gpu_capture_replay.cpp` remain for full-mode regression.
+
+Real-game validation on OnePlus 13 / Banner Turnip r5 captured the blue spawn-platform black patch at frame 1906:
+the selected single-frame event is 4,837,160 bytes (about 4.6 MiB), with 202 stage images and no image/input omissions.
+Verbose bindings were partly omitted; all 1,537 draw attempt/result summaries remained. This validates capture usability, not a black-patch fix.
 
 Image difference regression:
 

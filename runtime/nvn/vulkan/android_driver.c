@@ -75,11 +75,12 @@ void vk_android_load(void) {
     if (!lib) FATAL("no Vulkan driver: %s\n", dlerror());
     PFN_vkGetInstanceProcAddr gipa = (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr");
     if (!gipa) FATAL("the Vulkan driver has no vkGetInstanceProcAddr\n");
-    // The capture layer must see resources from their creation, before the user
-    // presses either capture button. Keep the selected ICD underneath it.
-    if (!getenv("LARECOMP_DISABLE_GPU_CAPTURE")) {
+    // Full replay is opt-in at startup. Lightweight diagnostics need no layer
+    // and leave normal gameplay free of RenderDoc resource tracking.
+    const char *full_capture=getenv("LARECOMP_FULL_GPU_CAPTURE");
+    if (full_capture && atoi(full_capture) && !getenv("LARECOMP_DISABLE_GPU_CAPTURE")) {
         char library[1024], error[512];
-        snprintf(library, sizeof library, "%s/libVkLayer_GLES_RenderDoc.so", hooks ? hooks : "");
+        snprintf(library, sizeof library, "%s/libtotk_renderdoc.so", hooks ? hooks : "");
         PFN_vkGetInstanceProcAddr capture = rd_layer_load(gipa, library, error, sizeof error);
         if (capture) { gipa = capture; LOG("[capture] RenderDoc memory capture ready\n"); }
         else LOG("[capture] unavailable: %s\n", error);

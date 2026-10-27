@@ -5,7 +5,7 @@
 extern "C" {
 #endif
 typedef struct {
-    bool active, saving, single_pending, available;
+    bool active, saving, single_pending, available, full;
     unsigned saved, skipped;
     float threshold;
     char directory[768], error[160];

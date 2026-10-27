@@ -39,7 +39,25 @@ static uint32_t capture_texel_bytes(VkFormat f, VkImageAspectFlags aspect) {
     }
 }
 
+static void diagnostic_targets(const RtState *rt) {
+    if(!vk_diag_dirty())return;
+    vk_end_pass();
+    for(int slot=0;slot<10;slot++) {
+        NvnTexture *t=slot<8?(slot<rt->ncolor?rt->color[slot]:NULL):rt->depth;
+        TexBackend *b=t?t->backend:NULL;
+        VkImageAspectFlags aspect=slot<8?VK_IMAGE_ASPECT_COLOR_BIT:slot==8?VK_IMAGE_ASPECT_DEPTH_BIT:VK_IMAGE_ASPECT_STENCIL_BIT;
+        if(!b||!(b->aspect&aspect))continue;
+        const NvnTextureView *v=slot<8?&rt->cview[slot]:&rt->dview;
+        bool has=slot<8?rt->has_cview[slot]:rt->has_dview;
+        unsigned level=has&&(v->setmask&1)?v->base_level:0;
+        unsigned layer=has&&(v->setmask&2)?v->min_layer:0;
+        vk_diag_image(b,t->addr,(unsigned)slot,level,layer,aspect);
+    }
+    vk_diag_next_group();
+}
+
 static void capture_targets(const RtState *rt) {
+    diagnostic_targets(rt);
     if (!capture_enabled() || !frame_capture.dirty) return;
     frame_capture.dirty = false;
     vk_end_pass();
@@ -109,6 +127,7 @@ static void capture_targets(const RtState *rt) {
 }
 
 void vk_capture_finish(NvnTexture *presented) {
+    diagnostic_targets(&st.rt);
     if (!capture_enabled() && !frame_capture.buffer) return;
     capture_targets(&st.rt);
     // Include the presented image under the same frame number as its draws.

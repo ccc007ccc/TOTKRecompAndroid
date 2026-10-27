@@ -568,6 +568,7 @@ static void tab_display(void) {
 #ifdef __ANDROID__
     opt_section("Flicker capture");
     FlickerStatus capture = flicker_status();
+    ImGui::TextUnformatted(tr(capture.full ? "Full GPU replay capture" : "Lightweight diagnostics"));
     ImGui::BeginDisabled(capture.saving && !capture.active);
     if (ImGui::Button(tr(capture.active ? "Stop continuous capture" : "Continuous capture"), ImVec2(-1, 56 * scale))) {
         if (capture.active) flicker_stop(); else flicker_start();
@@ -583,7 +584,8 @@ static void tab_display(void) {
     ImGui::Text(tr("Saved events: %u  |  Skipped frames: %u"), capture.saved, capture.skipped);
     if (capture.saving) ImGui::TextUnformatted(tr("Saving GPU capture..."));
     if (capture.error[0]) ImGui::TextWrapped("%s", tr(capture.error));
-    ImGui::TextWrapped("%s", tr("Continuous capture keeps two complete GPU frames in memory and saves changes above the threshold, with preview.png. Capture current frame saves once. Full GPU capture slows the game while active."));
+    ImGui::TextWrapped("%s", tr(capture.full ? "Full replay capture is enabled at startup and can use several GiB." :
+        "Saves stage thumbnails, draw state, shader code and bounded uniform inputs with the before/after previews. Large resources are not copied. Omitted data is listed; this diagnostic bundle cannot replay a full GPU frame."));
     if (capture.directory[0]) ImGui::TextWrapped("%s", capture.directory);
 #endif
     opt_section("Display");
@@ -1384,7 +1386,8 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
             draw->AddRectFilled(ImVec2(left,y),ImVec2(left+bw,y+bh),
                 i==0 && capture_badge.active ? IM_COL32(128,50,36,230) : IM_COL32(22,34,42,220),8*scale);
             ImVec2 text=ImGui::CalcTextSize(labels[i]);
-            draw->AddText(ImVec2(left+(bw-text.x)/2,y+(bh-text.y)/2),IM_COL32(255,238,190,255),labels[i]);
+            float fit=fminf(1.0f,(bw-16*scale)/fmaxf(text.x,1.0f));
+            draw->AddText(ImGui::GetFont(),ImGui::GetFontSize()*fit,ImVec2(left+(bw-text.x*fit)/2,y+(bh-text.y*fit)/2),IM_COL32(255,238,190,255),labels[i]);
         }
     }
     pthread_mutex_unlock(&q_lock);

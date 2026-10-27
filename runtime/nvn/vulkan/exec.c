@@ -13,6 +13,7 @@
 
 #include "../../kernel.h"
 #include "shaders.h"
+#include "diagnostic.h"
 #include "vk.h"
 #include "timing_trace.h"
 #include "../renderer.h"
@@ -22,6 +23,7 @@
 
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 static uint64_t stat_feedback_reads;  // (attachments sampled as they are: only read, resolve_feedback)
+static unsigned diagnostic_range(unsigned kind, uint64_t address, uint64_t size, unsigned limit);
 static uint64_t stat_inplace_breaks;  // (passes ended so a draw reads a target the pass wrote: resolve_feedback)
 static uint64_t stat_upload_bytes;
 static uint64_t stat_cb_bytes[2], stat_cb_n[2], stat_cb_copied;  // (LARECOMP_LOG_CBUF_BYTES: game constant buffers bound,
@@ -1793,6 +1795,7 @@ static void begin_pass(void) {
     vk_begin_rendering(cb, &ri, pass_color, pass_depth != VK_FORMAT_UNDEFINED ? pass_depth : pass_stencil,
                        (VkSampleCountFlagBits)pass_samples);
     if (capture_enabled()) frame_capture.dirty = true;
+    vk_diag_mark_dirty();
     debug_target_begin(ca);
     if (g_debug_frame) pass_dump_b = st.rt.ncolor && st.rt.color[0] ? st.rt.color[0]->backend : NULL;
     pass_dump_layer = ~0u;
@@ -2013,6 +2016,8 @@ static VkPipeline clear_pipeline(int index, int kind, uint32_t mask, bool depth,
 
 static void clear(int index, int kind, const void *color, uint32_t mask, bool depth, float dval, bool stencil, uint32_t sval,
                   uint32_t smask) {
+    vk_diag_log("clear group=%u slot=%d mask=%x depth=%d:%g stencil=%d:%u/%x\n",vk_diag_group(),index,mask,depth,dval,stencil,sval,smask);
+    if(vk_diag_active()&&color){uint32_t c[4];memcpy(c,color,sizeof c);vk_diag_log(" clear_color kind=%d bits=%08x,%08x,%08x,%08x\n",kind,c[0],c[1],c[2],c[3]);}
     begin_pass();
     VkCommandBuffer cb = vk_cmd();
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
@@ -4802,6 +4807,8 @@ static CsProg *compute_program(NvnProgram *np) {
 }
 
 static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
+    if(vk_diag_active())vk_diag_log("dispatch group=%u groups=%u,%u,%u shader=%llx\n",vk_diag_group(),gx,gy,gz,
+        st.program?(unsigned long long)st.program->stages[5].code_addr:0ull);
     snap_reason = "compute"; snapshots_invalidate(NULL);
     if (!st.program || !gx || !gy || !gz) return;
     {   extern uint64_t nvn_watch_texaddr(void);
@@ -4813,7 +4820,21 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
                     (unsigned long long)st.sbuf[5][i].size);
     }
     CsProg *cp = compute_program(st.program);
-    if (!cp || atomic_load(&cp->p.state) != 1) { stat_skipped++; return; }
+    if (!cp || atomic_load(&cp->p.state) != 1) {
+        vk_diag_log("skip compute_state=%d\n",cp?atomic_load(&cp->p.state):-1);
+        stat_skipped++; return;
+    }
+    if(vk_diag_active()) {
+        NvnShaderStage *s=&st.program->stages[5];
+        unsigned code=diagnostic_range(6,s->code_addr,s->const_offset?s->const_offset:65536,128<<10);
+        vk_diag_log("compute code_blob=%u entry=%u cbuf_mask=%x\n",code,s->entry_offset,cp->si->cbuf_mask);
+        for(int k=0;k<15;k++)if(cp->si->cbuf_mask&(1u<<(k+3))){
+            Range b=st.ubuf[5][k];uint64_t used=b.size;
+            if(!(cp->si->cbuf_dynamic&(1u<<(k+3)))&&cp->si->cbuf_size[k+3]&&used>cp->si->cbuf_size[k+3])used=cp->si->cbuf_size[k+3];
+            unsigned blob=diagnostic_range(15,b.addr,used,4096);
+            vk_diag_log(" cbuf stage=5 bank=%d address=%llx bytes=%llu blob=%u source=cpu_mirror\n",k+3,(unsigned long long)b.addr,(unsigned long long)b.size,blob);
+        }
+    }
     {   // LARECOMP_SKIP_CS=<code address hex>[,...] (debug): skip those compute shaders' dispatches, to see what they do;
         // "store": every one that stores to global memory
         static uint64_t skip[16];
@@ -4873,6 +4894,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
 
 // ================================================================== draws
 static void debug_draw(Prog *pr, CmdRec *r, bool indexed);
+static void diagnostic_draw(Prog *pr, CmdRec *r, bool indexed);
 
 // Quads / fans / polygons as a 32-bit triangle index list.
 static uint32_t *expand_indices(uint32_t mode, uint32_t count, const void *indices, int itype, uint32_t first, uint32_t *out_count) {
@@ -4907,7 +4929,12 @@ static bool topology(uint32_t mode, VkPrimitiveTopology *t, uint8_t *cls) {
 static void draw_(CmdRec *r, bool indexed);
 static void draw(CmdRec *r, bool indexed) {
     PROF_T0();
+    uint64_t before=stat_draws;
+    if(vk_diag_active())vk_diag_log("attempt group=%u indexed=%d count=%llu vs=%llx fs=%llx\n",vk_diag_group(),indexed,
+        (unsigned long long)r->x[2],st.program?(unsigned long long)st.program->stages[0].code_addr:0ull,
+        st.program?(unsigned long long)st.program->stages[1].code_addr:0ull);
     draw_(r, indexed);
+    if(vk_diag_active())vk_diag_log("result group=%u emitted=%d\n",vk_diag_group(),stat_draws!=before);
     PROF_ADD(prof_draw);
 }
 static uint64_t prof_tp_;
@@ -4948,7 +4975,10 @@ static void draw_(CmdRec *r, bool indexed) {
         keep = kkeep;
     }
     if (pr && keep) wait_built(&pr->state);
-    if (!pr || atomic_load(&pr->state) != 1) { stat_skipped++; return; }
+    if (!pr || atomic_load(&pr->state) != 1) {
+        vk_diag_log("skip shader_state=%d\n",pr?atomic_load(&pr->state):-1);
+        stat_skipped++; return;
+    }
     {   // fragment-shader hash: interior backdrop detection (widescreen), skip lists, item twinkle (renderer.m)
         static uint64_t last_fs, last_hash;
         uint64_t fs = st.program->stages[1].code_addr;
@@ -5350,6 +5380,7 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     if (keep) wait_built(&pp->state);
     if (atomic_load(&pp->state) != 1) {
+        vk_diag_log("skip pipeline_state=%d\n",atomic_load(&pp->state));
         if (g_debug_frame) LOG("[draw]   skipped: pipeline %s\n", atomic_load(&pp->state) ? "failed" : "still building");
         stat_skipped++;
         return;
@@ -5613,6 +5644,7 @@ static void draw_(CmdRec *r, bool indexed) {
 
     if (prof) prof_vtx += SDL_GetTicksNS() - prof_t2_;
     // ---- draw
+    if(vk_diag_active())diagnostic_draw(pr,r,indexed);
     if (!use_index) vkCmdDraw(cb, count, inst, first, base_inst);
     else vkCmdDrawIndexed(cb, icount, inst, 0, base_vertex, base_inst);
     pass_written |= draw_writes(pr);
@@ -5685,6 +5717,56 @@ static void debug_vertex_inputs(Prog *pr) {
 }
 
 #include "fragment_debug.h"
+
+static unsigned diagnostic_range(unsigned kind, uint64_t address, uint64_t size, unsigned limit) {
+    uint64_t count=size<limit?size:limit;
+    if(!address||!count||address<GUEST_LO||address>GUEST_HI||count>GUEST_HI-address)return 0;
+    return vk_diag_blob(kind,address,(const void *)(uintptr_t)address,size,limit);
+}
+
+static void diagnostic_draw(Prog *pr, CmdRec *r, bool indexed) {
+    vk_diag_log("draw group=%u fs_hash=%016llx indexed=%d count=%llu viewport=%g,%g,%g,%g depth_range=%g,%g scissor=%d,%d,%u,%u depth=%u,%u,%u stencil=%u,%u/%u mask=%x polygon=%u,%u,%u,%u bias=%g,%g,%g\n",
+        vk_diag_group(),(unsigned long long)g_cur_fs_hash,indexed,(unsigned long long)r->x[2],
+        ss.vp.x,ss.vp.y,ss.vp.width,ss.vp.height,ss.vp.minDepth,ss.vp.maxDepth,ss.sc.offset.x,ss.sc.offset.y,ss.sc.extent.width,ss.sc.extent.height,
+        st.ds[0],st.ds[1],st.ds[2],st.ds[3],st.stencil_ref[0],st.stencil_ref[1],st.channel_mask,
+        st.poly[0],st.poly[1],st.poly[2],st.poly[3],st.poly_offset[0],st.poly_offset[1],st.poly_offset[2]);
+    for(int stage=0;stage<2;stage++) {
+        ShaderInfo *si=stage?pr->fi:pr->vi;
+        NvnShaderStage *shader=&st.program->stages[stage];
+        unsigned code=diagnostic_range(1+stage,pr->code[stage],pr->cmax[stage],128<<10);
+        unsigned key=vk_diag_blob(40+stage,0,stage?(const void*)&pr->fkey:(const void*)&pr->vkey,sizeof(ShaderKey),sizeof(ShaderKey));
+        vk_diag_log("shader stage=%d address=%llx code_blob=%u key_blob=%u entry=%u const_offset=%u const_size=%u cbuf_mask=%x depth_write=%d discard=%d\n",stage,
+            (unsigned long long)pr->code[stage],code,key,shader->entry_offset,shader->const_offset,shader->const_size,si->cbuf_mask,si->writes_depth,si->uses_discard);
+        if(si->cbuf_mask&2) {
+            unsigned blob=diagnostic_range(10+stage,pr->code[stage]+shader->const_offset,shader->const_size,4096);
+            vk_diag_log(" cbuf stage=%d bank=1 blob=%u source=compiler_constant\n",stage,blob);
+        }
+        for(int k=0;k<15;k++)if(si->cbuf_mask&(1u<<(k+3))) {
+            Range b=st.ubuf[stage][k];uint64_t used=b.size;
+            if(!(si->cbuf_dynamic&(1u<<(k+3)))&&si->cbuf_size[k+3]&&used>si->cbuf_size[k+3])used=si->cbuf_size[k+3];
+            unsigned blob=diagnostic_range(10+stage,b.addr,used,4096);
+            vk_diag_log(" cbuf stage=%d bank=%d address=%llx bytes=%llu declared=%u blob=%u source=cpu_mirror\n",
+                stage,k+3,(unsigned long long)b.addr,(unsigned long long)b.size,si->cbuf_size[k+3],blob);
+        }
+        for(int k=0;k<si->ntex&&k<64;k++) {
+            NvnTexture *t=shader_texture_object(stage,&si->tex[k]);TexBackend *b=t?t->backend:NULL;
+            uint64_t handle=shader_texture_handle(stage,&si->tex[k]);
+            vk_diag_log(" texture stage=%d binding=%d handle=%llx address=%llx nvn_format=%u size=%u,%u levels=%u gpu_owned=%d uploaded=%d\n",
+                stage,k,(unsigned long long)handle,t?(unsigned long long)t->addr:0ull,t?t->format:0,t?t->width:0,t?t->height:0,b?b->levels:0,b?b->gpu_owned:0,b?b->uploaded:0);
+            unsigned sampler=(handle>>20)&0xfff;
+            if(st.spool&&sampler<(unsigned)st.spool->count) {
+                const NvnSamplerDesc *sd=&((const NvnSamplerDesc*)st.spool->entries)[sampler];
+                vk_diag_log(" sampler stage=%d binding=%d min=%u mag=%u wrap=%u,%u,%u lod=%g,%g bias=%g compare=%u,%u\n",
+                    stage,k,sd->min_filter,sd->mag_filter,sd->wrap[0],sd->wrap[1],sd->wrap[2],sd->lod_min,sd->lod_max,sd->lod_bias,sd->compare_mode,sd->compare_func);
+            }
+        }
+    }
+    for(int k=0;k<st.nstream&&k<16;k++)vk_diag_log(" vertex stream=%d address=%llx bytes=%llu stride=%u divisor=%u\n",
+        k,(unsigned long long)st.vbuf[k].addr,(unsigned long long)st.vbuf[k].size,st.stream[k][0],st.stream[k][1]);
+    for(int k=0;k<st.nattrib&&k<16;k++)vk_diag_log(" attribute slot=%d state=%08x\n",k,st.attrib[k]);
+    if(indexed)vk_diag_log(" indices address=%llx type=%llu base_vertex=%lld base_instance=%llu\n",
+        (unsigned long long)r->x[3],(unsigned long long)r->x[1],(long long)(int32_t)r->x[4],(unsigned long long)r->x[5]);
+}
 
 static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
     debug_vertex_inputs(pr);
@@ -6692,6 +6774,7 @@ static void exec_list(uint64_t handle, int depth) {
             if (!t) break;
             snap_reason = "clear-texture"; snapshots_invalidate(NULL);
             alias_before_write(t, 0, "clear");
+            diagnostic_targets(&st.rt);
             RtState saved = st.rt;
             int32_t sc[4];
             memcpy(sc, st.scissor[0], sizeof sc);
@@ -6706,6 +6789,7 @@ static void exec_list(uint64_t handle, int depth) {
             else { st.scissor[0][0] = st.scissor[0][1] = 0; st.scissor[0][2] = st.scissor[0][3] = 16384; }
             clear(0, (int)r->x[6], ct->color, (uint32_t)r->x[4] ? (uint32_t)r->x[4] : 0xF, false, 0, false, 0, 0);
             vk_end_pass();
+            diagnostic_targets(&st.rt);
             st.rt = saved;
             memcpy(st.scissor[0], sc, sizeof sc);
             st.rt_dirty = true;
@@ -6748,6 +6832,7 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_DRAW_ELEMENTS:
             if (st.render_disabled) {
                 if (g_debug_frame) LOG("[render-condition] skipped draw\n");
+                vk_diag_log("skip group=%u reason=render_condition\n",vk_diag_group());
                 break;
             }
             draw(r, r->op == CMD_DRAW_ELEMENTS); split_long_pass(); break;

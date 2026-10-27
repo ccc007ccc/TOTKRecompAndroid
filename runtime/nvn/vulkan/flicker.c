@@ -1,9 +1,10 @@
-// Opt-in, on-device GPU capture. Two slots retain complete RDC files in memfd
-// and matching previews. Only selected events (or a manual frame) reach storage.
+// Opt-in, bounded on-device diagnostics. Complete RDC capture is an explicit
+// startup option; the normal buttons keep lightweight before/changed snapshots.
 #include "vk.h"
 #include "flicker.h"
 #include "flicker_detect.h"
 #include "renderdoc_bridge.h"
+#include "diagnostic.h"
 #include "../../platform.h"
 #include "../../paths.h"
 #include <SDL3/SDL.h>
@@ -28,6 +29,7 @@ typedef struct {
     int state;
     int rdc; // -1 or an owned anonymous file descriptor
     uint64_t rdc_bytes;
+    VkDiagnostic *diagnostic;
 } FlickerFrame;
 static struct {
     FlickerStatus status;
@@ -52,6 +54,20 @@ static struct {
 } fc = {.status.threshold = 0.08f, .previous = -1, .capturing = -1,
         .frames = {{.rdc=-1}, {.rdc=-1}}};
 
+static void cancel_recording(void) {
+    if(fc.capturing<0)return;
+    if(fc.status.full)rd_capture_discard(g_vk.inst);
+    else {
+        VkDiagnostic *d=fc.frames[fc.capturing].diagnostic;
+        uint64_t seq=vk_diag_pending_seq(d);
+        if(seq>vk_completed_seq()){
+            extern void renderer_submit(void);
+            renderer_submit();vk_wait_seq(seq);
+        }
+        vk_diag_end(d);
+    }
+}
+
 static void free_frame(int i) {
     if (fc.frames[i].rdc >= 0) close(fc.frames[i].rdc);
     fc.frames[i].rdc = -1; fc.frames[i].rdc_bytes = 0; fc.frames[i].state = FREE;
@@ -62,13 +78,14 @@ static void report(void) {
     char path[1024]; snprintf(path, sizeof path, "%s/status.txt", fc.status.directory);
     FILE *f = fopen(path, "w");
     if (!f) return;
-    fprintf(f, "active=%d\nsaved_events=%u\nskipped_frames=%u\nthreshold=%.3f\nbytes=%llu\nerror=%s\n"
-               "每个 event 目录：01-before.rdc/png（变化前）、02-after.rdc/png（超过阈值的变化帧）。\n"
-               "手动单帧保存 frame.rdc、frame.png 和 preview.png；RDC 可用 RenderDoc 1.45 或更新版本回放。\n"
+    fprintf(f, "active=%d\nsaved_events=%u\nskipped_frames=%u\nthreshold=%.3f\nbytes=%llu\nerror=%s\nmode=%s\n"
+               "每个 event 目录：01-before（变化前）、02-after（超过阈值的变化帧），并附同名 PNG。\n"
+               "默认轻量模式保存阶段缩略颜色/深度、绘制状态、着色器原码与有界常量CPU镜像，不能回放整帧。\n"
+               "手动单帧保存 frame、frame.png 和 preview.png。完整模式才保存 .rdc。\n"
                "preview.png 从左到右对应变化前和变化后。event.json 记录帧号、时间和阈值。\n"
                "候选也可能是转场或快速转镜头；变化后是发生变化的帧，不表示已经恢复原画面。\n",
             fc.status.active, fc.status.saved, fc.status.skipped, fc.status.threshold,
-            (unsigned long long)fc.bytes, fc.status.error);
+            (unsigned long long)fc.bytes, fc.status.error, fc.status.full ? "renderdoc-rdc" : "light-diagnostic-v1");
     fclose(f);
 }
 
@@ -116,18 +133,21 @@ static void *save_event(void *unused) {
     const int slots[] = {fc.job.before, fc.job.after};
     const char *names[] = {"01-before.png", "02-after.png"};
     const char *captures[] = {"01-before.rdc", "02-after.rdc"};
+    const char *diagnostics[] = {"01-before", "02-after"};
     unsigned count = fc.job.count;
     const unsigned pw = 320, ph = fc.h * pw / fc.w, height = ph + 8;
     uint8_t *preview = calloc(pw * count * height, 4);
     uint64_t bytes = 0;
     uint64_t required = 32ull << 20;
-    for (unsigned i=0; i<count; i++) required += fc.frames[slots[i]].rdc_bytes;
+    for (unsigned i=0; i<count; i++) required += fc.status.full ? fc.frames[slots[i]].rdc_bytes : vk_diag_raw_bytes(fc.frames[slots[i]].diagnostic);
     struct statvfs space;
     if (!statvfs(fc.status.directory, &space) && (uint64_t)space.f_bavail * space.f_frsize < required) ok = false;
     for (unsigned i = 0; i < count && ok; i++) {
         uint8_t *pixels = fc.frames[slots[i]].pixels;
-        snprintf(path, sizeof path, "%s/%s", dir, count == 1 ? "frame.rdc" : captures[i]);
-        ok = save_rdc(path, &fc.frames[slots[i]], &bytes);
+        snprintf(path, sizeof path, "%s/%s", dir, fc.status.full ? (count == 1 ? "frame.rdc" : captures[i]) : (count == 1 ? "frame" : diagnostics[i]));
+        uint64_t capture_bytes=0;
+        ok = fc.status.full ? save_rdc(path, &fc.frames[slots[i]], &capture_bytes) : vk_diag_write(fc.frames[slots[i]].diagnostic,path,&capture_bytes);
+        bytes += capture_bytes; fc.frames[slots[i]].rdc_bytes=capture_bytes;
         snprintf(path, sizeof path, "%s/%s", dir, count == 1 ? "frame.png" : names[i]);
         if (ok) ok = save_png(path, pixels, fc.w, fc.h, &bytes);
         if (preview) for (unsigned y = 0; y < height; y++) for (unsigned x = 0; x < pw; x++) {
@@ -146,12 +166,12 @@ static void *save_event(void *unused) {
     FILE *meta = ok ? fopen(path, "w") : NULL;
     if (!meta) ok = false;
     if (meta) {
-        fprintf(meta, "{\"format\":\"renderdoc-rdc\",\"reason\":\"%s\",\"score\":%.6f,\"threshold\":%.6f,\"width\":%u,\"height\":%u,\"frames\":[",
-                reason, fc.job.strength, fc.job.threshold, fc.w, fc.h);
+        fprintf(meta, "{\"format\":\"%s\",\"reason\":\"%s\",\"score\":%.6f,\"threshold\":%.6f,\"width\":%u,\"height\":%u,\"frames\":[",
+                fc.status.full ? "renderdoc-rdc" : "light-diagnostic-v1", reason, fc.job.strength, fc.job.threshold, fc.w, fc.h);
         for (unsigned i = 0; i < count; i++) {
             FlickerFrame *s = &fc.frames[slots[i]];
-            fprintf(meta, "%s{\"file\":\"%s\",\"capture\":\"%s\",\"rdc_bytes\":%llu,\"frame\":%llu,\"monotonic_ns\":%llu}", i ? "," : "",
-                    count == 1 ? "frame.png" : names[i], count == 1 ? "frame.rdc" : captures[i], (unsigned long long)s->rdc_bytes,
+            fprintf(meta, "%s{\"file\":\"%s\",\"capture\":\"%s\",\"capture_bytes\":%llu,\"frame\":%llu,\"monotonic_ns\":%llu}", i ? "," : "",
+                    count == 1 ? "frame.png" : names[i], fc.status.full ? (count == 1 ? "frame.rdc" : captures[i]) : (count == 1 ? "frame" : diagnostics[i]), (unsigned long long)s->rdc_bytes,
                     (unsigned long long)s->frame, (unsigned long long)s->ns);
         }
         fputs("]}\n", meta); ok = fclose(meta) == 0;
@@ -183,18 +203,19 @@ static void writer_finish(void) {
     } else { snprintf(fc.status.error, sizeof fc.status.error, "Could not save capture"); fc.status.active = false; }
     for (int i = 0; i < 2; i++) free_frame(i);
     fc.previous = -1; // PNG writing may span several game frames; never claim those are consecutive.
-    if (fc.status.saved >= 64 || fc.bytes >= (8ull << 30)) {
+    if (fc.status.saved >= 64 || fc.bytes >= (fc.status.full ? (8ull << 30) : (512ull << 20))) {
         snprintf(fc.status.error, sizeof fc.status.error, "Capture limit reached"); fc.status.active = false;
     }
     report();
 }
 
-FlickerStatus flicker_status(void) { writer_finish(); fc.status.available = rd_capture_available(); return fc.status; }
+FlickerStatus flicker_status(void) { writer_finish(); fc.status.available = g_vk.dev != VK_NULL_HANDLE; fc.status.full = rd_capture_available(); return fc.status; }
 void flicker_set_threshold(float value) { fc.status.threshold = fminf(0.4f, fmaxf(0.02f, value)); }
 
 static void release_gpu(void) {
     for (int i = 0; i < 2; i++) {
         if (fc.frames[i].buffer) vmaDestroyBuffer(g_vk.vma, fc.frames[i].buffer, fc.frames[i].memory);
+        vk_diag_destroy(fc.frames[i].diagnostic);
         free_frame(i);
         fc.frames[i] = (FlickerFrame){.rdc=-1};
     }
@@ -203,7 +224,10 @@ static void release_gpu(void) {
 }
 
 void flicker_reset(void) {
-    if (fc.capturing >= 0) { rd_capture_discard(g_vk.inst); fc.capturing = -1; }
+    if (fc.capturing >= 0) {
+        cancel_recording();
+        fc.capturing = -1;
+    }
     if (fc.writer_live) {
         while (!atomic_load_explicit(&fc.done, memory_order_acquire)) SDL_Delay(1);
         writer_finish();
@@ -215,10 +239,10 @@ void flicker_reset(void) {
 void flicker_start(void) {
     writer_finish();
     if (fc.status.active || fc.writer_live) return;
-    if (!rd_capture_available()) { snprintf(fc.status.error, sizeof fc.status.error, "GPU capture library is unavailable"); return; }
+    if (!g_vk.dev) { snprintf(fc.status.error, sizeof fc.status.error, "GPU capture library is unavailable"); return; }
     if (fc.capturing >= 0) return;
     float threshold = fc.status.threshold;
-    fc.status = (FlickerStatus){.threshold = threshold}; fc.bytes = 0; fc.previous = -1;
+    fc.status = (FlickerStatus){.threshold = threshold, .full = rd_capture_available()}; fc.bytes = 0; fc.previous = -1;
     for (int i = 0; i < 2; i++) free_frame(i);
     char root[768], stamp[64]; time_t now = time(NULL); struct tm tm;
     localtime_r(&now, &tm); strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &tm);
@@ -243,6 +267,7 @@ void flicker_single(void) {
 }
 
 static bool allocate_gpu(TexBackend *source) {
+    if(!source->width || !source->height)return false;
     fc.w = source->width > 960 ? 960 : source->width;
     fc.h = (uint64_t)source->height * fc.w / source->width;
     if (!fc.w || !fc.h || fc.h > 960) return false;
@@ -265,7 +290,9 @@ static bool allocate_gpu(TexBackend *source) {
 }
 
 static void capture_fail(const char *message) {
-    if (fc.capturing >= 0) rd_capture_discard(g_vk.inst);
+    if (fc.capturing >= 0) {
+        cancel_recording();
+    }
     fc.capturing = -1;
     fc.status.active = fc.status.single_pending = false;
     snprintf(fc.status.error, sizeof fc.status.error, "%s", message);
@@ -284,41 +311,48 @@ static void save_selected(int before, int after, unsigned count, float strength)
 }
 
 // Begin only at a complete frame boundary, after the previous present/commands
-// have been submitted. All commands generating the next game image are captured.
+// have been submitted, so every diagnostic belongs to the next game image.
 void flicker_next_frame(bool visible) {
     writer_finish();
     if (fc.capturing >= 0 || fc.writer_live) return;
     if (!visible || (!fc.status.active && !fc.status.single_pending)) {
         for (int i=0;i<2;i++) free_frame(i);
         fc.previous = -1;
-        if (!fc.status.active && !fc.status.single_pending && fc.initialized) release_gpu();
+        if (!fc.status.active && !fc.status.single_pending &&
+            (fc.initialized || fc.frames[0].diagnostic || fc.frames[1].diagnostic)) release_gpu();
         return;
     }
     int index = fc.previous == 0 ? 1 : 0;
     free_frame(index);
     fc.capture_single = fc.status.single_pending;
-    fc.frames[index].rdc = rd_capture_begin(g_vk.inst, fc.status.error, sizeof fc.status.error);
-    if (fc.frames[index].rdc < 0) {
-        fc.status.active=fc.status.single_pending=false; report(); return;
+    if(fc.status.full) {
+        fc.frames[index].rdc = rd_capture_begin(g_vk.inst, fc.status.error, sizeof fc.status.error);
+        if (fc.frames[index].rdc < 0) {
+            fc.status.active=fc.status.single_pending=false; report(); return;
+        }
+    } else {
+        if(!fc.frames[index].diagnostic)fc.frames[index].diagnostic=vk_diag_create();
+        if(!fc.frames[index].diagnostic){capture_fail("Could not allocate capture memory");return;}
+        vk_diag_begin(fc.frames[index].diagnostic);
     }
     fc.capturing = index;
 }
 
-// Complete the same frame whose game image supplies this preview. RenderDoc
-// already synchronises capture; waiting for its readback avoids mismatching RDC
-// resources and an earlier/later asynchronously completed screenshot.
+// Complete the same frame whose game image supplies the preview. One frame-end
+// readback wait keeps phase snapshots, draw state and the preview in sync.
 void vk_flicker_frame(TexBackend *source, uint64_t frame, bool visible) {
     writer_finish();
     if (fc.capturing < 0) { if (fc.status.active) fc.status.skipped++; return; }
     if (!visible || !source || (!fc.status.active && !fc.capture_single)) {
-        rd_capture_discard(g_vk.inst); free_frame(fc.capturing); fc.capturing=-1;
+        cancel_recording();
+        free_frame(fc.capturing); fc.capturing=-1;
         if (fc.previous>=0) free_frame(fc.previous);
         fc.previous=-1; return;
     }
     VkFormatProperties src, dst;
     vkGetPhysicalDeviceFormatProperties(g_vk.phys, source->format, &src);
     vkGetPhysicalDeviceFormatProperties(g_vk.phys, VK_FORMAT_R8G8B8A8_UNORM, &dst);
-    if (!(src.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) ||
+    if (!vk_diag_float_color(source->format) || !(src.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) ||
         !(dst.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT) || source->samples != VK_SAMPLE_COUNT_1_BIT) {
         capture_fail("Capture format is unsupported"); return;
     }
@@ -349,17 +383,19 @@ void vk_flicker_frame(TexBackend *source, uint64_t frame, bool visible) {
     renderer_submit();
     vk_wait_seq(fc.frames[index].seq);
     vmaInvalidateAllocation(g_vk.vma, fc.frames[index].memory, 0, VK_WHOLE_SIZE);
-    bool ok = rd_capture_end(g_vk.inst);
+    bool ok = true;
+    if(fc.status.full)ok=rd_capture_end(g_vk.inst);
+    else vk_diag_end(fc.frames[index].diagnostic);
     fc.capturing=-1;
     struct stat st;
-    if (!ok || fstat(fc.frames[index].rdc, &st) || st.st_size < 100) {
+    if (fc.status.full && (!ok || fstat(fc.frames[index].rdc, &st) || st.st_size < 100)) {
         capture_fail("Could not finish GPU capture"); return;
     }
-    fc.frames[index].rdc_bytes=st.st_size;
+    fc.frames[index].rdc_bytes=fc.status.full?(uint64_t)st.st_size:vk_diag_raw_bytes(fc.frames[index].diagnostic);
     fc.frames[index].state=HELD;
     // Bounded retained captures; RenderDoc's transient resource snapshots are additional.
     uint64_t retained=fc.frames[0].rdc_bytes+fc.frames[1].rdc_bytes;
-    if (retained > (2ull<<30)) { capture_fail("GPU capture memory limit reached"); return; }
+    if (fc.status.full && retained > (2ull<<30)) { capture_fail("GPU capture memory limit reached"); return; }
     if (fc.capture_single) {
         fc.status.single_pending=false;
         if (fc.previous>=0) free_frame(fc.previous);
