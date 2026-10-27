@@ -1460,9 +1460,8 @@ static void wb_queue(NvnTexture *t) {
     wb_next = (wb_next + 1) % WB_SLOTS;
     const FormatInfo *fi = t->layout.fmt;
     LevelLayout l = tegra_level(&t->layout, 0);
-    extern uint64_t nvn_linear_rt_pitch(uint64_t row_bytes);
     *e = (WbEntry){.seq = submit_seq + 1, .addr = t->addr, .wb = l.wb, .hb = l.hb, .bpb = fi->bpb,
-                   .pitch = (t->flags & 0x10) ? t->stride : (t->flags & 0x40) ? nvn_linear_rt_pitch((uint64_t)l.wb * fi->bpb) : 0,
+                   .pitch = nvn_texture_row_stride(t, (uint64_t)l.wb * fi->bpb),
                    .bh = l.block_height_log2, .fmt = t->format, .busy = true};
     pthread_mutex_unlock(&wb_lock);
     VkCommandBuffer cb = vk_cmd();

@@ -39,6 +39,14 @@ typedef struct NvnTexture {
     struct NvnTexture *next, *prev, *hnext;  // (hnext: objects.c's description hash)
 } NvnTexture;
 void nvn_texture_cpu_written(uint64_t addr, uint64_t size);
+uint64_t nvn_linear_rt_pitch(uint64_t row_bytes);
+
+// LINEAR_RENDER_TARGET (0x40) is pitch storage even without LINEAR (0x10).
+// Its explicit stride includes padding; otherwise use the device's RT alignment.
+static inline uint64_t nvn_texture_row_stride(const NvnTexture *t, uint64_t row_bytes) {
+    if (t->flags & 0x40) return t->stride ? t->stride : nvn_linear_rt_pitch(row_bytes);
+    return (t->flags & 0x10) ? t->stride : 0;
+}
 
 typedef struct {
     uint32_t min_filter, mag_filter, wrap[3], compare_mode, compare_func, reduction;

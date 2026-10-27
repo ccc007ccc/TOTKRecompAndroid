@@ -18,6 +18,7 @@ The validated device is a OnePlus 13 (PJZ110, Adreno 830); this branch has no ac
 | Error dialog | Device JNI checks verify copying without dismissal and OK without terminating the app; actual native signal crashes still terminate |
 | Character and weapon sounds | Splitters, auxiliary returns, 3D reverb, limiter and initial wave-buffer slot handling implemented; the user confirmed audio recovery in run44 |
 | Water reflections and lighting | Explicit fragment depth preserves arithmetic precision, restoring water material selection; the user confirmed the fix in run46 |
+| Vertical strips on sky islands | Corrected row strides for linear height/mask textures; the user confirmed the fix in run48 |
 | Shader control flow | Qualcomm proprietary-driver switch fallthrough failure reproduced and fixed; remaining image faults persisted |
 | Synchronization | Nonzero NVN barriers now issue GPU dependencies; independent synchronization checks passed |
 | Service initialization | Physical mapping, audio workspace, cache and temporary-directory startup blockers cleared |
@@ -37,7 +38,7 @@ The user confirmed that this device build fixed the reported halo clipping and s
 
 ## Remaining validation
 
-- The new issue is scattered vertical strips on the first sky island after the opening jump, visible near water and elsewhere on land. The affected object and cause remain under investigation.
+- The new issue is blocky cloud coverage: the user reports smaller, denser gaps at 2× resolution, changing as the clouds move. Investigation is ongoing.
 - Broader scenes, ordinary shadows, transparency and long sessions still need coverage. Current scene acceptance does not cover every game area or device.
 - Some views previously encountered an unimplemented vertex `DMUL`; this change does not address it, and its relation to the fixed faults was not established.
 - Other audio scenes, effect types not yet observed, input flows, save transactions/crash recovery and performance remain unverified.
@@ -52,7 +53,7 @@ The application development version is `0.1.0-totk-dev`, distinct from game vers
 Upstream `ef7a306` / `v0.1.11-beta` has been merged and the APK builds. Its language, font, touch and lifecycle changes,
 and its new policy for game GPU timestamps, still need device acceptance in this branch.
 
-The latest accepted device build is run46 with Banner Turnip, including conditional rendering, texture reads, compressed tails, error dialogs, audio and water-reflection fixes.
+The latest accepted device build is run48 with Banner Turnip, including conditional rendering, texture reads, compressed tails, error dialogs, audio, water reflections and the sky-island strip fix.
 The focused comparison uses `LARECOMP_GAME_DYNRES=1` to preserve the earlier game-resolution behavior;
 it is not a separate acceptance test of upstream's new default counter policy.
 The game library was built with `GAMELIB_FAST_COMPILE=ON`, all functions at `-O0`.

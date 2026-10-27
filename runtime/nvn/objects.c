@@ -955,7 +955,8 @@ static void texture_transfer(Cpu *c, uint64_t row_stride, uint64_t image_stride,
     const int32_t *r = AP(2);
     uint32_t level = v && (v->setmask & 1) ? v->base_level : 0;
     uint32_t layer = v && (v->setmask & 2) ? v->min_layer : 0;
-    uint64_t stride = (t->flags & 0x10) ? t->stride : 0;
+    const FormatInfo *fmt = t->layout.fmt;
+    uint64_t stride = nvn_texture_row_stride(t, ((uint64_t)t->width + fmt->bw - 1) / fmt->bw * fmt->bpb);
     int32_t array_region[6];
     if (t->target == 3 && r) {  // 1D arrays address layers through y/height, not z/depth.
         if (r[2] || r[5] != 1 || t->layout.fmt->bh != 1) FATAL("invalid 1D-array %sTexels region\n", write ? "Write" : "Read");

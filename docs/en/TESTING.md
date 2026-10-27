@@ -86,7 +86,9 @@ clang -O2 -ffunction-sections -fdata-sections tools/test_render_condition.c \
 .work/totk-port/scratch/test-render-condition
 ```
 
-The CPU texture test covers independent GOB bytes, mips, arrays, 3D, strides, compressed atlas tails and rejected bounds:
+The CPU texture test covers independent GOB bytes, mips, arrays, 3D, strides, compressed atlas tails and rejected bounds.
+It also covers `0x40` linear targets in the 260×260 / 68×68 height and mask formats, explicit row strides,
+default alignment, final-row updates and padding preservation:
 
 ```bash
 clang -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Wno-format \

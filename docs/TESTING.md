@@ -79,7 +79,8 @@ clang -O2 -ffunction-sections -fdata-sections tools/test_render_condition.c \
 .work/totk-port/scratch/test-render-condition
 ```
 
-纹理 CPU 读写测试覆盖独立 GOB 字节、mip／数组／3D／步长、压缩尾块图集和越界拒绝：
+纹理 CPU 读写测试覆盖独立 GOB 字节、mip／数组／3D／步长、压缩尾块图集和越界拒绝，
+以及 `0x40` 线性目标的 260×260 / 68×68 高度与遮罩格式、显式行距、默认对齐、尾行更新及 padding 保持：
 
 ```bash
 clang -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Wno-format \

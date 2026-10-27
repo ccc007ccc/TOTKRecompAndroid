@@ -96,6 +96,42 @@ static void volume_and_linear(void) {
     assert(!memcmp(out,expected,sizeof out));
 }
 
+static void linear_render_targets(void) {
+    // Independently fill declared rows, including the non-power-of-two height
+    // and mask shapes used by TOTK. Padding must never become texels.
+    const unsigned widths[] = {260,68,68,260};
+    const unsigned formats[] = {0x6,0x2a,0x25,0x25};
+    const unsigned pitches[] = {640,640,384,1152};
+    for (unsigned shape=0;shape<4;shape++) for (unsigned explicit_stride=0;explicit_stride<2;explicit_stride++) {
+        unsigned w=widths[shape], h=w, bpp=nvn_format_info(formats[shape])->bpb;
+        unsigned row=w*bpp, pitch=pitches[shape]+(explicit_stride?128:0);
+        NvnTexture t={.width=w,.height=h,.format=formats[shape],.target=1,.flags=0x40,
+            .stride=explicit_stride?pitch:0,
+            .layout={.width=w,.height=h,.depth=1,.layers=1,.levels=1,.fmt=nvn_format_info(formats[shape])}};
+        uint8_t *mem=malloc((size_t)pitch*h), *expected=malloc((size_t)row*h), *got=malloc((size_t)row*h);
+        assert(mem && expected && got);
+        memset(mem,0xa5,(size_t)pitch*h);
+        for (unsigned y=0;y<h;y++) for (unsigned x=0;x<row;x++)
+            mem[(size_t)y*pitch+x]=expected[(size_t)y*row+x]=(uint8_t)(y*37+x*11+x/7);
+        t.addr=(uintptr_t)mem;
+        assert(nvn_texture_row_stride(&t,row)==pitch);
+        int32_t full[6]={0,0,0,(int32_t)w,(int32_t)h,1};
+        read_texels(&t,NULL,full,got,0,0,false);
+        assert(!memcmp(got,expected,(size_t)row*h));
+        // An update near the last row must preserve both padding and neighbors.
+        uint8_t update[48]; memset(update,0xe7,sizeof update);
+        int32_t rect[6]={(int32_t)w-3,(int32_t)h-2,0,3,2,1};
+        uint64_t object[4]={(uintptr_t)&t}; Cpu c={0};
+        c.x[0]=(uintptr_t)object;c.x[2]=(uintptr_t)rect;c.x[3]=(uintptr_t)update;
+        unsigned before=writes;hle_nvnTextureWriteTexels(&c);assert(writes==before+1);
+        for (unsigned y=h-2;y<h;y++) memset(expected+(size_t)y*row+(w-3)*bpp,0xe7,3*bpp);
+        read_texels(&t,NULL,full,got,0,0,false);
+        assert(!memcmp(got,expected,(size_t)row*h));
+        for (unsigned y=0;y<h;y++) for (unsigned x=row;x<pitch;x++) assert(mem[(size_t)y*pitch+x]==0xa5);
+        free(mem);free(expected);free(got);
+    }
+}
+
 static void array_1d(void) {
     NvnTexture t={.width=8,.height=1,.format=1,.target=3,
         .layout={.width=8,.height=1,.depth=1,.layers=4,.levels=1,.fmt=nvn_format_info(1)}};
@@ -155,6 +191,7 @@ int main(void) {
     volume_and_linear();
     array_1d();
     assert(writes==0); // Reading must not publish CPU writes or invalidate uploads.
+    linear_render_targets();
     partial_block_atlas();
     puts("texture read tests passed: NVN ABI, BC4 blocks, mips, arrays, 3D GOBs, linear storage, strides and bounds");
 }

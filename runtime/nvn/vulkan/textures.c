@@ -812,19 +812,18 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     uint32_t layers = t->layout.layers ? t->layout.layers : 1;
     if (layers > b->layers && b->depth == 1) layers = b->layers;
     uint64_t layer_size = tegra_layer_size(&t->layout);
-    // Linear textures: flag 0x10, rows t->stride apart; flag 0x40 (BOTW's terrain height tiles, 256x256 R16 filled by the
-    // CPU) too, rows packed at their width - their stride field doesn't fit their storage. Read as block-linear, those
-    // tiles gave the terrain's heights in stripes: walls stretched into vertical "curtains", spikes in the shrine.
+    // Both linear flags use pitch storage. TOTK's 260x260 R16 height maps declare 640-byte rows, not the 520 bytes
+    // occupied by texels. Packing the rows reads their padding as heights and shifts every subsequent row.
     bool linear = (t->flags & 0x50) != 0;
-#define LIN_STRIDE(row_bytes) ((t->flags & 0x10) ? t->stride : (uint64_t)(row_bytes))
     uint32_t levels = t->layout.levels < b->levels ? t->layout.levels : b->levels;
     for (uint32_t layer = 0; layer < layers; layer++) {
         for (uint32_t lv = 0; lv < levels; lv++) {
             LevelLayout l = tegra_level(&t->layout, lv);
+            uint64_t pitch = nvn_texture_row_stride(t, (uint64_t)l.wb * fi->bpb);
             if (b->astc_bw) {  // blocks -> linear block rows -> RGBA8 texels
                 const uint8_t *src = (const uint8_t *)(uintptr_t)t->addr + layer * layer_size + l.offset;
                 uint8_t *blocks = texture_scratch((uint64_t)l.wb * l.hb * 16);
-                if (linear) for (uint32_t y = 0; y < l.hb; y++) memcpy(blocks + (uint64_t)y * l.wb * 16, src + (uint64_t)y * LIN_STRIDE(l.wb * 16), l.wb * 16);
+                if (linear) for (uint32_t y = 0; y < l.hb; y++) memcpy(blocks + (uint64_t)y * l.wb * 16, src + (uint64_t)y * pitch, l.wb * 16);
                 else tegra_deswizzle(src, blocks, l.wb, l.hb, 1, 16, l.block_height_log2, l.block_depth_log2);
                 if (b->tp > 0 && layer == 0) texpatch_apply(b->tp - 1, lv, blocks, l.w, l.h, l.wb * 16);
                 VkSpan s = vk_transient((uint64_t)l.w * l.h * 4, 16);
@@ -845,7 +844,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                 bc_target(b->bc_vf, &bpp);
                 const uint8_t *src = (const uint8_t *)(uintptr_t)t->addr + layer * layer_size + l.offset;
                 uint8_t *blocks = texture_scratch((uint64_t)l.wb * l.hb * bsize);
-                if (linear) for (uint32_t y = 0; y < l.hb; y++) memcpy(blocks + (uint64_t)y * l.wb * bsize, src + (uint64_t)y * LIN_STRIDE(l.wb * bsize), l.wb * bsize);
+                if (linear) for (uint32_t y = 0; y < l.hb; y++) memcpy(blocks + (uint64_t)y * l.wb * bsize, src + (uint64_t)y * pitch, l.wb * bsize);
                 else tegra_deswizzle(src, blocks, l.wb, l.hb, 1, bsize, l.block_height_log2, l.block_depth_log2);
                 if (b->tp > 0 && layer == 0) texpatch_apply(b->tp - 1, lv, blocks, l.w, l.h, l.wb * bsize);
                 VkSpan s = vk_transient((uint64_t)l.wb * 4 * l.hb * 4 * bpp, 16);
@@ -869,7 +868,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
             uint8_t *lin = expand ? texture_scratch(sz) : s.ptr;
             const uint8_t *src = (const uint8_t *)(uintptr_t)t->addr + layer * layer_size + l.offset;
             if (linear) {
-                for (uint32_t y = 0; y < l.hb; y++) memcpy(lin + (uint64_t)y * row, src + (uint64_t)y * LIN_STRIDE(row), row);
+                for (uint32_t y = 0; y < l.hb; y++) memcpy(lin + (uint64_t)y * row, src + (uint64_t)y * pitch, row);
             } else {
                 tegra_deswizzle(src, lin, l.wb, l.hb, l.d, fi->bpb, l.block_height_log2, l.block_depth_log2);
             }
