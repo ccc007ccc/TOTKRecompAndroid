@@ -60,6 +60,27 @@ Readback changes timing. Deferred capture reduces per-pass CPU waits but is not 
 Shader instrumentation can also alter driver optimization. A successful independent replay verifies those inputs, not every live binding or synchronization dependency.
 Keep private GPU inputs, generated shader sources and replay data out of Git.
 
+The TMML regression executes the production emitter's output for bound/bindless textures, result masks,
+signed fractional fixed-point values and sampler clamps. Maxwell returns computed LOD followed by
+accessed mip level; GLSL returns them in the opposite order:
+
+```bash
+mkdir -p .work/totk-port/shader-tmml-tests
+cc -O1 -g -fsanitize=address,undefined tools/test_shader_tmml.c -lm \
+  -o .work/totk-port/shader-tmml-tests/generate
+.work/totk-port/shader-tmml-tests/generate .work/totk-port/shader-tmml-tests
+c++ -fsanitize=undefined .work/totk-port/shader-tmml-tests/tmml.cpp \
+  -o .work/totk-port/shader-tmml-tests/check
+.work/totk-port/shader-tmml-tests/check
+for s in .work/totk-port/shader-tmml-tests/*.frag; do
+  glslangValidator --target-env vulkan1.3 -V "$s" -o "$s.spv"
+  spirv-val --target-env vulkan1.3 "$s.spv"
+done
+```
+
+This also generates six synthetic fragment shaders for GPU sampler validation. Passing host assertions
+does not establish in-game visual acceptance.
+
 The depth-precision regression uses the production shaderc path to check vertex and explicit fragment depth,
 ordinary color fragments, caching and repeated processing:
 

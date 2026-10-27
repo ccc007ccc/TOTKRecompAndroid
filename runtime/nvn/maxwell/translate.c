@@ -1057,8 +1057,9 @@ static int bindless_slot(Ctx *c, uint32_t bank, uint32_t off, int type, bool arr
     return s;
 }
 
-// TMML (Texture MipMap Level, 0xdf58; TMML.B 0xdf60, the handle in register b): .x the mip level accessed, .y the
-// computed LOD (textureQueryLod), as 24.8 fixed point (yuzu: texture_mipmap_level.cpp).
+// TMML (Texture MipMap Level, 0xdf58; TMML.B 0xdf60, the handle in register b): .x the computed LOD, .y the
+// mip level accessed, as signed 24.8 fixed point. Maxwell's component order is the inverse of textureQueryLod.
+// In particular, .y must not receive a negative unclamped LOD: shaders may convert that result as unsigned.
 // TMML.B (BOTW: light rays, particles, terrain): the handle comes from a constant buffer (handle_cbuf) - from bank 2,
 // NVN's bound texture table, it is a bound texture like a TEX index's (read there, the runtime's bank 2 has no
 // handles: a null texture, LOD 0, the effects too sharp and too bright); else the texture of the
@@ -1128,7 +1129,7 @@ static void emit_tmml(Ctx *c, uint64_t w, bool bindless, uint32_t pc) {
     else snprintf(coords, sizeof coords, "float3(%s, %s, %s)", cs[0], cs[1], cs[2]);
     if (c->glsl && c->stage == STAGE_FRAGMENT) {
         sp(&c->body, "    { float2 lod = textureQueryLod(t%d, %s);\n"
-                     "      uint4 q = uint4(uint(int(lod.x * 256.0f)), uint(int(lod.y * 256.0f)), 0u, 0u);\n",
+                     "      uint4 q = uint4(uint(int(lod.y * 256.0f)), uint(int(lod.x * 256.0f)), 0u, 0u);\n",
            slot, coords);
     } else {
         sp(&c->body, "    { uint4 q = uint4(0u, 0u, 0u, 0u);\n");

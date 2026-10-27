@@ -55,6 +55,25 @@ Android 可通过 `adb -s "$ANDROID_SERIAL" shell input keyevent KEYCODE_F9` 发
 插入着色器诊断也可能改变驱动优化。独立回放通过只证明相同输入下的结果，不能证明游戏中的绑定与同步均正确。
 私有 GPU 数据、生成着色器和回放文件不要提交 Git。
 
+TMML 纹理细节级别查询的回归执行正式翻译器输出，检查绑定／无绑定纹理、返回分量掩码、
+负数与小数定点值以及采样器限制。Maxwell 返回“计算值、实际层级”，GLSL 的顺序相反：
+
+```bash
+mkdir -p .work/totk-port/shader-tmml-tests
+cc -O1 -g -fsanitize=address,undefined tools/test_shader_tmml.c -lm \
+  -o .work/totk-port/shader-tmml-tests/generate
+.work/totk-port/shader-tmml-tests/generate .work/totk-port/shader-tmml-tests
+c++ -fsanitize=undefined .work/totk-port/shader-tmml-tests/tmml.cpp \
+  -o .work/totk-port/shader-tmml-tests/check
+.work/totk-port/shader-tmml-tests/check
+for s in .work/totk-port/shader-tmml-tests/*.frag; do
+  glslangValidator --target-env vulkan1.3 -V "$s" -o "$s.spv"
+  spirv-val --target-env vulkan1.3 "$s.spv"
+done
+```
+
+这同时生成六个合成片元着色器，可用于真实 GPU 采样器验证；主机断言通过不等于游戏画面验收。
+
 深度精度回归通过正式 shaderc 编译路径检查顶点和显式片元深度、普通颜色片元、缓存及重复处理：
 
 ```bash
