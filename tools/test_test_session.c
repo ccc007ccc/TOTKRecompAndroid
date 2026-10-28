@@ -26,7 +26,43 @@ static void wait_status(const char *want){
 }
 static void command(unsigned n,const char *verb){char path[1200];snprintf(path,sizeof path,"%s/command",dir);FILE*f=fopen(path,"w");assert(f);fprintf(f,"%u %s\n",n,verb);fclose(f);char expected[80];snprintf(expected,sizeof expected,"\"request\":%u,",n);wait_status(expected);}
 int main(int argc,char**argv){
- assert(argc==2||argc==3);dir=argv[1];mkdir(dir,0755);setenv("LARECOMP_TEST_SESSION",dir,1);assert(test_session_enabled());
+ assert(argc==2||argc==3);dir=argv[1];mkdir(dir,0755);setenv("LARECOMP_TEST_SESSION",dir,1);
+ bool timed=argc==3&&!strncmp(argv[2],"--timed",7);
+ if(timed)setenv("LARECOMP_TEST_DURATION_SECONDS","1",1);
+ assert(test_session_enabled());
+ if(timed) {
+  assert(test_session_timed()&&test_session_target_fps()==60&&!test_session_should_exit());
+  bool timeout=!strcmp(argv[2],"--timed-timeout"),stall=!strcmp(argv[2],"--timed-stall"),background=!strcmp(argv[2],"--timed-background");
+  pthread_t timed_thread;
+  if(stall) {
+   for(unsigned i=1;i<=90;i++)test_session_frame(i,true,idle);
+   wait_status("\"phase\":\"sampling\"");
+   atomic_fetch_add(&time_offset,1001000000ull);test_session_poll();
+  } else {
+   if(timeout)atomic_store(&scene,false);
+   assert(!pthread_create(&timed_thread,NULL,render,NULL));
+   if(timeout)atomic_fetch_add(&time_offset,121000000000ull);
+   else {wait_status("\"phase\":\"sampling\"");if(background)test_session_backgrounded();}
+  }
+  wait_status("\"phase\":\"ended\"");
+  assert(test_session_should_exit()&&atomic_load(&idles)==0);
+  if(!stall){atomic_store(&stop,true);pthread_join(timed_thread,NULL);}
+  if(timeout){wait_status("Startup exceeded");wait_status("\"ready\":false");}
+  else {
+   char p[1200],text[2048];snprintf(p,sizeof p,"%s/sample-0001.json",dir);FILE*f=fopen(p,"r");assert(f);
+   size_t n=fread(text,1,sizeof text-1,f);fclose(f);text[n]=0;
+   assert(strstr(text,"\"target_fps\":60,")&&strstr(text,"\"mode\":\"timed-benchmark\""));
+   if(stall)assert(strstr(text,"\"frames\":0,")&&strstr(text,"\"fps\":0.000000,"));
+   else if(background)wait_status("Benchmark left the foreground");
+   else {
+    assert(strstr(text,"\"first_frame\":91,"));
+    double elapsed=0;const char *at=strstr(text,"\"elapsed_seconds\":");assert(at);
+    assert(sscanf(at,"\"elapsed_seconds\":%lf",&elapsed)==1&&elapsed>=1.0);
+   }
+  }
+  puts("PASS: timed 60 FPS benchmark starts at readiness, never pauses, persists results, and requests automatic exit");
+  return 0;
+ }
  if(argc==3)atomic_store(&scene,false);
  pthread_t thread;assert(!pthread_create(&thread,NULL,render,NULL));
  if(argc==3) {

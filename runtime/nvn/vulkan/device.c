@@ -1900,9 +1900,15 @@ int ui_run(void) {
     for (;;) {
         if (rt_reboot_requested()) {
             test_session_end(); // release a paused render queue before guest teardown waits on it
+            if(test_session_should_exit())exit(0);
             return rt_reboot_requested();
         }
         test_session_poll();
+        if(test_session_should_exit()) {
+            if(g_vk.dev&&!getenv("LARECOMP_VK_NO_PIPELINE_CACHE"))vk_pipeline_cache_save();
+            LOG("[test-session] timed benchmark finished; exiting game\n");
+            exit(0);
+        }
         SDL_Event e;
 #ifdef __ANDROID__
         // (SDL's wait doesn't sleep on Android: it kept a core busy updating joysticks and reading the clock - 40% of
@@ -1915,6 +1921,7 @@ int ui_run(void) {
         while (SDL_WaitEventTimeout(&e, 16)) {
 #endif
 #ifdef __ANDROID__
+            if(e.type==SDL_EVENT_WILL_ENTER_BACKGROUND)test_session_backgrounded();
             if (e.type == SDL_EVENT_WILL_ENTER_BACKGROUND && g_vk.dev) vk_pipeline_cache_save();  // (may not come back)
             if (e.type == SDL_EVENT_DID_ENTER_FOREGROUND) requested_frame_rate = -1;
 #endif

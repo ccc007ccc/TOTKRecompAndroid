@@ -59,7 +59,7 @@ static float g_pixel_density = 1;
 // Controls stay responsive on the event thread while rendering is paused.
 static float test_rect[2][4];
 bool menu_test_session_event(const SDL_Event *e) {
-    if (!test_session_enabled()) return false;
+    if (!test_session_enabled()||test_session_timed()) return false;
     static SDL_FingerID finger;
     static bool held;
     if (held && (e->type == SDL_EVENT_FINGER_UP || e->type == SDL_EVENT_FINGER_CANCELED ||
@@ -1407,7 +1407,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
 #endif
     ImGui::NewFrame();
 
-    if (test_session_enabled()) {
+    if (test_session_enabled()&&!test_session_timed()) {
         const char *labels[] = {tr("Pause test"), tr("Resume game")};
         float y = (float)th * .085f, h = (float)th * .055f;
         float w = (float)tw * .14f, x = (float)tw * .355f, gap = (float)tw * .01f;
@@ -1427,7 +1427,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
 #ifdef __ANDROID__
     pthread_mutex_lock(&q_lock);
     memset(capture_rect, 0, sizeof capture_rect);
-    if (!open && !kbd) {
+    if (!open && !kbd&&!test_session_timed()) {
         float bw=280*scale, gap=12*scale, y=14*scale, bh=54*scale;
         float x=((float)tw-2*bw-gap)/2;
         const char *labels[]={tr(capture_badge.active ? "Stop continuous capture" : "Continuous capture"),tr("Capture current frame")};

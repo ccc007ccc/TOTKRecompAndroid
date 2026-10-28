@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Control a persistent Android performance session without restarting between samples.
+"""Run an automatic 60 FPS benchmark, or control an explicit interactive diagnostic session.
 
 Run in dev after sourcing android/dev_env.sh. Always specify the intended phone.
-Initial loading still occurs once; a ready scene pauses so it can cool first.
+benchmark loads an isolated save, measures for a fixed duration, then closes the game.
 """
 import argparse
 import io
 import json
+import math
 import shlex
 import subprocess
 import tarfile
@@ -18,13 +19,20 @@ PACKAGE='com.totkrecomp.android'
 def main():
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--serial',required=True)
-    ap.add_argument('--package',default=PACKAGE,choices=[PACKAGE,PACKAGE+'.debug',PACKAGE+'.perftest'])
+    ap.add_argument('--package',default=PACKAGE+'.perftest',choices=[PACKAGE,PACKAGE+'.debug',PACKAGE+'.perftest'])
     ap.add_argument('--session',help='Private runtime control directory')
     ap.add_argument('--output',type=Path,default=Path('.work/totk-port/performance-phone/session'))
     commands=ap.add_subparsers(dest='command',required=True)
     start=commands.add_parser('start')
-    start.add_argument('--save-seed',help='Existing save root on phone; cloned completely before guest boot')
-    start.add_argument('--game-library',help='Existing game library path on phone (for isolated O0/O1 comparisons)')
+    benchmark=commands.add_parser('benchmark',help='Load a save, measure at 60 FPS, then automatically close the game')
+    for launch in (start,benchmark):
+        launch.add_argument('--save-seed',help='Existing save root on phone; cloned completely before guest boot')
+        launch.add_argument('--game-library',help='Existing private game library path on phone')
+        launch.add_argument('--submit-snapshot',action='store_true',
+                            help='Enable experimental submit-time buffer snapshots for a separate comparison')
+    benchmark.add_argument('--save-slot',type=int,choices=range(6),default=0)
+    benchmark.add_argument('--seconds',type=float,default=15,help='Measurement duration after loading, 1..60 seconds (default 15)')
+    benchmark.add_argument('--timeout',type=float,help='Overall startup and measurement timeout')
     start.add_argument('--diagnostic-present-interval',type=int,choices=[1,2,3],
                        help='Override the game present interval for diagnosis; may change game speed, not a gameplay FPS result')
     boot=start.add_mutually_exclusive_group()
@@ -40,16 +48,28 @@ def main():
     sample.add_argument('--cooldown',type=int,default=0,help='Wait this many seconds while already paused, then sample')
     sample.add_argument('--timeout',type=int,default=180)
     args=ap.parse_args()
-    if args.command=='start' and (args.auto_load or args.save_slot is not None) and not args.save_seed:
+    launching=args.command in ('start','benchmark')
+    timed=args.command=='benchmark'
+    if timed:
+        if not math.isfinite(args.seconds) or not 1<=args.seconds<=60:ap.error('seconds must be 1..60')
+        args.timeout=args.timeout if args.timeout is not None else 135+args.seconds
+        if not math.isfinite(args.timeout) or args.timeout<=0:ap.error('timeout must be positive')
+        args.auto_load=False;args.diagnostic_present_interval=None
+        args.save_seed=args.save_seed or '/data/user/0/'+args.package+'/files/performance/seed'
+    if launching and (args.auto_load or args.save_slot is not None) and not args.save_seed:
         ap.error('automatic loading requires an isolated save cloned with --save-seed')
     if args.command=='sample' and not 30<=args.frames<=6000:ap.error('frames must be 30..6000')
-    if args.command=='start' and args.save_seed and any(c in args.save_seed for c in ',\n\r\t '):
+    if launching and args.save_seed and any(c in args.save_seed for c in ',\n\r\t '):
         ap.error('save-seed must not contain whitespace or commas (Android environment argument format)')
-    if args.command=='start' and args.game_library and (not args.game_library.startswith('/') or any(c in args.game_library for c in ',\n\r\t ')):
+    if launching and args.game_library and (not args.game_library.startswith('/') or any(c in args.game_library for c in ',\n\r\t ')):
         ap.error('game-library must be an absolute path without whitespace or commas')
-    args.output.mkdir(parents=True,exist_ok=True)
     package=args.package
     remote=args.session or '/data/user/0/'+package+'/files/performance/session'
+    if timed:
+        run_name='benchmark-'+str(time.time_ns())
+        remote=(args.session or '/data/user/0/'+package+'/files/performance')+'/'+run_name
+        args.output=args.output/run_name
+    args.output.mkdir(parents=True,exist_ok=True)
     if not remote.startswith('/data/user/0/'+package+'/files/') or any(c in remote for c in ',\n\r\t '):
         ap.error('session must be a private game files directory without whitespace or commas')
 
@@ -57,6 +77,11 @@ def main():
         return subprocess.run(['adb','-s',args.serial,*cmd],text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=check)
     def shell(*cmd,check=True):return adb('shell',shlex.join(cmd),check=check)
     def private(*cmd,check=True):return shell('run-as',package,*cmd,check=check)
+    def has_process():
+        found=shell('pidof',package,check=False)
+        if found.returncode and found.stderr.strip():
+            raise RuntimeError('Cannot determine whether the game is running: '+found.stderr.strip())
+        return bool(found.stdout.strip())
     def read(name):return json.loads(private('cat',remote+'/'+name).stdout)
     def foreground():
         lines=shell('dumpsys','activity','activities').stdout.splitlines()
@@ -78,16 +103,17 @@ def main():
             time.sleep(.1)
         raise RuntimeError('Runtime did not acknowledge the command; check that test-session mode is running')
 
-    if args.command=='start':
-        if shell('pidof',package,check=False).stdout.strip():
+    if launching:
+        if not timed and shell('pidof',package,check=False).stdout.strip():
             raise RuntimeError('Game is already running; use status/pause/resume, or start this mode on the next launch')
         private('mkdir','-p',remote)
-        private('rm','-f',remote+'/command',remote+'/status.json')
+        if not timed:private('rm','-f',remote+'/command',remote+'/status.json')
         env=['LARECOMP_NO_LAUNCHER=1','LARECOMP_TEST_SESSION='+remote,
-             'LARECOMP_VK_PROF=1','LARECOMP_LOG_CBUF_BYTES=1','LARECOMP_TEXTURE_TRACE=1',
              'LARECOMP_LOG_FILE='+remote+'/runtime.log','LARECOMP_DISABLE_GPU_CAPTURE=1',
-             'LARECOMP_LOG_FRAMEPACE=120',
              'LARECOMP_NO_SCALE=1','LARECOMP_GAME_DYNRES=1']
+        if timed:env+=['LARECOMP_TEST_DURATION_SECONDS='+str(args.seconds),'LARECOMP_FPS=60','LARECOMP_NO_USER_INPUT=1']
+        else:env+=['LARECOMP_VK_PROF=1','LARECOMP_LOG_CBUF_BYTES=1','LARECOMP_TEXTURE_TRACE=1','LARECOMP_LOG_FRAMEPACE=120']
+        if args.submit_snapshot:env+=['LARECOMP_VK_SUBMIT_SNAPSHOT=1','LARECOMP_LOG_SUBMIT_SNAPSHOT=1']
         if args.save_seed:
             check_seed=private if args.save_seed.startswith('/data/user/0/'+package+'/') else shell
             check_seed('test','-d',args.save_seed)
@@ -107,8 +133,73 @@ def main():
         apk_sha=shell('sha256sum',apk).stdout.split()[0] if apk else None
         manifest={'serial':args.serial,'package':package,'started_at':time.time(),'env':env,'apk':apk,'apk_sha256':apk_sha,
                   'game_library':args.game_library,'game_library_sha256':library_sha,
+                  'submit_snapshot':args.submit_snapshot,
+                  'benchmark_seconds':args.seconds if timed else None,
                   'diagnostic_present_interval':args.diagnostic_present_interval}
         (args.output/'launch.json').write_text(json.dumps(manifest,indent=2)+'\n')
+        if timed:
+            # One autonomous run: no pause/resume commands, screenshots, or model-side confirmation.
+            # Native code ends its timer and exits even if the host stops polling.
+            shell('am','force-stop',package)
+            (args.output/'battery-before.txt').write_text(shell('dumpsys','battery').stdout)
+            (args.output/'thermal-before.txt').write_text(shell('dumpsys','thermalservice').stdout)
+            state={};result=None;launched=False;closed_by=None
+            try:
+                shell('am','start','-n',package+'/com.botwrecompandroid.BOTWRecompAndroidActivity','--es','env',','.join(env))
+                launched=True
+                print(f'Loading slot {args.save_slot}; measuring {args.seconds:g}s at 60 FPS, then closing the game...',flush=True)
+                deadline=time.monotonic()+args.timeout
+                while time.monotonic()<deadline:
+                    time.sleep(.5)
+                    try:state=read('status.json')
+                    except (subprocess.CalledProcessError,json.JSONDecodeError):
+                        if time.time()-manifest['started_at']>5 and not has_process():
+                            raise RuntimeError('Benchmark process exited before reporting its status')
+                        continue
+                    if not state.get('timed') or state.get('target_fps')!=60 or state.get('save_slot')!=args.save_slot:
+                        raise RuntimeError('Installed APK does not support this timed 60 FPS benchmark; rebuild/install it')
+                    if state.get('error'):raise RuntimeError(state['error'])
+                    if state['phase']=='ended':
+                        if not state.get('ready') or state.get('sample_id')!=1:
+                            raise RuntimeError('Benchmark ended without a loaded-scene measurement')
+                        result=read('sample-0001.json');break
+                    if state['phase'] in ('paused','warming','diagnostic'):
+                        raise RuntimeError('Timed benchmark unexpectedly paused or entered an interactive mode')
+                    if not has_process():
+                        # Exit can race this poll after the final status was atomically published.
+                        state=read('status.json')
+                        if state['phase']!='ended':raise RuntimeError('Game exited before its measurement completed')
+                else:raise RuntimeError('Timed benchmark exceeded its startup/measurement timeout')
+                if result['pid']!=state['pid'] or result.get('mode')!='timed-benchmark' or result.get('target_fps')!=60:
+                    raise RuntimeError('Benchmark result belongs to a different process or mode')
+                if result.get('elapsed_seconds',0)+.001<args.seconds:
+                    raise RuntimeError('Benchmark stopped before its requested duration')
+                close_deadline=time.monotonic()+2
+                while has_process() and time.monotonic()<close_deadline:time.sleep(.1)
+                closed_by='controller' if has_process() else 'runtime'
+            finally:
+                if launched:shell('am','force-stop',package,check=False)
+                # Copy only measurement files, never the save tree or game images.
+                names=['status.json','runtime.log']+(['sample-0001.json'] if result or state.get('sample_id')==1 else [])
+                archive=subprocess.run(['adb','-s',args.serial,'exec-out','run-as',package,'tar','cf','-','-C',remote,*names],capture_output=True)
+                if archive.stdout:
+                    try:
+                        with tarfile.open(fileobj=io.BytesIO(archive.stdout),mode='r:') as tar:
+                            for name in names:
+                                try:source=tar.extractfile(name)
+                                except KeyError:continue
+                                if source:(args.output/name).write_bytes(source.read())
+                    except tarfile.TarError:pass
+                (args.output/'battery-after.txt').write_text(shell('dumpsys','battery',check=False).stdout)
+                (args.output/'thermal-after.txt').write_text(shell('dumpsys','thermalservice',check=False).stdout)
+                manifest.update(finished_at=time.time(),state=state,closed_by=closed_by)
+                (args.output/'launch.json').write_text(json.dumps(manifest,indent=2)+'\n')
+            if has_process():raise RuntimeError('Game is still running after the benchmark shutdown')
+            result['closed_by']=closed_by
+            (args.output/'sample-0001.json').write_text(json.dumps(result,indent=2)+'\n')
+            print(f"{result['fps']:.2f} FPS; {result['elapsed_seconds']:.2f}s; p95 {result['p95_ms']:.2f} ms. Game closed.")
+            print(args.output)
+            return
         print(shell('am','start','-n',package+'/com.botwrecompandroid.BOTWRecompAndroidActivity','--es','env',','.join(env)).stdout.strip())
         print('Waiting for the loaded scene to pause; runtime also stops startup after 120 seconds...',flush=True)
         deadline=time.monotonic()+args.timeout

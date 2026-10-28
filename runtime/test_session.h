@@ -4,6 +4,9 @@
 
 // Explicit developer test sessions. Normal launches perform no control-file I/O.
 bool test_session_enabled(void);
+bool test_session_timed(void); // 60 FPS benchmark: sample on readiness, then quit after the requested duration
+bool test_session_should_exit(void); // event thread: result/status are already flushed before this becomes true
+void test_session_backgrounded(void); // timed measurements stop if the game leaves the foreground
 int test_session_save_slot(void); // -1 unless direct loading was explicitly requested
 int test_session_target_fps(void); // 0: normal setting; explicit test override never writes the player's ini
 const char *test_session_directory(void);

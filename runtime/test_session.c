@@ -2,6 +2,7 @@
 #include "platform.h"
 #include <dirent.h>
 #include <errno.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -16,14 +17,16 @@ static struct {
     pthread_cond_t wake;
     bool enabled, auto_load, pause_when_ready, want_pause, gpu_request, shot_request, ready;
     unsigned phase, ready_frames, warm_left, sample_count, sample_goal, sample_id, diagnostic_left;
-    uint64_t frame, request, last_ns, button_until, buttons, started_ns;
+    uint64_t frame, request, last_ns, button_until, buttons, started_ns, duration_ns, sample_started_ns;
     double intervals[6000];
     char directory[1024], error[160];
     int save_slot;
 } ts={.lock=PTHREAD_MUTEX_INITIALIZER, .wake=PTHREAD_COND_INITIALIZER};
 static pthread_once_t once=PTHREAD_ONCE_INIT;
 static _Atomic int target_fps;
+static _Atomic bool exit_requested;
 int test_session_target_fps(void) { return atomic_load_explicit(&target_fps,memory_order_relaxed); }
+bool test_session_should_exit(void) { return atomic_load_explicit(&exit_requested,memory_order_acquire); }
 static const char *phases[]={"loading","running","paused","warming","sampling","diagnostic","ended"};
 static void status(void);
 
@@ -76,6 +79,16 @@ static void initialize(void) {
     if(!root||!*root)return;
     if(strlen(root)>=sizeof ts.directory){fprintf(stderr,"[test-session] path too long\n");exit(1);}
     ts.enabled=true;ts.pause_when_ready=true;
+    const char *duration=getenv("LARECOMP_TEST_DURATION_SECONDS");
+    if(duration) {
+        char *end;double seconds=strtod(duration,&end);
+        if(!*duration||*end||!isfinite(seconds)||seconds<1||seconds>60) {
+            fprintf(stderr,"[test-session] duration must be 1..60 seconds\n");exit(1);
+        }
+        ts.duration_ns=(uint64_t)(seconds*1000000000.0);
+        ts.pause_when_ready=false;
+        atomic_store_explicit(&target_fps,60,memory_order_relaxed);
+    }
     ts.save_slot=-1;
     const char *slot=getenv("LARECOMP_TEST_SAVE_SLOT");
     const char *seed=getenv("LARECOMP_TEST_SAVE_SEED");
@@ -105,35 +118,62 @@ static void initialize(void) {
     ts.started_ns=plat_now_ns();status();
 }
 bool test_session_enabled(void){pthread_once(&once,initialize);return ts.enabled;}
+bool test_session_timed(void){return test_session_enabled()&&ts.duration_ns!=0;}
 int test_session_save_slot(void){return test_session_enabled()?ts.save_slot:-1;}
 const char *test_session_directory(void){return test_session_enabled()?ts.directory:NULL;}
 
 static void status(void) { // lock held; only transitions write to storage
     char path[1200],done[1200];snprintf(path,sizeof path,"%s/status.partial",ts.directory);
     snprintf(done,sizeof done,"%s/status.json",ts.directory);FILE *f=fopen(path,"w");if(!f)return;
-    fprintf(f,"{\"pid\":%d,\"phase\":\"%s\",\"frame\":%llu,\"request\":%llu,\"sample_id\":%u,\"sample_frames\":%u,\"ready\":%s,\"save_slot\":%d,\"target_fps\":%d,\"error\":\"%s\"}\n",
+    fprintf(f,"{\"pid\":%d,\"phase\":\"%s\",\"frame\":%llu,\"request\":%llu,\"sample_id\":%u,\"sample_frames\":%u,\"ready\":%s,\"save_slot\":%d,\"target_fps\":%d,\"timed\":%s,\"requested_seconds\":%.6f,\"error\":\"%s\"}\n",
         getpid(),phases[ts.phase],(unsigned long long)ts.frame,(unsigned long long)ts.request,ts.sample_id,ts.sample_count,
-        ts.ready?"true":"false",ts.save_slot,test_session_target_fps(),ts.error);
+        ts.ready?"true":"false",ts.save_slot,test_session_target_fps(),ts.duration_ns?"true":"false",ts.duration_ns/1e9,ts.error);
     if(!fclose(f))rename(path,done);
 }
 static int compare(const void *a,const void *b){double x=*(const double*)a,y=*(const double*)b;return(x>y)-(x<y);}
-static void result(void) {
+static bool result(uint64_t now) {
     double sum=0;for(unsigned i=0;i<ts.sample_count;i++)sum+=ts.intervals[i];
     qsort(ts.intervals,ts.sample_count,sizeof(double),compare);
-    char path[1200];snprintf(path,sizeof path,"%s/sample-%04u.json",ts.directory,++ts.sample_id);
-    FILE *f=fopen(path,"w");if(!f)return;
+    char path[1200],done[1200];++ts.sample_id;
+    snprintf(path,sizeof path,"%s/sample-%04u.partial",ts.directory,ts.sample_id);
+    snprintf(done,sizeof done,"%s/sample-%04u.json",ts.directory,ts.sample_id);
+    FILE *f=fopen(path,"w");if(!f)return false;
     unsigned n=ts.sample_count;
-    double median=(ts.intervals[(n-1)/2]+ts.intervals[n/2])/2, p95=ts.intervals[(95*n+99)/100-1];
-    fprintf(f,"{\"pid\":%d,\"frames\":%u,\"first_frame\":%llu,\"last_frame\":%llu,\"mean_ms\":%.6f,\"median_ms\":%.6f,\"p95_ms\":%.6f,\"fps\":%.6f,\"target_fps\":%d,\"mode\":\"frame-timing\"}\n",
-        getpid(),n,(unsigned long long)(ts.frame-n+1),(unsigned long long)ts.frame,sum/n,median,p95,sum>0?n*1000.0/sum:0,test_session_target_fps());
-    fclose(f);
-    fprintf(stderr,"[test-session] sample %u: %u frames %.2f fps, %.2f ms mean, %.2f ms p95\n",ts.sample_id,n,n*1000.0/sum,sum/n,p95);
+    double median=n?(ts.intervals[(n-1)/2]+ts.intervals[n/2])/2:0, p95=n?ts.intervals[(95*n+99)/100-1]:0;
+    double elapsed=ts.duration_ns?(now-ts.sample_started_ns)/1e9:sum/1000;
+    double fps=elapsed>0?n/elapsed:0,mean=n?elapsed*1000/n:0;
+    fprintf(f,"{\"pid\":%d,\"frames\":%u,\"first_frame\":%llu,\"last_frame\":%llu,\"mean_ms\":%.6f,\"median_ms\":%.6f,\"p95_ms\":%.6f,\"fps\":%.6f,\"target_fps\":%d,\"mode\":\"%s\",\"requested_seconds\":%.6f,\"elapsed_seconds\":%.6f}\n",
+        getpid(),n,(unsigned long long)(n?ts.frame-n+1:0),(unsigned long long)(n?ts.frame:0),mean,median,p95,fps,test_session_target_fps(),
+        ts.duration_ns?"timed-benchmark":"frame-timing",ts.duration_ns/1e9,elapsed);
+    if(fclose(f)||rename(path,done))return false;
+    fprintf(stderr,"[test-session] sample %u: %u frames %.2f fps, %.2f ms mean, %.2f ms p95\n",ts.sample_id,n,fps,mean,p95);
+    return true;
+}
+
+static void finish_timed(uint64_t now,const char *error) { // lock held; no GPU wait or pause at either boundary
+    if(ts.phase==ENDED)return;
+    if(error)snprintf(ts.error,sizeof ts.error,"%s",error);
+    if(ts.sample_started_ns&&!result(now)&&!ts.error[0])snprintf(ts.error,sizeof ts.error,"Cannot write benchmark result");
+    ts.phase=ENDED;ts.want_pause=ts.pause_when_ready=ts.auto_load=false;ts.buttons=0;
+    status();pthread_cond_broadcast(&ts.wake);
+    atomic_store_explicit(&exit_requested,true,memory_order_release);
+}
+
+void test_session_backgrounded(void) {
+    if(!test_session_timed())return;
+    pthread_mutex_lock(&ts.lock);finish_timed(plat_now_ns(),"Benchmark left the foreground");pthread_mutex_unlock(&ts.lock);
 }
 
 void test_session_poll(void) {
     if(!test_session_enabled())return;
     static uint64_t last;uint64_t now=plat_now_ns();if(now-last<100000000)return;last=now;
     pthread_mutex_lock(&ts.lock);
+    if(ts.duration_ns) {
+        if(ts.phase==LOADING&&now-ts.started_ns>120000000000ull)
+            finish_timed(now,"Startup exceeded 120 seconds");
+        else if(ts.phase==SAMPLING&&now-ts.sample_started_ns>=ts.duration_ns)
+            finish_timed(now,NULL); // still exits when the renderer stops producing frames
+    }
     if(ts.phase==LOADING&&!ts.want_pause&&now-ts.started_ns>120000000000ull) {
         ts.want_pause=true;ts.auto_load=false;
         snprintf(ts.error,sizeof ts.error,"Startup exceeded 120 seconds; pausing at the next frame for inspection");
@@ -147,7 +187,8 @@ void test_session_poll(void) {
     if(sscanf(command,"%llu %31s %u",&id,verb,&arg)<2)return;
     pthread_mutex_lock(&ts.lock);
     ts.request=id;if(strcmp(verb,"status"))ts.error[0]=0;
-    if(ts.phase==ENDED&&strcmp(verb,"status"))snprintf(ts.error,sizeof ts.error,"Test session ended for game reboot");
+    if(ts.duration_ns&&strcmp(verb,"status"))snprintf(ts.error,sizeof ts.error,"Timed benchmarks run at 60 FPS without pause or diagnostic commands");
+    else if(ts.phase==ENDED&&strcmp(verb,"status"))snprintf(ts.error,sizeof ts.error,"Test session ended for game reboot");
     else if(!strcmp(verb,"pause")){ts.want_pause=ts.phase!=PAUSED;}
     else if(!strcmp(verb,"resume")) {
         ts.want_pause=ts.pause_when_ready=false;ts.auto_load=false;ts.phase=RUNNING;
@@ -188,6 +229,7 @@ bool test_session_take_shot_request(void) {
 void test_session_end(void) {
     if(!test_session_enabled())return;
     pthread_mutex_lock(&ts.lock);
+    if(ts.duration_ns){finish_timed(plat_now_ns(),"Benchmark interrupted by a game reboot");pthread_mutex_unlock(&ts.lock);return;}
     ts.phase=ENDED;ts.want_pause=ts.pause_when_ready=ts.auto_load=ts.gpu_request=ts.shot_request=false;
     atomic_store_explicit(&target_fps,0,memory_order_relaxed);
     ts.buttons=0;status();pthread_cond_broadcast(&ts.wake);pthread_mutex_unlock(&ts.lock);
@@ -195,6 +237,7 @@ void test_session_end(void) {
 void test_session_manual(bool resume) {
     if(!test_session_enabled())return;
     pthread_mutex_lock(&ts.lock);
+    if(ts.duration_ns){pthread_mutex_unlock(&ts.lock);return;}
     if(ts.phase!=ENDED) {
         ts.auto_load=ts.pause_when_ready=false;
         ts.want_pause=!resume&&ts.phase!=PAUSED;
@@ -210,14 +253,22 @@ void test_session_frame(uint64_t frame,bool scene,void(*gpu_idle)(void)) {
     if(ts.phase==ENDED){pthread_mutex_unlock(&ts.lock);return;}
     if(!ts.ready&&(ts.phase==LOADING||ts.phase==RUNNING)) {
         if(scene)ts.ready_frames++;else ts.ready_frames=0;
-        if(ts.ready_frames>=90){ts.ready=true;ts.auto_load=false;ts.phase=RUNNING;ts.want_pause=ts.pause_when_ready;}
+        if(ts.ready_frames>=90){
+            ts.ready=true;ts.auto_load=false;ts.phase=RUNNING;ts.want_pause=ts.pause_when_ready;
+            if(ts.duration_ns){ts.phase=SAMPLING;ts.sample_count=0;ts.sample_started_ns=now;status();}
+        }
     } else if(ts.phase==WARMUP) {
         if(--ts.warm_left==0){ts.phase=SAMPLING;ts.sample_count=0;fprintf(stderr,"[test-session] sample begin frame %llu\n",(unsigned long long)frame);status();}
     } else if(ts.phase==DIAGNOSTIC) {
         if(--ts.diagnostic_left==0)ts.want_pause=true;
     } else if(ts.phase==SAMPLING) {
-        ts.intervals[ts.sample_count++]=(now-ts.last_ns)/1e6;
-        if(ts.sample_count==ts.sample_goal){result();ts.want_pause=true;}
+        if(ts.sample_count==sizeof ts.intervals/sizeof ts.intervals[0]) {
+            if(ts.duration_ns)finish_timed(now,"Benchmark frame capacity exceeded before its time limit");
+        } else {
+            ts.intervals[ts.sample_count++]=(now-ts.last_ns)/1e6;
+            if(ts.duration_ns){if(now-ts.sample_started_ns>=ts.duration_ns)finish_timed(now,NULL);}
+            else if(ts.sample_count==ts.sample_goal){if(!result(now))snprintf(ts.error,sizeof ts.error,"Cannot write sample result");ts.want_pause=true;}
+        }
     }
     ts.last_ns=now;
     if(ts.want_pause) {
