@@ -81,6 +81,9 @@ static void plat_write_tracking_enable(uint64_t lo, uint64_t hi) {
 static uint8_t *ga_ptr = arena;
 static uint64_t gcopy_gen, seq = 1, top;
 static uint64_t vk_pending_seq(void) { return seq; }
+static const void *submitted_data(uint64_t addr, uint64_t size);
+static const void *submit_snapshot_data(uint64_t addr, uint64_t size) { return NULL; }
+static void submit_snapshot_write(uint64_t addr, uint64_t size, uint64_t seq) {}
 static uint64_t ga_ring(uint64_t n) {
     if (top + n > sizeof arena) return ~0ull;
     uint64_t off = top; top += n; return off;

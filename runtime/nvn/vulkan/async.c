@@ -20,13 +20,16 @@
 #include <time.h>
 
 #include "../nvn.h"
+#include "../submit_snapshot.h"
 #include "../../platform.h"
+#include "../../framepace.h"
 #include "../../rt.h"
 #include "../../test_session.h"
 #include "vk.h"
 
 enum { REQ_EXEC, REQ_PRESENT, REQ_FENCE };
 typedef struct { int type; uint64_t a; void *p; uint64_t id; } Req;
+typedef struct { uint8_t *list; SubmitSnapshot *snapshot; } ExecCopy;
 
 #define QN 4096  // requests in flight (a frame has a few dozen)
 static Req q[QN];
@@ -55,6 +58,7 @@ void vk_execute_now(uint64_t handle);    // exec.c: translate and submit a comma
 void vk_present_now(NvnTexture *t);      // device.c: the window's half of backend_present
 void nvn_sync_set_seq(uint64_t guest, uint64_t seq);
 uint64_t renderer_fence_seq(void);
+uint64_t vk_submit_retired_seq(void);
 
 bool vk_async_on(void) {
     if (on < 0) {
@@ -92,7 +96,13 @@ static void *render_main(void *arg) {
         Req r = q[q_head % QN];
         pthread_mutex_unlock(&q_lock);
         uint64_t t0 = plat_now_ns(), cpu0 = cpu_timing ? render_cpu_ns() : 0;
-        if (r.type == REQ_EXEC) { vk_execute_now(r.a); free(r.p); }  // (r.p: the list copy, vk_async_execute)
+        if (r.type == REQ_EXEC) {
+            ExecCopy *copy = r.p;
+            submit_snapshot_begin(copy ? copy->snapshot : NULL);
+            vk_execute_now(r.a);
+            submit_snapshot_end();
+            if (copy) { submit_snapshot_free(copy->snapshot); free(copy->list); free(copy); }
+        }
         else if (r.type == REQ_PRESENT) vk_present_now((NvnTexture *)r.p);
         else if (r.type == REQ_FENCE) nvn_sync_set_seq(r.a, renderer_fence_seq());
         uint64_t elapsed = plat_now_ns() - t0;
@@ -102,7 +112,7 @@ static void *render_main(void *arg) {
             __atomic_store_n(&last_frame_work, frame_work, __ATOMIC_RELAXED);
             extern void plat_render_work(uint64_t work_ns, uint64_t target_ns);
             __atomic_store_n(&last_frame_cpu, frame_cpu, __ATOMIC_RELAXED);
-            plat_render_work(frame_cpu, 16666667ull);  // (ADPF: clocks for 60 fps on this thread too)
+            plat_render_work(frame_cpu, framepace_on() ? framepace_period_ns() : 16666667ull);
             frame_work = frame_cpu = 0;
         }
         pthread_mutex_lock(&q_lock);
@@ -207,25 +217,41 @@ static void snap_add(Snap *s, uint64_t p, int depth) {
         p += r->size;
     }
 }
-static uint8_t *snap_list(uint64_t handle) {
+static uint8_t *snap_list(uint64_t handle, size_t *bytes) {
     Snap s = {0};
     snap_add(&s, handle, 0);
     s.b = realloc(s.b, s.n + sizeof(CmdRec));
     if (!s.b) FATAL("vk: out of memory for a command list copy\n");
     memset(s.b + s.n, 0, sizeof(CmdRec));  // CMD_END
     ((CmdRec *)(s.b + s.n))->size = sizeof(CmdRec);
+    *bytes = s.n + sizeof(CmdRec);
     return s.b;
 }
 
 void vk_async_execute(uint64_t handle) {
-    uint8_t *copy = getenv("LARECOMP_NO_LIST_COPY") ? NULL : snap_list(handle);
-    if (copy) handle = (uint64_t)(uintptr_t)copy;
     pthread_mutex_lock(&p_lock);
+    // The producer lock also orders capture boundaries and inherited bindings; no later producer can publish first.
+    uint64_t retired = vk_submit_retired_seq();
+    size_t bytes = 0;
+    ExecCopy *copy = NULL;
+    bool sync = false;
+    if (!getenv("LARECOMP_NO_LIST_COPY")) {
+        copy = calloc(1, sizeof *copy);
+        if (!copy) FATAL("vk: out of memory for a submitted list\n");
+        copy->list = snap_list(handle, &bytes);
+        copy->snapshot = submit_snapshot_capture(copy->list, bytes, retired, nvn_submit_read, &sync);
+        handle = (uint64_t)(uintptr_t)copy->list;
+    }
     pthread_mutex_lock(&q_lock);
     uint64_t next = q_tail + 1;  // (the id the push gets: the list's fences carry it before the render thread sees them)
     pthread_mutex_unlock(&q_lock);
     mark_fences(handle, next, 0);
-    push(REQ_EXEC, handle, copy);  // (the render thread frees the copy once run)
+    uint64_t id = push(REQ_EXEC, handle, copy);  // the render thread owns both list and payload until translated
+    if (sync) {
+        kernel_blocking_begin();
+        vk_async_wait_id(id);
+        kernel_blocking_end();
+    }
     pthread_mutex_unlock(&p_lock);
 }
 

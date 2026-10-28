@@ -1,10 +1,13 @@
 # 上游整合与帧率适配（开发中）
 
+简体中文 | [English](en/UPSTREAM-INTEGRATION.md)
+
 目标是合入两个参考项目中适用于 Android TotK 的修复，并提供 **30、45、60、120 FPS** 四档。120 是用户后续明确追加的要求。目标帧率与硬件实际达到的帧率分别验收。
 
 ## 固定的参考版本
 
-- [BOTWRecompAndroid](https://github.com/mamcjr/BOTWRecompAndroid)：从 `ef7a306` 审计到 [`4572f067`](https://github.com/mamcjr/BOTWRecompAndroid/commit/4572f06716a49207fdcc13d34a45f154644202f3)，57 个提交，发布版 v0.2.1-beta。
+- [BOTWRecompAndroid](https://github.com/mamcjr/BOTWRecompAndroid)：先审计 `ef7a306..4572f067` 的57个提交，再核对其后的19个提交，固定到 [`5675618197`](https://github.com/mamcjr/BOTWRecompAndroid/commit/567561819724e6f7425b595de301f2dfd4592eef)，v0.2.2-beta。
+- [tib-kpl/BOTWRecompAndroid](https://github.com/tib-kpl/BOTWRecompAndroid)：已审阅的运行时移植提交 `4d2c20e`、`80bc5c4` 通过 `b386cce` 合入本工作分支。没有覆盖并行的 main shader 工作，也没有合入构建输出。
 - [UltraTears PR #27](https://github.com/kuraeow/ultratears/pull/27)：尚未合并，head `4ea835e4`，base/dev `1970c7ad`。PR 主要添加启动器；120 选项传入 `TOTK_UNCAPPED_HZ=120`。dev 的 `src/gfx/nvn/hle_nvn.c` 明确说明游戏补丁和实时步长尚未移植，因此不能把该选项当成解帧已验证的证据。
 - UltraTears 的注释指向原始 [MacNativeGames TotK 1.4.3 计时实现](https://github.com/ly05010419/MacNativeGames/blob/ff63a162b35d8b486b941191785d8e957c1f5df2/games/totk/runtime/game_patches_v143.c)。据此核对自有 1.4.3 输入并适配生成器。该来源是 MIT，保留了 [许可证](../runtime/hle/LICENSE-MacNativeGames.txt)。UltraTears 的整体 GPL 许可证不改作 MIT，也未直接复制其 GPL 实现。
 
@@ -23,6 +26,10 @@
 | `9f94aba` | 精简 GLSL prelude、内建 casts、去掉 SPIR-V 调试名字 | 保留顶点与显式片元深度的 NoContraction |
 | `9c3a0f3` | 顶点 2D/array 采样按 1/256 texel 取整 | 不替换现有 8-bit gather 修正；真实地形仍需实机复测 |
 | MacNativeGames 1.4.3 | 解除整数 VI 档位，时间生产者、按键计时、布料/头发第二时钟与高帧率蹦床修正 | 生成时逐指令验证；钩子在原指令前，直接 BL 与 LR 保留；支持30/45/60/120；Android surface 请求对应刷新率 |
+| tib-kpl 运行时移植 | 上传缓存失效、动态 UBO 计划、反馈图像 mip/layer 与分配身份、heap fallback | 保留 TotK 的纹理行距、黑块和深度修复；缓存测试及边界/别名检查通过 |
+| tib-kpl 命令追踪 | 命令页原子发布、无锁查询、timeline poll 诊断 | fast/locked/ab 三条查询路径均完成480000次并发核对 |
+| `97afeda`、`2f627eb` | 前台 BuildService、编译/链接参数与四模块完整 build ID 的续传签名、缺符号时使 managed 库失效 | 保留明确指定的测试库；服务编译通过，完整手机构建仍未验收 |
+| MacNativeGames 提交时数据快照 | UBO、SSBO、CopyBuffer 源字节冻结；回放时按捕获边界检查 GPU 写入失效 | 独立移植，默认实验关闭；总内存预算与同步降级、跨提交写、继承绑定和资源边界均有 CPU 检查 |
 
 ## 计时约束
 
@@ -36,10 +43,12 @@
 
 ## 后续整合与验收
 
-- UltraTears 的提交时 UBO/SSBO/复制源快照和 GPU 写入失效处理值得继续适配。当前异步队列只复制命令记录，不能据此声称已经固定了所引用的常量字节。需要从 MIT 原始来源核对，并验证同一提交中的 GPU 写、跨提交未完成写及内存上限。
-- Android 前台构建服务、手柄死区/陀螺仪静态偏置、存档导入导出便利功能继续逐项审查；不直接搬 BOTW 的存档文件判定或 DLC 逻辑。
+- 提交时快照已从 MIT 原始机制独立适配为 `LARECOMP_VK_SUBMIT_SNAPSHOT=1`，默认关闭。每请求16MiB、全部在途请求64MiB；缺少安全资源范围或超出预算时，提交在返回前等待翻译完成。捕获边界使用 GPU 回写已经落到 CPU 后发布的序号；同提交 inline/copy 写和存储 shader 写会失效，未知 STG 范围保守失效整个 heap。完整实机玩法和性能仍需验收，不能把 CPU 检查当作默认启用的依据。
+- Android 调度预算已随30/45/60/120档变化，避免 render ADPF 请求始终使用60档预算。原计时关闭路径仍沿用既有提示。
+- 手柄死区/陀螺仪偏置与通用存档传输仍需按 TotK 数据/输入合同审查；不直接搬 BOTW 的存档文件判定或 DLC 逻辑。
 - Sync lag 的上游默认值来回变更，并有脚陷地、白水面和地形问题记录，本次不默认开启。BOTW 1.9.0 地址、DLC、Windows/Tauri 打包与 MetalFX 插帧不直接合入 Android TotK。
-- 还需验证最终 APK、配套 O1 游戏库和实机30/45/60/120。指定存档、相同驱动与降温方法沿用 [手机性能会话](PHONE-PERFORMANCE.md)。画面、菜单、动画/物理与性能都必须检查；不能把编译成功当作实机完成。
+- 最新 native ARM64 实验依赖 BOTW 补丁/入口，尚未按 TotK 四模块与1.4.3输入验证，本次不直接移植。新增64KiB UBO分段直读在上游后续提交中恢复默认关闭，保留本地安全复制路径；回写 FIFO 修复已由本地跨池/跨圈实现覆盖。
+- 三档 APK 已构建并核对包名、图标、调试标记、签名和实际 native 参数；配套全 O3/ThinLTO 游戏库与实机四档仍需完成验收。指定存档、相同驱动与降温方法沿用 [手机性能会话](PHONE-PERFORMANCE.md)。画面、菜单、动画/物理与性能分别检查。
 
 ## 当前可重复的 CPU 检查
 
@@ -51,8 +60,11 @@
 "$PYTHON" tools/test_local_branches.py
 "$PYTHON" tools/test_writeback.py
 "$PYTHON" tools/test_gamebuild_hot.py
+"$PYTHON" tools/test_gamebuild_flags.py --zig /home/deck/Code/Toolchains/zig-0.17.0/zig
+"$PYTHON" tools/test_android_packages.py
+"$PYTHON" tools/test_submit_snapshot.py
 "$PYTHON" tools/test_shader_sampling.py
 "$PYTHON" tools/test_shader_control_flow.py
 ```
 
-已通过：四档计时/切档/暂停/抖动/低帧率与各计时钩子；14个补丁位置及邻接 guard 与私有映像匹配；FP load/store 局部跳转；回写池满、延迟完成、跨池顺序、行距、超时；14项构建策略；48个采样 shader；8192项控制流执行与96个 GLSL/SPIR-V shader。既有深度精度和 TotK 输入契约检查亦通过。上述测试不使用手机 GPU，不证明实机场景已完成。
+已通过：四档计时/切档/暂停/抖动/低帧率与各计时钩子；14个补丁位置及邻接 guard 与私有映像匹配；FP load/store 局部跳转；回写池满、延迟完成、跨池顺序、行距、超时；19项 dev/performance 构建策略；NDK/Zig 参数与完整四模块续传签名；stripped ELF 及包/库匹配；10000次提交快照并发捕获/回放与边界/预算/GPU失效；48个采样 shader；8192项控制流执行与96个 GLSL/SPIR-V shader。既有深度精度和 TotK 输入契约检查亦通过。上述 CPU 检查不证明完整实机场景已完成。

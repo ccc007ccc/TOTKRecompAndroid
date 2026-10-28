@@ -23,6 +23,7 @@
 #include "../../test_session.h"
 #include "view_overlap.h"
 #include "feedback_identity.h"
+#include "../submit_snapshot.h"
 
 // LARECOMP_AB (vk_ab, below): AB() costs no call while it is not set - it is asked per constant buffer and per pass
 static int ab_n = -1;  // (LARECOMP_AB's frame count; 0: no A/B)
@@ -90,6 +91,11 @@ static bool game_pending;
 static uint64_t last_submit_ns;  // (begin_pass: LARECOMP_VK_CHUNK_US)
 #endif
 static pthread_mutex_t seq_lock = PTHREAD_MUTEX_INITIALIZER;
+#ifdef __ANDROID__
+// GPU completion alone is too early for copy mode: CPU writebacks must be applied before a capture can retire them.
+static _Atomic uint64_t submit_retired;
+uint64_t vk_submit_retired_seq(void) { return atomic_load_explicit(&submit_retired, memory_order_acquire); }
+#endif
 static bool in_pass;
 static uint32_t pass_written;  // (the attachments this pass's draws wrote so far: draw_writes)
 static uint32_t pass_dup_null;  // (color slots left unbound: their image is bound in another slot - begin_pass)
@@ -154,7 +160,12 @@ void vk_wait_seq(uint64_t seq) {
     if (r == VK_TIMEOUT) LOG("[vk] GPU did not finish submission %llu within 10 s (device lost?)\n", (unsigned long long)seq);
     else if (r == VK_SUCCESS) cq_resolve_done(seq);  // (the game reads its timing counters after waiting)
 #ifdef __ANDROID__
-    if (r == VK_SUCCESS) gcopy_retire(seq);
+    if (r == VK_SUCCESS) {
+        gcopy_retire(seq);
+        uint64_t old = atomic_load_explicit(&submit_retired, memory_order_relaxed);
+        while (old < seq && !atomic_compare_exchange_weak_explicit(&submit_retired, &old, seq,
+                                                                 memory_order_release, memory_order_relaxed)) {}
+    }
 #endif
     else {
         extern void vk_devlost_dump(void);
@@ -1028,8 +1039,18 @@ static uint16_t gcopy_active[GCOPY_TAB];
 static int gcopy_nactive;
 static uint64_t gcopy_active_seq;
 static uint64_t gcopy_gen;  // bumped to drop every shared copy (guest memory written mid-list)
+static const void *submitted_data(uint64_t addr, uint64_t size) {
+#ifdef __ANDROID__
+    const void *data = submit_snapshot_data(addr, size);
+    if (data) return data;
+#endif
+    return (const void *)(uintptr_t)addr;
+}
 static void guest_copy_flush(void) { gcopy_gen++; gcopy_nactive = 0; }
 static void guest_copy_invalidate(uint64_t lo, uint64_t hi) {
+#ifdef __ANDROID__
+    if (hi > lo) submit_snapshot_write(lo, hi - lo, vk_pending_seq());
+#endif
     uint64_t seq = vk_pending_seq() + (gcopy_gen << 40);
     if (gcopy_active_seq != seq) return;
     for (int i = 0; i < gcopy_nactive; i++) {
@@ -1054,7 +1075,7 @@ static VkSpan guest_copy(uint64_t addr, uint64_t size) {
         gcopy_active[gcopy_nactive++] = (uint16_t)slot;
         gcopy[slot].listed = seq;
     }
-    VkSpan s = vk_transient_copy((const void *)(uintptr_t)addr, size, 256);
+    VkSpan s = vk_transient_copy(submitted_data(addr, size), size, 256);
     stat_cb_copied += size;
     gcopy[slot].addr = addr; gcopy[slot].size = size; gcopy[slot].seq = seq; gcopy[slot].span = s;
     return s;
@@ -2888,7 +2909,7 @@ static uint64_t shader_texture_handle(int stage, const ShaderTexture *st_) {
     if (st_->bindless) {
         const Range *u = st_->bindless_cbuf >= 3 && st_->bindless_cbuf < 21 ? &st.ubuf[stage][st_->bindless_cbuf - 3] : NULL;  // (cbuf_base 3)
         if (!u || !u->addr || (uint64_t)st_->bindless_offset + 4 > u->size) return 0;
-        return *(const uint32_t *)(uintptr_t)(u->addr + st_->bindless_offset);
+        return *(const uint32_t *)submitted_data(u->addr + st_->bindless_offset, 4);
     }
     int slot = ((int)st_->handle_offset - 0x20) / 8;
     return (slot >= 0 && slot < 32) ? st.tex[stage][slot] : 0;
@@ -3445,7 +3466,7 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
 #ifdef __ANDROID__
     {
         VkDescriptorBufferInfo d;
-        if (ubo_direct(r.addr, size, &d)) return d;
+        if (!submit_snapshot_data(r.addr, size) && ubo_direct(r.addr, size, &d)) return d;
     }
 #endif
     // snapshot: later CPU writes must not leak in. Shared by the draws of one submission binding the same range:
@@ -3459,7 +3480,7 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
         extern float widescreen_hud_shift(float x);
         extern float widescreen_factor(void);
         extern bool widescreen_ui_centred(void);
-        const float *f = (const float *)(uintptr_t)r.addr;
+        const float *f = submitted_data(r.addr, size);
         NvnTexture *t0 = st.rt.ncolor ? st.rt.color[0] : NULL;
         if (widescreen_ui_centred() && t0 && vk_texture_scale_group(t0) == RS_OUT && f[12] == 0 && f[13] == 0 && f[14] == -1.0f &&
             f[1] == 0 && f[2] == 0) {
@@ -3964,8 +3985,8 @@ static void gres_sync(GaRes *e) {
     uint64_t pend = vk_pending_seq(), frame = renderer_present_count() + 1;
     if (e->checked == frame) return;
     e->checked = frame;
-    const uint8_t *g = (const uint8_t *)(uintptr_t)(HEAP_BASE + e->lo);
     uint64_t len = e->hi - e->lo;
+    const uint8_t *g = submitted_data(HEAP_BASE + e->lo, len);
     VkCommandBuffer barrier_cb = VK_NULL_HANDLE;
     for (uint64_t b = 0; b < len;) {
         if (!memcmp(g + b, e->shadow + b, 256)) { b += 256; continue; }
@@ -4012,7 +4033,7 @@ static GaRes *gres_get(uint64_t lo, uint64_t hi, bool create) {
     uint8_t *shadow = malloc(len);
     uint64_t *bseq = calloc((len + 255) / 256, sizeof *bseq);
     if (!shadow || !bseq) { free(shadow); free(bseq); return NULL; }
-    const uint8_t *g = (const uint8_t *)(uintptr_t)(HEAP_BASE + ulo);
+    const uint8_t *g = submitted_data(HEAP_BASE + ulo, len);
     *n = (GaRes){ulo, uhi, ga_res_top, renderer_present_count() + 1, shadow, true, bseq};  // (synced: this frame)
     ga_res_top += (len + 255) & ~255ull;
     memcpy(shadow, g, len);
@@ -4075,7 +4096,7 @@ static uint64_t ga_load_copy(uint64_t at, uint64_t size) {
     if (reuse < 0) { const char *e = getenv("LARECOMP_GCOPY_REUSE"); reuse = !e || atoi(e) != 0; }
     uint64_t seq = vk_pending_seq();
     unsigned slot = (unsigned)((at >> 8) ^ (size >> 8)) & 63;
-    const uint8_t *src = (const uint8_t *)(uintptr_t)(HEAP_BASE + at);
+    const uint8_t *src = submitted_data(HEAP_BASE + at, size);
     if (reuse && cache[slot].valid && cache[slot].seq == seq && cache[slot].gen == gcopy_gen &&
         cache[slot].at == at && cache[slot].size == size && !memcmp(ga_ptr + cache[slot].off, src, size))
         return cache[slot].off;
@@ -4318,7 +4339,7 @@ static void gcopy_prepare(unsigned stage_mask, bool store) {
     pthread_mutex_lock(&gc_lock);
     for (int i = 0; i < m; i++) {
         uint64_t len = r[i].hi - r[i].lo;
-        memcpy((uint8_t *)gc_span.ptr + off, (const void *)(uintptr_t)(HEAP_BASE + r[i].lo), len);
+        submit_snapshot_copy(HEAP_BASE + r[i].lo, len, (uint8_t *)gc_span.ptr + off);
         gmap_tab[i * 4 + 0] = (uint32_t)r[i].lo;
         gmap_tab[i * 4 + 1] = (uint32_t)len;
         gmap_tab[i * 4 + 2] = (uint32_t)(off >> 2);
@@ -4425,6 +4446,12 @@ static void vc_mark_gpu(uint64_t lo, uint64_t hi) {
 
 // A storing shader (stage 0 / 1 / 5) may write any of its bound storage buffers.
 static void vc_mark_sbufs(int stage) {
+#ifdef __ANDROID__
+    // STG can follow pointers beyond the declared SBUF ranges. Without a precise store footprint, conservatively
+    // invalidate captures across the mapped heap; preserve the existing GPU-resident/fence path for these reads.
+    submit_snapshot_write(HEAP_BASE, HEAP_MAX, vk_pending_seq());
+    guest_copy_flush();
+#endif
     for (int i = 0; i < 16; i++) {
         uint64_t a = st.sbuf[stage][i].addr, sz = st.sbuf[stage][i].size;
         if (a >= HEAP_BASE && sz && a - HEAP_BASE < HEAP_MAX) vc_mark_gpu(a - HEAP_BASE, a - HEAP_BASE + sz);
@@ -4578,6 +4605,11 @@ static int g_cs_n;  // (compute program table below)
 // address (the old Prog / Pipe objects are leaked, so pipeline keys holding their pointers can't collide), compute
 // programs, shared copies - and the heap import: its pages are replaced (re-imported on first use).
 void vk_exec_reset(void) {
+#ifdef __ANDROID__
+    submit_snapshot_reset();
+    atomic_store_explicit(&submit_retired, 0, memory_order_release);
+    memset(ubo_inline, 0, sizeof ubo_inline);  // old guest addresses must not keep a reboot's UBOs on the copy path
+#endif
     memset(prog_tab, 0, sizeof prog_tab);
     memset(pipe_tab, 0, sizeof pipe_tab);
     g_cs_n = 0;
@@ -5163,7 +5195,7 @@ static void draw_(CmdRec *r, bool indexed) {
             g_off_layout = false;  // (nn::ui2d's pane: its x at cb3[19], in layout units from the middle)
             const Range *u = &st.ubuf[0][0];
             if (widescreen_ui_centred() && rt && vk_texture_scale_group(rt) == RS_OUT && u->addr && u->size >= 0x230) {
-                const float *f = (const float *)(uintptr_t)u->addr;
+                const float *f = submitted_data(u->addr, u->size);
                 g_off_layout = f[12] == 0 && f[13] == 0 && f[14] == -1.0f && f[15] == 0 && fabsf(f[19]) > 640.0f;
             }
         }
@@ -5226,7 +5258,7 @@ static void draw_(CmdRec *r, bool indexed) {
         extern void widescreen_backdrop_seen(uint64_t hash);
         if (last_hash) widescreen_backdrop_seen(last_hash);
         extern void widescreen_scene_ubo(const float *u, uint64_t size);  // (the camera's view-projection)
-        if (st.ubuf[0][5].addr) widescreen_scene_ubo((const float *)(uintptr_t)st.ubuf[0][5].addr, st.ubuf[0][5].size);
+        if (st.ubuf[0][5].addr) widescreen_scene_ubo(submitted_data(st.ubuf[0][5].addr, st.ubuf[0][5].size), st.ubuf[0][5].size);
     }
     if (g_debug_frame) debug_draw(pr, r, indexed);
     {   // LARECOMP_LOG_RT=<w>x<h>[:<fmt hex>][+<w>x<h>[:<fmt>]...][,<max>[,<from frame>]]: draws into one color target of
@@ -5605,7 +5637,7 @@ static void draw_(CmdRec *r, bool indexed) {
         if (reads_scene) wide_frame = renderer_present_count();
         bool fade_fill = false;
         if (fullscreen_fill && st.ubuf[1][0].addr && st.ubuf[1][0].size >= 12) {
-            const float *c = (const float *)(uintptr_t)st.ubuf[1][0].addr;
+            const float *c = submitted_data(st.ubuf[1][0].addr, st.ubuf[1][0].size);
             bool black = c[0] < 0.01f && c[1] < 0.01f && c[2] < 0.01f, white = c[0] > 0.99f && c[1] > 0.99f && c[2] > 0.99f;
             fade_fill = black || white;
         }
@@ -6161,6 +6193,7 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
     wait_why = "texture -> buffer readback";
     vk_readback_wait();  // make GPU results visible to the CPU before returning them to the game
     memcpy((void *)(uintptr_t)dst, out.ptr, total);
+    guest_copy_invalidate(dst, dst + total);
     {   static int nlog;
         if (getenv("LARECOMP_LOG_READBACK") && nlog++ < 20) {
             uint64_t nz = 0;
@@ -7087,7 +7120,8 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_COPY_BUFFER_TO_BUFFER:
             wait_why = "buffer -> buffer copy";
             renderer_flush();
-            memmove((void *)(uintptr_t)r->x[1], (void *)(uintptr_t)r->x[0], r->x[2]);
+            memmove((void *)(uintptr_t)r->x[1], submitted_data(r->x[0], r->x[2]), r->x[2]);
+            if (r->x[2] <= UINT64_MAX - r->x[1]) guest_copy_invalidate(r->x[1], r->x[1] + r->x[2]);
             break;
         default: {
             static bool reported[CMD_COUNT];
@@ -7119,6 +7153,7 @@ void backend_execute(uint64_t handle) {
 #endif
     PROF_T0();
 #ifdef __ANDROID__
+    if (submit_snapshot_enabled()) guest_copy_flush();  // distinct NVN captures can share one GPU submission
     game_pending = true;  // (renderer_fence_seq)
 #endif
     static int log_lists = -1;  // LARECOMP_LOG_LISTS=1: the command lists of one frame in 120 (draws, passes, time)

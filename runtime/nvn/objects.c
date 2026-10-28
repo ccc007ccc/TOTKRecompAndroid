@@ -7,6 +7,10 @@
 #include "../settings.h"
 #include "../framepace.h"
 #include "nvn.h"
+#ifdef __ANDROID__
+#include <pthread.h>
+#include "submit_snapshot.h"
+#endif
 
 void renderer_sync(void);
 
@@ -332,6 +336,50 @@ NVN(nvnEventGetMemoryPool) { RET(G(uint64_t, A(0), 8)); }
 NVN(nvnEventGetMemoryOffset) { RET(G(uint64_t, A(0), 16)); }
 
 // ================================================================== memory pools
+#ifdef __ANDROID__
+typedef struct SubmitPool { NvnPool *key; uint64_t lo, hi; struct SubmitPool *next; } SubmitPool;
+static SubmitPool *submit_pools;
+static pthread_mutex_t submit_pool_lock = PTHREAD_MUTEX_INITIALIZER;
+static void submit_pool_update(NvnPool *pool) {
+    pthread_mutex_lock(&submit_pool_lock);
+    SubmitPool *entry = submit_pools;
+    while (entry && entry->key != pool) entry = entry->next;
+    if (!entry) {
+        entry = calloc(1, sizeof *entry);
+        if (entry) { entry->key = pool; entry->next = submit_pools; submit_pools = entry; }
+    }
+    if (entry) {
+        entry->lo = pool->storage;
+        entry->hi = pool->size <= UINT64_MAX - pool->storage ? pool->storage + pool->size : 0;
+    }
+    pthread_mutex_unlock(&submit_pool_lock);
+}
+static void submit_pool_remove(NvnPool *pool) {
+    pthread_mutex_lock(&submit_pool_lock);
+    for (SubmitPool **entry = &submit_pools; *entry; entry = &(*entry)->next)
+        if ((*entry)->key == pool) { SubmitPool *old = *entry; *entry = old->next; free(old); break; }
+    pthread_mutex_unlock(&submit_pool_lock);
+}
+bool nvn_submit_read(uint64_t addr, uint64_t size, void *dst, uint64_t *pool_lo, uint64_t *pool_hi) {
+    if (!size || size > UINT64_MAX - addr) return false;
+    pthread_mutex_lock(&submit_pool_lock);
+    bool ok = false;
+    for (SubmitPool *entry = submit_pools; entry; entry = entry->next)
+        if (entry->lo && addr >= entry->lo && addr < entry->hi && size <= entry->hi - addr) {
+            *pool_lo = entry->lo; *pool_hi = entry->hi;
+            // Finalization/remapping cannot invalidate the pool while its bytes are being copied.
+            if (dst) memcpy(dst, (const void *)(uintptr_t)addr, (size_t)size);
+            ok = true; break;
+        }
+    pthread_mutex_unlock(&submit_pool_lock);
+    return ok;
+}
+RT_ON_RESET(submit_pools_reset) {
+    pthread_mutex_lock(&submit_pool_lock);
+    while (submit_pools) { SubmitPool *next = submit_pools->next; free(submit_pools); submit_pools = next; }
+    pthread_mutex_unlock(&submit_pool_lock);
+}
+#endif
 // Builder: device@0 flags@8 storage@0x10 size@0x18
 NVN(nvnMemoryPoolBuilderSetDevice) { G(uint64_t, A(0), 0) = A(1); }
 NVN(nvnMemoryPoolBuilderSetDefaults) { memset(AP(0), 0, 0x20); G(uint32_t, A(0), 8) = 0x9; }
@@ -347,12 +395,21 @@ NVN(nvnMemoryPoolInitialize) {
     p->storage = G(uint64_t, A(1), 0x10);
     p->size = G(uint64_t, A(1), 0x18);
     p->flags = G(uint32_t, A(1), 8);
+#ifdef __ANDROID__
+    submit_pool_update(p);
+#endif
     if (ENV("LARECOMP_LOG_POOLS"))
         LOG("[nvn] pool %llx storage=%llx size=%llx flags=%x\n", A(0), p->storage, p->size, p->flags);
     SET_HOST(A(0), p);
     RET(1);
 }
-NVN(nvnMemoryPoolFinalize) { free(HOST(NvnPool, A(0))); SET_HOST(A(0), 0); }
+NVN(nvnMemoryPoolFinalize) {
+    NvnPool *pool = HOST(NvnPool, A(0));
+#ifdef __ANDROID__
+    submit_pool_remove(pool);
+#endif
+    free(pool); SET_HOST(A(0), 0);
+}
 NVN(nvnMemoryPoolSetDebugLabel) { (void)c; }
 NVN(nvnMemoryPoolMap) { RET(HOST(NvnPool, A(0))->storage); }
 NVN(nvnMemoryPoolGetBufferAddress) { RET(HOST(NvnPool, A(0))->storage); }  // GPU address == CPU address
@@ -391,6 +448,9 @@ NVN(nvnMemoryPoolMapVirtual) {
         return;
     }
     dst->storage = base;
+#ifdef __ANDROID__
+    submit_pool_update(dst);
+#endif
     if (ENV("LARECOMP_LOG_POOLS"))
         LOG("[nvn] MapVirtual %llx: %llx bytes aliased at %llx\n", A(0), covered, base);
     RET(1);

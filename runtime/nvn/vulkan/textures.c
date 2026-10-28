@@ -946,7 +946,17 @@ TexBackend *vk_tex(NvnTexture *t, bool for_render) {
     return b;
 }
 
-void renderer_mark_gpu_owned(NvnTexture *t) { tex_backend(t)->gpu_owned = true; }
+void renderer_mark_gpu_owned(NvnTexture *t) {
+#ifdef __ANDROID__
+    extern bool submit_snapshot_enabled(void);
+    if (t->addr && submit_snapshot_enabled()) {
+        uint64_t size = tegra_total_size(&t->layout);
+        extern void submit_snapshot_write(uint64_t addr, uint64_t size, uint64_t seq);
+        submit_snapshot_write(t->addr, size, vk_pending_seq());
+    }
+#endif
+    tex_backend(t)->gpu_owned = true;
+}
 bool renderer_is_gpu_owned(NvnTexture *t) { return tex_backend(t)->gpu_owned; }
 
 bool renderer_texture_scalable(NvnTexture *t) { return tex_backend(t)->scalable; }
