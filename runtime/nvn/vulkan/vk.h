@@ -107,6 +107,7 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout);
 enum { RS_NONE = 0, RS_SCENE = 1, RS_OUT = 2 };  // render-target scale groups (textures.c)
 typedef struct TexBackend {
     VkImage image;
+    uint64_t image_generation;  // unique across game-image reallocations, even if Vulkan recycles a handle
     VmaAllocation mem;
     VkFormat format;
     VkImageViewType base_type;

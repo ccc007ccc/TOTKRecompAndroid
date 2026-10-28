@@ -8,6 +8,7 @@ root = Path(__file__).resolve().parents[1]
 out = root / 'build' / 'gpu-timing-tests'
 out.mkdir(parents=True, exist_ok=True)
 bin_dir = Path(sys.argv[1])
+exe = '.exe' if sys.platform == 'win32' else ''
 source = r'''
 #define __ANDROID__ 1
 #include "timing_trace_pair.h"
@@ -49,9 +50,9 @@ int check(void) {
 '''
 (out / 'test.c').write_text(source)
 include = root / 'runtime/nvn/vulkan'
-subprocess.run([str(bin_dir / 'clang.exe'), '--target=wasm32', '-ffreestanding', '-O2', '-nostdlib',
+subprocess.run([str(bin_dir / ('clang' + exe)), '--target=wasm32', '-ffreestanding', '-O2', '-nostdlib',
                 '-I', str(include), '-c', str(out / 'test.c'), '-o', str(out / 'test.o')], check=True)
-subprocess.run([str(bin_dir / 'ld.lld.exe'), '-flavor', 'wasm', '--no-entry', '--export=check',
+subprocess.run([str(bin_dir / ('ld.lld' + exe)), '-flavor', 'wasm', '--no-entry', '--export=check',
                 str(out / 'test.o'), '-o', str(out / 'test.wasm')], check=True)
 (out / 'run.cjs').write_text(r'''
 const fs = require('fs');

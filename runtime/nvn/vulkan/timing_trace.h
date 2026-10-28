@@ -3,7 +3,7 @@
 #include <stdint.h>
 
 #ifdef __ANDROID__
-enum { VK_TIMING_TIMELINE, VK_TIMING_SLOT, VK_TIMING_ACQUIRE, VK_TIMING_PRESENT, VK_TIMING_SUBMIT, VK_TIMING_WAITS };
+enum { VK_TIMING_TIMELINE, VK_TIMING_SLOT, VK_TIMING_ACQUIRE, VK_TIMING_PRESENT, VK_TIMING_SUBMIT, VK_TIMING_POLL, VK_TIMING_WAITS };
 typedef struct {
     uint64_t address, frame, seq, host_ns;
     int64_t raw_ns, idle_ns;

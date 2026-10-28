@@ -22,8 +22,10 @@
 #define JUMP_RESERVE ((sizeof(CmdRec) + SHADOW_K - 1) / SHADOW_K)  // (game bytes) the chaining jump at a chunk's end
 
 static NvnCmdBuf *cb_of(uint64_t guest) { return HOST(NvnCmdBuf, guest); }
+static void shadow_init(void);
 
 NVN(nvnCommandBufferInitialize) {
+    shadow_init();
     NvnCmdBuf *cb = calloc(1, sizeof *cb);
     cb->guest = A(0);
     SET_HOST(A(0), cb);
@@ -41,24 +43,7 @@ static CmdRec *raw_rec(uint64_t at, uint32_t op, uint32_t size) {
 }
 
 // ---- shadow pages: guest page -> host block of SHADOW_PAGE * SHADOW_K bytes (allocated at first use, kept)
-enum { SHADOW_SLOTS = 1 << 16 };
-static struct { uint64_t page; uint8_t *mem; } g_shadow[SHADOW_SLOTS];
-static pthread_mutex_t g_shadow_lock = PTHREAD_MUTEX_INITIALIZER;
-
-static uint64_t shadow_at(uint64_t guest) {
-    uint64_t page = guest / SHADOW_PAGE + 1;  // (+1: 0 marks an empty slot)
-    pthread_mutex_lock(&g_shadow_lock);
-    uint32_t i = (uint32_t)(page * 0x9E3779B97F4A7C15ull >> 48) & (SHADOW_SLOTS - 1);
-    while (g_shadow[i].page && g_shadow[i].page != page) i = (i + 1) & (SHADOW_SLOTS - 1);
-    if (!g_shadow[i].page) {
-        g_shadow[i].mem = malloc(SHADOW_PAGE * SHADOW_K + sizeof(CmdRec));
-        if (!g_shadow[i].mem) FATAL("nvn: no memory for a command shadow page\n");
-        g_shadow[i].page = page;
-    }
-    uint8_t *m = g_shadow[i].mem;
-    pthread_mutex_unlock(&g_shadow_lock);
-    return (uint64_t)(uintptr_t)m + guest % SHADOW_PAGE * SHADOW_K;
-}
+#include "command_shadow.h"
 
 // The chunk records go to: cb->gmem (guest address; 0: host memory at cb->mem), cb->size and cb->used in game bytes.
 static uint64_t write_at(const NvnCmdBuf *cb) {
