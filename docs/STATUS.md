@@ -58,7 +58,7 @@ run40 补齐 `SetRenderEnable` 与 `SetRenderEnableConditional`，在命令执�
 应用开发版本为 `0.1.0-totk-dev`，它与游戏版本 1.4.3、上游应用版本是不同编号。
 基础已合并上游 `ef7a306` / `v0.1.11-beta`；本分支另审阅至 `5675618197` / `v0.2.2-beta` 并选择性适配，
 合入两笔tib-kpl运行时修复，具体来源、已整合行为和待验收项见 [上游整合](UPSTREAM-INTEGRATION.md)。
-当前工作分支为 `perf/totk-frame-pacing`，尚未合入 `main`。
+性能与帧率适配分支已合入 `main`，后续测试与修复直接在 `main` 进行。
 
 最近已验收云层修复的版本为 run50，保留条件渲染、纹理读取、压缩尾块、错误弹窗、音频、水面反射和空岛细条修复，使用 Banner Turnip。
 定向对照设置 `LARECOMP_GAME_DYNRES=1`，

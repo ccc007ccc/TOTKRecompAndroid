@@ -59,7 +59,7 @@ The user confirmed that this device build fixed the reported halo clipping and s
 The application development version is `0.1.0-totk-dev`, distinct from game version 1.4.3 and upstream release numbers.
 The base includes upstream `ef7a306` / `v0.1.11-beta`. Further changes were reviewed through `5675618197` / `v0.2.2-beta`
 and selectively adapted, including two tib-kpl runtime ports. See [integration](UPSTREAM-INTEGRATION.md) for sources,
-implemented behavior and validation limits. This work is on `perf/totk-frame-pacing` and has not been merged into `main`.
+implemented behavior and validation limits. The performance/frame-timing branch is merged into `main`; subsequent testing and fixes use `main`.
 
 The latest cloud-fix acceptance is run50 with Banner Turnip, retaining conditional rendering, texture reads, compressed tails, error dialogs, audio, water reflections and the sky-island strip fix.
 The focused comparison uses `LARECOMP_GAME_DYNRES=1` to preserve the earlier game-resolution behavior;
