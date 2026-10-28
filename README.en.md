@@ -17,9 +17,9 @@ the user also confirmed that the gloom checkerboard disappeared.
 
 The user also confirmed the latest fix for torch-halo clipping and large-area scene flicker after NVN conditional rendering was implemented.
 **The project is still in development.** Audio, save transactions, complete input flows, long sessions and performance need further validation.
-30/45/60/120 FPS timing is integrated, with performance profiles selecting O3/ThinLTO for the runtime and every game
-unit. Target rates and achieved frame rates are validated separately. See [phone performance tests](docs/en/PHONE-PERFORMANCE.md)
-for the measured O0/O1 comparison.
+30/45/60/120 FPS timing is integrated. Full O3/ThinLTO builds for the runtime and every game unit, including the 8 Elite
+profile, have been deployed. Target rates and achieved frame rates are validated separately. See [phone performance tests](docs/en/PHONE-PERFORMANCE.md)
+for measurements and their limits. Routine tests load automatically, measure at the 60 target and exit on time.
 See [status and known issues](docs/en/STATUS.md) and the [detailed investigation record, in Chinese](docs/TOTK-PORT.md).
 
 ## Build and run

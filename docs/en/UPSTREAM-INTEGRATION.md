@@ -32,6 +32,7 @@ are separate checks. See [build profiles](BUILD.md) and [phone measurements](PHO
 | Native profiles | Runtime/hooks and every game unit use O3/ThinLTO in performance profiles; giant O0 fallbacks and optnone are prohibited |
 | FPS timing | Guarded 1.4.3 producer/controller/cloth/bounce hooks, direct BL/LR retained, Android surface and ADPF budgets match all four rates |
 | Submission data | Optional UBO/SSBO/CopyBuffer-source capture with inherited bindings, resource bounds, lifetime and GPU-write invalidation |
+| Vertex sampling | Upstream 1/256-texel quantization is opt-in with `LARECOMP_VS_SNAP=1`; `LARECOMP_NO_VS_SNAP` takes precedence. ShaderKey separates variants, size queries clamp to valid mips, and the existing gather correction remains enabled |
 
 The old 20 FPS mode waits three 60 Hz VI periods. Removing that wait alone speeds up the game. The new path supplies
 measured time to TotK's producer while preserving its half-step and slow-motion choices. Five-frame averaging has no
@@ -53,4 +54,16 @@ covers the latest FIFO correction. Controller calibration and general save-trans
 input/data review.
 
 All three APK profiles have built successfully with verified package IDs, icons, debug flags, signatures and actual
-native commands. Full O3 game-library linking and device throughput/animation/physics checks remain separate gates.
+native commands. The full O3/ThinLTO 8 Elite library has linked, deployed and completed short 60-target measurements.
+The O1/O3 runs used different temperatures and charging conditions, so they establish no performance gain or regression;
+the completed comparison is not being repeated. See [phone measurements](PHONE-PERFORMANCE.md). All four target paths
+have low-throughput device records; sustained rates above 30 and 120-FPS gameplay are not established.
+
+Routine tests now load the selected save, measure at the 60 target without pausing, and exit automatically.
+The user confirmed that intermittent missing grass also occurs in the ordinary app; it remains deferred and the
+vertex-sampling option is not a proven fix. The automatic test entry can leave the loading-screen grid black;
+the user reports normal manual loading and has deferred this diagnostic-only issue.
+
+Sampling validation covers 50 GLSL/SPIR-V cases, including negative/out-of-range LODs, plus default unsnapped coordinates
+and separate cache identities. Timing, generator, upload/writeback, build-profile, package-identity, submission-snapshot
+and automatic-exit checks are also recorded. These checks do not establish complete gameplay correctness.
