@@ -19,9 +19,43 @@ Open-source dependencies require network access on the first build.
 bash android/build_totk.sh
 ```
 
-Output: `android/botwrecompandroid/app/build/outputs/apk/debug/app-debug.apk`.
-Application ID: `com.totkrecomp.android`. Historical Java/JNI directory names are retained.
+The default Debug/dev package is `.work/totk-port/packages/debug-dev/TOTKRecompAndroid-debug-dev-arm64-v8a.apk`.
+Debug uses `com.totkrecomp.android.debug`, a Debug label and a blue DBG icon badge. Release uses
+`com.totkrecomp.android` and the original icon. Historical Java/JNI directory names are retained.
 The APK contains the runtime, not game code.
+
+### Build profiles
+
+| `--profile` | Runtime and native hooks | Every generated game unit |
+| --- | --- | --- |
+| `dev` | O2 | O1, with cold/giant O0 policies available |
+| `performance` | O3 + ThinLTO | O3 + ThinLTO; O0 exceptions and optnone are prohibited |
+| `snapdragon-8elite` | O3 + ThinLTO, ARMv8.7-A + crypto + FP16, Oryon tuning | The same flags, including giant functions |
+
+Release defaults to `performance`; selecting a performance profile alone selects Release. The 8 Elite profile uses
+`-march=armv8.7-a+crypto+fp16 -mtune=oryon-1`. NDK r30's Clang 21 has no distinct second-generation Oryon scheduling
+model. Performance profiles retain `-fno-fast-math` to preserve guest floating-point behavior.
+
+```bash
+bash android/build_totk.sh release --profile snapdragon-8elite
+bash android/build_gamelib.sh .work/totk-port/game/exefs release --profile snapdragon-8elite
+```
+
+Each `.work/totk-port/packages/<variant>-<profile>/` directory contains its APK, the exact `libmain.so` extracted
+from it, and the matching game library/sidecars. `build.json` records SHA256 hashes and the actual profile/GAMELIB_ID
+read from stripped ELF exports. Packaging/deployment also read the actual binary APK manifest and reject stale
+metadata, unintended application packages and incompatible profiles/IDs.
+
+Add `--perftest` to both commands for `com.totkrecomp.android.perftest`; its directory gains a `-perftest` suffix.
+Perftest Release keeps the debug signature and `run-as` while native CMake remains Release/O3. Ordinary Release is
+not debuggable. `push_game.sh --perftest` explicitly targets this package. Changing profile requires both a new APK
+and matching game library.
+
+On memory-limited hosts, set `JOBS=2 TOTK_LTO_JOBS=1` in dev. Native Ninja compiler pools also obey JOBS; linking is
+serial. `TOTK_BUILD_LAUNCHER` can provide a compiler/linker resource-limit wrapper. NDK's LICM promotion workaround
+applies to both compilation and ThinLTO backends and is part of the performance library identity. Phone Zig receives
+an ARM feature set and direct Clang tuning arguments; `-O3 -flto=thin` selects real LLD O3 without unsupported Zig
+linker CLI options.
 
 ## Prepare your game
 
@@ -57,22 +91,24 @@ Build the APK first, because the generated library links against its runtime:
 
 ```bash
 GAMELIB_GEN="$PWD/.work/totk-port/generated" \
-GAMELIB_OUT="$PWD/.work/totk-port/out" \
-bash android/build_gamelib.sh .work/totk-port/game/exefs
+bash android/build_gamelib.sh .work/totk-port/game/exefs debug --profile dev
 
 "$PYTHON" tools/deploy_totk.py .work/totk-port/game \
-  --library .work/totk-port/out --serial "$ANDROID_SERIAL" \
-  --apk android/botwrecompandroid/app/build/outputs/apk/debug/app-debug.apk --launch
+  --library .work/totk-port/packages/debug-dev --serial "$ANDROID_SERIAL" \
+  --apk .work/totk-port/packages/debug-dev/TOTKRecompAndroid-debug-dev-arm64-v8a.apk --launch
 ```
 
-The library is `totkgame.so` with identity sidecars. Normal builds use `-O1`, with exceptionally large functions at `-O0`.
-`GAMELIB_FAST_COMPILE=ON` sets all functions to `-O0` for diagnosis and is not a performance configuration.
+The library is `totkgame.so` with identity sidecars. Only dev uses O1/giant O0 policies. Performance profiles reject
+`GAMELIB_FAST_COMPILE=ON` and all additional O0 exceptions.
 See [phone performance tests](PHONE-PERFORMANCE.md) for measured NDK r30 compiler outliers.
 `GAMELIB_DISABLE_LICM_PROMOTION` defaults to ON; `GAMELIB_EXTRA_HEAVY_SOURCES` accepts an explicit semicolon-separated
-list of additional O0 units and defaults to empty. Record these build parameters with performance results.
+list of additional O0 units only in dev and defaults to empty. Record these build parameters with performance results.
+On-phone resume signatures include compile/link flags and all four full 32-byte module build IDs.
 
-Deployment uses the normal APK/Activity/JNI route. Data lives in `Android/data/com.totkrecomp.android/files/`, isolated from BOTW.
-No helper is placed in `/data/local/tmp`. Complete on-phone compilation is not part of the currently validated workflow.
+Deployment uses the normal APK/Activity/JNI route. Data lives in `Android/data/<selected-package>/files/`, with separate
+saves for Debug, Release and perftest. No helper is placed in `/data/local/tmp`. The foreground build service and phone
+profile parameters are integrated; pinned Zig cross-compilation checks passed. Complete on-phone compilation remains
+unvalidated and its compiler is not included in the current APK.
 
 ## Runtime-only updates
 
@@ -83,7 +119,7 @@ distrobox enter dev -- bash <<'SH'
 set -e
 source android/dev_env.sh
 cd android/botwrecompandroid
-bash gradlew --no-daemon --max-workers=4 assembleDebug
+bash gradlew --no-daemon --max-workers=2 assembleDebug
 SH
 ```
 

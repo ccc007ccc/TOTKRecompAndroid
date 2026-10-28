@@ -19,4 +19,7 @@
     <string name="driver_system">Use the system driver</string>
     <string name="driver_close">Close</string>
     <string name="driver_error_intro">The graphics driver couldn\'t run the game. A Turnip driver for your GPU (.zip) usually solves it: tap Install a driver.\n\nDetails:</string>
+    <string name="build_channel">Game setup</string>
+    <string name="build_title">Compiling game code</string>
+    <string name="build_text">The build continues with the screen off. Tap to return.</string>
 </resources>

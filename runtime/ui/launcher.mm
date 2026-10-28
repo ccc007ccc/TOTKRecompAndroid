@@ -329,8 +329,15 @@ static unsigned long long g_phase_base;
 static std::atomic<float> g_build_frac{-1};  // -1: not building
 static bool g_copy_skipped;                  // (only the game code to build: the bar is all of that)
 static void setup_progress(uint64_t done, uint64_t) { g_done = g_phase_base + done; }
+#ifdef __ANDROID__
+static void android_call(const char *method);
+static void android_call_int(const char *method, int value);
+#endif
 static void build_progress(double f, const char *step) {
     g_build_frac = (float)f;
+#ifdef __ANDROID__
+    android_call_int("buildServiceProgress", (int)(f * 100));
+#endif
     static const char *last;
     if (step != last) last = step, set_job(step);
 }
@@ -346,7 +353,13 @@ static bool build_game_code(const std::string &dir) {
     GameBuildOpts o = {build_progress, cores < ram_gb - 2 ? cores : ram_gb - 2 > 1 ? ram_gb - 2 : 1};
     char why[256] = "";
     g_build_frac = 0;
+#ifdef __ANDROID__
+    android_call("buildServiceStart");
+#endif
     bool ok = gamebuild_run(dir.c_str(), &o, why, sizeof why);
+#ifdef __ANDROID__
+    android_call("buildServiceStop");
+#endif
     if (!ok) {
         fprintf(stderr, "[launcher] game code: %s\n", why);
         set_failure(FAIL_BUILD);
@@ -467,6 +480,18 @@ static void android_call(const char *method) {  // a static method of the activi
     if (m) env->CallStaticVoidMethod(c, m);
     if (env->ExceptionCheck()) env->ExceptionClear();
     env->DeleteLocalRef(c);
+    env->DeleteLocalRef(act);
+}
+
+static void android_call_int(const char *method, int value) {
+    JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
+    jobject act = (jobject)SDL_GetAndroidActivity();
+    if (!env || !act) return;
+    jclass cls = env->GetObjectClass(act);
+    jmethodID call = env->GetStaticMethodID(cls, method, "(I)V");
+    if (call) env->CallStaticVoidMethod(cls, call, (jint)value);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    env->DeleteLocalRef(cls);
     env->DeleteLocalRef(act);
 }
 

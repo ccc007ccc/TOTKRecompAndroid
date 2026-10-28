@@ -2,9 +2,12 @@
 # the headers the generated code is compiled against, and its flags. Included by the app's CMakeLists.txt
 # (libmain.so checks it) and android/gamelib/CMakeLists.txt (totkgame.so carries it), so the two always agree.
 # Needs R (the repository). Sets GAMELIB_ID and GAMELIB_FLAGS (the generated code's compile flags, as a list).
-# Match the on-device builder: TotK's large generated functions make -O2
-# prohibitively expensive during bring-up. Giant jump-table functions use -O0.
-set(GAMELIB_FLAGS -O1 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -fPIC)
+include(${R}/android/build_profiles.cmake)
+# The dev profile retains the bring-up settings. Performance profiles optimize every generated unit.
+set(GAMELIB_FLAGS ${TOTK_GAME_OPT_FLAGS} -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -fPIC)
+if(NOT TOTK_BUILD_PROFILE STREQUAL "dev" AND TOTK_DISABLE_LICM_PROMOTION)
+    list(APPEND GAMELIB_FLAGS -mllvm -disable-licm-promotion)
+endif()
 set(_gamelib_srcs tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools/passes.py tools/patches.py
     tools/simd_c.py tools/gamelib_entry.c runtime/hle/hle_symbols.txt
     runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h runtime/game_profile.h)

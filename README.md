@@ -15,7 +15,7 @@ Android 应用框架和 Vulkan 运行时，开发目标改为《王国之泪》�
 用户已确认人物模型恢复正常；使用 Banner Turnip 27 A8xx 与采样补偿后，瘴气棋盘格消失。
 
 补齐 NVN 条件渲染后，针对火把光晕截断和大面积场景闪烁的本轮修复也已获用户确认。
-**项目仍处于开发阶段**：音频、存档事务、输入全流程、长时间运行及性能仍需验收。当前调试游戏库使用 `-O0`，不能作为性能基准。
+**项目仍处于开发阶段**：音频、存档事务、输入全流程、长时间运行及性能仍需验收。已接入 30／45／60／120 FPS 计时，提供运行时与全部游戏单元 O3／ThinLTO 的性能档；目标档位与实际帧率分别验证。O0／O1 对照结果见 [手机性能测试](docs/PHONE-PERFORMANCE.md)。
 最新结论见 [状态与已知问题](docs/STATUS.md)，完整实验见 [适配记录](docs/TOTK-PORT.md)。
 
 ## 构建与运行
@@ -35,11 +35,11 @@ bash android/build_totk.sh
 | 项目 | 当前值 |
 | --- | --- |
 | 游戏 | 《王国之泪》Switch 1.4.3，程序 ID `0100F2C0115B6000` |
-| 应用 | `com.totkrecomp.android`，Android 11+、ARM64 |
+| 应用 | Release：`com.totkrecomp.android`；Debug 追加 `.debug`；独立测试包追加 `.perftest`；Android 11+、ARM64 |
 | 游戏库 | `totkgame.so`，四模块 ABI 2 |
-| APK | `android/botwrecompandroid/app/build/outputs/apk/debug/app-debug.apk` |
+| APK | `.work/totk-port/packages/<variant>-<profile>/`，dev／performance／snapdragon-8elite 三档 |
 | 本机工作数据 | `.work/totk-port/`，不进入 Git |
-| 手机数据 | `Android/data/com.totkrecomp.android/files/` |
+| 手机数据 | `Android/data/<所选包名>/files/` |
 
 `android/botwrecompandroid/`、Java/JNI 类名及 `LARECOMP_*` 环境变量保留上游技术名称，
 不代表应用仍以 BOTW 为目标。部分继承界面和工具还没有完成 TOTK 适配，以文档列明的流程为准。

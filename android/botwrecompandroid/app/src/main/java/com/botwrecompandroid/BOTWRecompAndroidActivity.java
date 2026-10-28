@@ -226,6 +226,18 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
     }
 
     // ---- pickers (called from the start screen, on SDL's thread)
+    public static void buildServiceStart() {
+        if (self == null) return;
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+                self.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
+            self.runOnUiThread(() -> self.requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 0x4c4b));
+        BuildService.start(self);
+    }
+
+    public static void buildServiceStop() { if (self != null) BuildService.stop(self); }
+
+    public static void buildServiceProgress(int percent) { BuildService.progress(percent); }
+
     public static void pickGameFolder() {
         self.runOnUiThread(() -> {
             try {

@@ -19,4 +19,7 @@
     <string name="driver_system">使用系統驅動程式</string>
     <string name="driver_close">關閉</string>
     <string name="driver_error_intro">圖形驅動程式無法執行遊戲。為你的 GPU 安裝 Turnip 驅動程式（.zip）通常可以解決：點按「安裝驅動程式」。\n\n詳細資訊：</string>
+    <string name="build_channel">遊戲準備</string>
+    <string name="build_title">正在編譯遊戲程式碼</string>
+    <string name="build_text">關閉螢幕後仍會繼續編譯，點選返回。</string>
 </resources>

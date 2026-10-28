@@ -12,9 +12,30 @@ SteamOS 宿主只作文件管理，构建在 Distrobox **dev** 内完成。默�
 bash android/build_totk.sh
 ```
 
-APK 输出在 `android/botwrecompandroid/app/build/outputs/apk/debug/app-debug.apk`。安装包名为 `com.totkrecomp.android`；Java/JNI 源目录名称保留以减少迁移改动。需要网络下载固定版本的开源构建依赖。APK 不包含游戏代码。
+默认构建 Debug/dev，完整包目录为 `.work/totk-port/packages/debug-dev/`，APK 名称为 `TOTKRecompAndroid-debug-dev-arm64-v8a.apk`。Debug 包名 `com.totkrecomp.android.debug`，名称带 Debug，图标带蓝色 DBG 标记；Release 使用 `com.totkrecomp.android` 和原图标。Java/JNI 源目录名称保留。APK 不包含游戏代码。
 
 需要 Java 21、Android SDK、NDK r30、CMake 4.1.2 及常规 C/C++ 构建工具。脚本创建项目内 Python 环境并安装 Capstone、Unicorn 和 LZ4；不应使用宿主包管理器安装依赖。本文的 hactool 路径仅为示例，应替换为工具链目录中的实际可执行文件。
+
+### 编译档
+
+| `--profile` | 运行时及原生 hooks | 所有生成游戏单元 |
+| --- | --- | --- |
+| `dev` | O2 | O1，允许冷函数/巨大函数 O0 策略 |
+| `performance` | O3 + ThinLTO | O3 + ThinLTO，禁止 O0 例外和 optnone |
+| `snapdragon-8elite` | O3 + ThinLTO，ARMv8.7-A + crypto + FP16，Oryon 调优 | 同一组参数，巨大函数也完整优化 |
+
+`release` 默认选择 `performance`；单独指定性能 profile 默认选择 Release。`snapdragon-8elite` 使用 `-march=armv8.7-a+crypto+fp16 -mtune=oryon-1`；NDK r30 的 Clang 21 没有独立的第二代 Oryon 调度模型。性能档保留 `-fno-fast-math`，维护游戏的浮点语义。
+
+```bash
+bash android/build_totk.sh release --profile snapdragon-8elite
+bash android/build_gamelib.sh .work/totk-port/game/exefs release --profile snapdragon-8elite
+```
+
+APK、从 APK 提取的精确 `libmain.so`、游戏库及侧车文件分别放入 `.work/totk-port/packages/<variant>-<profile>/`。`build.json` 记录 APK/运行时 SHA256，以及从 stripped ELF 导出符号读取的实际 profile 和 `GAMELIB_ID`。打包与部署还从实际 APK manifest 核对包名，拒绝过期元数据、错误包名及 profile/身份不匹配的组合。
+
+需要独立性能测试包时，两条构建命令都加 `--perftest`，目录追加 `-perftest`，包名固定为 `com.totkrecomp.android.perftest`。它的 Release 保留 Debug 签名和 `run-as`，原生 CMake 仍为 Release/O3；普通 Release 不开启调试标记。`push_game.sh --perftest` 会明确选择该包。更换 profile 必须同时更新 APK 和游戏库。
+
+资源紧张时先在 dev 内设置 `JOBS=2 TOTK_LTO_JOBS=1`。原生 Ninja 编译池也受 JOBS 限制，链接单任务执行。可通过 `TOTK_BUILD_LAUNCHER` 为编译器/链接器设置本机资源上限。NDK 的 LICM promotion 修正同时作用于性能档前置编译和 ThinLTO 后端，参数纳入库身份。手机 Zig 参数另行转换：ARM ISA 使用 feature set，Oryon tuning 直接传给 Clang；链接以 `-O3 -flto=thin` 选择实际 LLD O3，不传 Zig 不支持的 LLD CLI 选项。
 
 ## 准备自己的游戏
 
@@ -41,15 +62,14 @@ export ANDROID_SERIAL="替换为 adb devices -l 显示的一加设备序列号�
 
 ```bash
 GAMELIB_GEN="$PWD/.work/totk-port/generated" \
-GAMELIB_OUT="$PWD/.work/totk-port/out" \
-bash android/build_gamelib.sh .work/totk-port/game/exefs
+bash android/build_gamelib.sh .work/totk-port/game/exefs debug --profile dev
 
 "$PYTHON" tools/deploy_totk.py .work/totk-port/game \
-  --library .work/totk-port/out --serial "$ANDROID_SERIAL" \
-  --apk android/botwrecompandroid/app/build/outputs/apk/debug/app-debug.apk --launch
+  --library .work/totk-port/packages/debug-dev --serial "$ANDROID_SERIAL" \
+  --apk .work/totk-port/packages/debug-dev/TOTKRecompAndroid-debug-dev-arm64-v8a.apk --launch
 ```
 
-部署通过正常 APK / Activity / JNI 启动，不在手机 `/data/local/tmp` 放辅助程序。运行数据位于 `Android/data/com.totkrecomp.android/files/`，与其他应用的存档分开。尚未打包端侧编译器；本流程在电脑生成游戏库。
+部署通过正常 APK / Activity / JNI 启动，不在手机 `/data/local/tmp` 放辅助程序。运行数据位于所选包的 `Android/data/<package>/files/`，三种包的存档分开。尚未打包端侧编译器；本流程在电脑生成游戏库。端侧构建服务与 profile 参数已适配，参数经过同版 Zig 跨编译检查，完整手机编译仍待验收。
 
 ## 验证与清理
 
@@ -74,7 +94,7 @@ distrobox enter dev -- bash <<'SH'
 set -e
 source android/dev_env.sh
 cd android/botwrecompandroid
-bash gradlew --no-daemon --max-workers=4 assembleDebug
+bash gradlew --no-daemon --max-workers=2 assembleDebug
 SH
 ```
 
@@ -82,11 +102,10 @@ SH
 `android/run_boot.sh` 会停止并重新启动应用，抓取限时日志后保留游戏运行；只在需要新版本或明确对照时使用。
 设备列表可能同时包含其他设备，每次部署都必须指定正确目标。
 
-默认游戏库使用 `-O1`，超大跳转表函数单独 `-O0`。`GAMELIB_FAST_COMPILE=ON` 会把全部函数设为 `-O0`，
-适合定位启动问题，不适合性能验收。NDK 版本、依赖或生成器变化后，需按脚本输入签名重新构建相应产物。
+只有 dev 游戏库采用 O1/巨大函数 O0；`GAMELIB_FAST_COMPILE=ON` 只允许用于 dev 排错。性能档拒绝该开关及任何额外 O0 名单。NDK 版本、依赖或生成器变化后，需按脚本输入签名重新构建相应产物。端侧续传签名检查编译/链接参数及全部四个模块的完整 32-byte build ID。
 
 NDK r30 的巨型控制流编译问题和已验证的例外见[手机性能测试](PHONE-PERFORMANCE.md)。
-`GAMELIB_DISABLE_LICM_PROMOTION` 默认 ON；`GAMELIB_EXTRA_HEAVY_SOURCES` 可明确指定分号分隔的额外 O0 单元，默认空。
+`GAMELIB_DISABLE_LICM_PROMOTION` 默认 ON；`GAMELIB_EXTRA_HEAVY_SOURCES` 只在 dev 中接受额外 O0 单元，默认空。
 这些是构建参数，必须记录在性能结果中；不要用全量 O0 代替性能构建。
 
 清理前保留所需输入、游戏库、存档和有效实验日志。不要为腾空间删除尚未分析的抓取，或删除手机原始 `Games/TotK/`。

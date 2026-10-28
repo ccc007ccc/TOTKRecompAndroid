@@ -7,8 +7,15 @@
 set -euo pipefail
 export MSYS_NO_PATHCONV=1  # (Git Bash: leave the device paths alone)
 cd "$(dirname "$0")/.."
+if [[ ! -f /run/.containerenv ]]; then
+    exec distrobox enter dev -- bash "$PWD/android/run_ver.sh" "$@"
+fi
+source android/dev_env.sh
+source android/build_profile.sh
+totk_build_options
+: "${ANDROID_SERIAL:?set ANDROID_SERIAL to the target phone adb serial}"
 VER=${1:?usage: android/run_ver.sh <v160|v182> [seconds] [LARECOMP_X=1,...]}
-PKG=com.totkrecomp.android
+PKG=$TOTK_PACKAGE
 EXT=/sdcard/Android/data/$PKG/files/$VER
 INT=/data/data/$PKG/files/$VER
 adb shell am force-stop $PKG

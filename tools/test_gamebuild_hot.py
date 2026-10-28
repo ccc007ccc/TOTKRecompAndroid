@@ -61,6 +61,9 @@ body = source[start:source.index('// The hot list for the game in game_dir')]
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef GAMELIB_PERFORMANCE
+#define GAMELIB_PERFORMANCE 0
+#endif
 ''' + body + r'''
 int main(int argc, char **argv) {
     load_hot(argv[1]);
@@ -131,5 +134,23 @@ large.write_text('void f_7000005350(Cpu *c) {\n' + '    c->x[0]++;\n' * 60001 + 
 r = subprocess.run([str(out / 'mark'), str(out / 'missing-list.txt'), str(large)],
                    check=True, capture_output=True, text=True)
 assert r.stdout.split() == ['0', '1', '1', '0', '1', '0', '1'], r.stdout
+checks += 1
+
+# 4. Performance profiles keep all definitions optimized, even when a hot list is present.
+# Giant functions still run alone to limit peak memory; none of the input files is rewritten.
+subprocess.run([args.cc, '-DGAMELIB_PERFORMANCE=1', '-O3', '-std=gnu11', '-Wall', '-Werror',
+                str(out / 'mark.c'), '-o', str(out / 'mark-performance')], check=True)
+src.write_bytes(chunk.encode())
+gsrc.write_bytes(giant.encode())
+files = (src, gsrc, csrc, large)
+before = [(f.read_bytes(), f.stat().st_mtime_ns) for f in files]
+for hot_list, count in ((out / 'list.txt', '3'), (out / 'missing-list.txt', '0')):
+    r = subprocess.run([str(out / 'mark-performance'), str(hot_list), *map(str, files)],
+                       check=True, capture_output=True, text=True)
+    assert r.stdout.split() == ['0', '8', '2', count, '0', '0', '2'], r.stdout
+    checks += 1
+    assert [(f.read_bytes(), f.stat().st_mtime_ns) for f in files] == before, 'performance code was rewritten'
+    checks += 1
+assert not any(out.glob('*.c.cold')), 'performance build left a cold source file'
 checks += 1
 print(f'{checks} hot/cold build checks passed (production C and tools/hot_functions.py)')

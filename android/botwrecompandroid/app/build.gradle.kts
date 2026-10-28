@@ -7,9 +7,27 @@ plugins {
 
 val repo: File = rootDir.resolve("../..").canonicalFile
 val deps: File = repo.resolve("android/deps/out")  // android/deps/build_deps.sh
+val performanceTest = providers.gradleProperty("performanceTest").orNull == "true"
+val requestedProfile = providers.gradleProperty("totkBuildProfile")
+    .orElse(providers.environmentVariable("TOTK_BUILD_PROFILE")).orNull
+require(requestedProfile == null || requestedProfile in setOf("dev", "performance", "snapdragon-8elite")) {
+    "Unknown totkBuildProfile: $requestedProfile"
+}
+val debugProfile = requestedProfile ?: "dev"
+val releaseProfile = requestedProfile ?: "performance"
+val ltoJobs = providers.gradleProperty("totkLtoJobs")
+    .orElse(providers.environmentVariable("TOTK_LTO_JOBS")).getOrElse("2")
+require(ltoJobs.matches(Regex("[1-9][0-9]*"))) { "totkLtoJobs must be a positive integer" }
+val nativeJobs = providers.environmentVariable("JOBS").getOrElse("2")
+require(nativeJobs.matches(Regex("[1-9][0-9]*"))) { "JOBS must be a positive integer" }
+val buildLauncher = providers.environmentVariable("TOTK_BUILD_LAUNCHER").orNull
+// Explicit performance profiles have separate generated assets/APKs as well as separate CMake configurations.
+if (requestedProfile != null && requestedProfile != "dev") {
+    val appDirectory = if (performanceTest) "perftest" else "app"
+    layout.buildDirectory.set(repo.resolve(".work/totk-port/builds/$requestedProfile/$appDirectory"))
+}
 val gen = layout.buildDirectory.dir("generated/botwrecompandroid")
 val dialogTestJni = layout.buildDirectory.dir("generated/dialog-test-jni")
-val performanceTest = providers.gradleProperty("performanceTest").orNull == "true"
 // The release key: outside the repository, in ~/.totkrecompandroid/keystore.properties (storeFile, storePassword, keyAlias,
 // keyPassword); without it, release builds are signed with the debug key
 val releaseKey: File = File(System.getProperty("user.home"), ".totkrecompandroid/keystore.properties")
@@ -27,6 +45,7 @@ android {
         targetSdk = 36
         versionCode = 13
         versionName = "0.1.0-totk-dev"
+        resValue("string", "app_name", if (performanceTest) "TOTK Performance Test" else "TOTKRecompAndroid")
         testInstrumentationRunner = "com.botwrecompandroid.RuntimeErrorDialogCheck"
         ndk {
             abiFilters += "arm64-v8a"
@@ -34,6 +53,13 @@ android {
         externalNativeBuild {
             cmake {
                 arguments += "-DBOTW_GEN_DIR=${gen.get().asFile.resolve("inc").absolutePath.replace('\\', '/')}"
+                arguments += "-DTOTK_COMPILE_JOBS=$nativeJobs"
+                if (buildLauncher != null) {
+                    for (language in listOf("C", "CXX")) {
+                        arguments += "-DCMAKE_${language}_COMPILER_LAUNCHER=$buildLauncher"
+                        arguments += "-DCMAKE_${language}_LINKER_LAUNCHER=$buildLauncher"
+                    }
+                }
             }
         }
     }
@@ -79,9 +105,30 @@ android {
     }
 
     buildTypes {
+        getByName("debug") {
+            applicationIdSuffix = if (performanceTest) "" else ".debug"
+            versionNameSuffix = "-debug"
+            resValue("string", "app_name", if (performanceTest) "TOTK Performance Test" else "TOTKRecompAndroid Debug")
+            resValue("string", "application_package", if (performanceTest) "com.totkrecomp.android.perftest" else "com.totkrecomp.android.debug")
+            externalNativeBuild {
+                cmake {
+                    arguments += listOf("-DTOTK_BUILD_PROFILE=$debugProfile", "-DTOTK_LTO_JOBS=$ltoJobs")
+                }
+            }
+        }
         getByName("release") {
+            // Private ADB test sessions need run-as; native profile flags still select O3/ThinLTO.
+            isDebuggable = performanceTest
             isMinifyEnabled = false
-            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
+            signingConfig = if (performanceTest) signingConfigs.getByName("debug") else
+                signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
+            versionNameSuffix = if (releaseProfile == "snapdragon-8elite") "-8elite" else "-$releaseProfile"
+            externalNativeBuild {
+                cmake {
+                    arguments += listOf("-DTOTK_BUILD_PROFILE=$releaseProfile", "-DTOTK_LTO_JOBS=$ltoJobs",
+                                        "-DCMAKE_BUILD_TYPE=Release")
+                }
+            }
         }
     }
 

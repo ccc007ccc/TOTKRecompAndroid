@@ -27,8 +27,16 @@
 // function, at -O0: HEAVY_LINES) took 6-8 GB on the POCO F7 Ultra for over 20 minutes, until Android ended the app
 // ("swap is low and thrashing", 2026-10-27) - on the PC's NDK clang with those flags, 23 GB and a failure; without
 // them 1.45 GB in 19 s. None of it belongs in the game code (UBSan also checks every operation at run time).
+#ifdef GAMELIB_ANDROID_CFLAGS
+#define GAMELIB_CFLAGS GAMELIB_ANDROID_CFLAGS
+#define GAMELIB_SHARED GAMELIB_ANDROID_SHARED
+#else
 #define GAMELIB_CFLAGS "-target aarch64-linux-musl -O1 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -fPIC -mllvm -dag-maps-huge-region=500 -fno-sanitize=undefined -fno-stack-protector -g0"
 #define GAMELIB_SHARED "-target aarch64-linux-musl -shared -nostdlib -Wl,-z,max-page-size=16384"
+#endif
+#endif
+#ifndef GAMELIB_PERFORMANCE
+#define GAMELIB_PERFORMANCE 0
 #endif
 // From the Makefile: the flags the game code is compiled and linked with (as `make` builds it in a source checkout)
 #ifndef GAMELIB_CFLAGS
@@ -165,7 +173,8 @@ static void android_env(const char *work) {
     setenv("LIBUNICORN_PATH", lib, 1);
     setenv("LIBLZ4_PATH", lib, 1);
     setenv("TMPDIR", work, 1);
-    setenv("HOME", work, 1);
+    setenv("ZIG_GLOBAL_CACHE_DIR", work, 1);
+    setenv("ZIG_LOCAL_CACHE_DIR", work, 1);
     snprintf(v, sizeof v, "%s/zig/lib", gen);  // (zig looks for its lib/ next to itself: it's in nativeLibraryDir)
     setenv("ZIG_LIB_DIR", v, 1);
 }
@@ -267,7 +276,7 @@ static void log_tail(const char *path, char *out, size_t n) {  // the last line 
 typedef struct {
     char src[1100], obj[1100], log[1100];
     unsigned long long bytes;
-    bool o0;  // (a file with a giant function: compiled at -O0 - mark_cold)
+    bool o0;  // dev-only fallback; performance profiles never lower a unit to O0
     bool alone, marked;  // (a giant function's file: compiled with no other compiler running; mark_cold done)
 } Unit;
 
@@ -291,12 +300,20 @@ static void add_unit(Units *us, const char *src, const char *work, const char *s
 }
 
 // The flags the game code was built with (GAMELIB_CFLAGS, part of its id). zig cc reads -march=<cpu> with its own CPU
-// names (x86_64_v3) and takes "-<feature>" off the end, so x86-64-v3 would be CPU "x86": the same CPU as -mcpu there.
+// names (x86_64_v3). Arm architecture levels are feature sets, not CPU names. Forward tuning to Clang directly:
+// Zig treats -mtune as another -mcpu, which would replace the requested ISA features.
 static void add_cflags(Args *a, const Tools *t) {
     char buf[1024];
     snprintf(buf, sizeof buf, "%s", GAMELIB_CFLAGS);
     for (char *f = strtok(buf, " "); f; f = strtok(NULL, " ")) {
-        if (t->zig && !strncmp(f, "-march=", 7)) {
+        if (t->zig && !strcmp(f, "-march=armv8.7-a+crypto+fp16")) {
+            add(a, "-mcpu=generic+v8_7a+crypto+fullfp16");
+        } else if (t->zig && !strncmp(f, "-mtune=", 7)) {
+            add(a, "-Xclang");
+            add(a, "-tune-cpu");
+            add(a, "-Xclang");
+            add(a, f + 7);
+        } else if (t->zig && !strncmp(f, "-march=", 7)) {
             char cpu[128];
             snprintf(cpu, sizeof cpu, "-mcpu=%s", f + 7);
             for (char *c = cpu + 6; *c; c++) if (*c == '-') *c = '_';
@@ -408,15 +425,19 @@ static bool mark_cold(const char *src, bool *o0, bool *heavy) {
              l++)
             labels += l[1] == 'L' && l[2] == '_', lines++;
         g_all_fns++, defs++;
-        if (labels > HEAVY_LABELS || lines > HEAVY_LINES) g_heavy_fns++, *o0 = *heavy = true;
-        bool cold = g_nhot && !bsearch(&a, g_hot, g_nhot, sizeof *g_hot, cmp_u64);
+        if (labels > HEAVY_LABELS || lines > HEAVY_LINES) {
+            g_heavy_fns++;
+            *heavy = true;
+            if (!GAMELIB_PERFORMANCE) *o0 = true;
+        }
+        bool cold = !GAMELIB_PERFORMANCE && g_nhot && !bsearch(&a, g_hot, g_nhot, sizeof *g_hot, cmp_u64);
         if (!cold) { hot++; continue; }
         g_cold_fns++;
         if (!o && !(o = fopen(tmp, "wb"))) { ok = false; break; }
         ok = fwrite(copied, 1, (size_t)(p - copied), o) == (size_t)(p - copied) && fputs(attr, o) >= 0;
         copied = p;
     }
-    if (g_nhot && defs && !hot) {  // (all cold: the file at -O0 as it is)
+    if (!GAMELIB_PERFORMANCE && g_nhot && defs && !hot) {  // dev: all cold, at -O0 as it is
         *o0 = true;
         g_cold_files++;
         if (o) fclose(o), remove(tmp);
@@ -443,8 +464,11 @@ static void load_hot_for(const char *game_dir) {
     if (f) fclose(f);
     snprintf(path, sizeof path, "%s/gamelib-src/hot_functions_%d.txt", gen ? gen : ".", version);
     load_hot(e && strcmp(e, "0") ? e : e ? "" : path);
-    LOG("[gamebuild] game version %d, hot functions: %zu%s; files with a function over %d labels: -O0\n", version, g_nhot,
-        g_nhot ? " (the rest compiled with optnone)" : " (all at -O1)", HEAVY_LABELS);
+    if (GAMELIB_PERFORMANCE)
+        LOG("[gamebuild] game version %d: all functions at -O3/ThinLTO; giant units compiled alone\n", version);
+    else
+        LOG("[gamebuild] game version %d, hot functions: %zu%s; files with a function over %d labels: -O0\n", version,
+            g_nhot, g_nhot ? " (the rest compiled with optnone)" : " (all at -O1)", HEAVY_LABELS);
 }
 #endif
 
@@ -452,7 +476,7 @@ static PlatProc start_compile(const Tools *t, const Unit *u) {
     Args a = {0};
     compiler(&a, t);
     add_cflags(&a, t);
-    if (u->o0) add(&a, "-O0");  // (after GAMELIB_CFLAGS' -O1: the last one counts)
+    if (u->o0 && !GAMELIB_PERFORMANCE) add(&a, "-O0");
     char inc[1200];
     snprintf(inc, sizeof inc, "-I%s", t->inc);
     add(&a, inc);
@@ -467,26 +491,31 @@ static PlatProc start_compile(const Tools *t, const Unit *u) {
 }
 
 // ------------------------------------------------------------------ going on after the app closed
-// What the objects in .gamebuild were compiled from: this builder (GAMELIB_ID) and the game code's build ids
+// Resume only the same compiler flags and all four module identities. Older Android builds could otherwise keep
+// Zig's implicit Debug/UBSan objects, or mix a changed subsdk0 with the previous main and sdk (upstream 2f627eb).
 static void build_stamp(const char *game_dir, char *out, size_t n) {
-    int k = snprintf(out, n, "%s", GAMELIB_ID);
-    static const char *const mods[2] = {"main", "sdk"};
-    for (int m = 0; m < 2 && k > 0 && (size_t)k < n; m++) {
+    uint32_t flags = 2166136261u;
+    for (const unsigned char *s = (const unsigned char *)GAMELIB_CFLAGS; *s; s++) flags = (flags ^ *s) * 16777619u;
+    for (const unsigned char *s = (const unsigned char *)GAMELIB_SHARED; *s; s++) flags = (flags ^ *s) * 16777619u;
+    int k = snprintf(out, n, "%s %08x", GAMELIB_ID, flags);
+    static const char *const mods[4] = {"main", "sdk", "subsdk0", "rtld"};
+    for (int m = 0; m < 4 && k > 0 && (size_t)k < n; m++) {
         char p[1100];
-        uint8_t id[8] = {0};
+        uint8_t id[32] = {0};
         snprintf(p, sizeof p, "%s" SEP "exefs" SEP "%s", game_dir, mods[m]);
         FILE *f = fopen(p, "rb");
         if (f) {
             if (fseek(f, 0x40, SEEK_SET) != 0 || fread(id, 1, sizeof id, f) != sizeof id) memset(id, 0, sizeof id);
             fclose(f);
         }
-        k += snprintf(out + k, n - (size_t)k, " %s %02x%02x%02x%02x%02x%02x%02x%02x", mods[m], id[0], id[1], id[2], id[3],
-                      id[4], id[5], id[6], id[7]);
+        char hex[65];
+        for (size_t j = 0; j < sizeof id; j++) snprintf(hex + 2 * j, 3, "%02x", id[j]);
+        k += snprintf(out + k, n - (size_t)k, " %s %s", mods[m], hex);
     }
 }
 
 static bool same_text(const char *path, const char *text) {
-    char buf[256] = "";
+    char buf[512] = "";
     FILE *f = fopen(path, "rb");
     if (!f) return false;
     size_t n = fread(buf, 1, sizeof buf - 1, f);
@@ -573,7 +602,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
 #endif
     // A build the system stopped (the app closed: issues #18, #25) goes on where it was: the objects compiled for the same
     // game code by the same builder stay in .gamebuild (each with a .ok beside it once whole); only the rest is compiled
-    char stamp[256], stamp_path[1200];
+    char stamp[512], stamp_path[1200];
     build_stamp(game_dir, stamp, sizeof stamp);
     snprintf(stamp_path, sizeof stamp_path, "%s" SEP "stamp.txt", work);
     bool resume = same_text(stamp_path, stamp);
@@ -701,13 +730,14 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
 #ifdef __ANDROID__
             if (!may_start_another(nrun, jobs)) break;
 #endif
-#ifdef __ANDROID__  // (unit 0 is the shipped entry file; a file that can't be marked just stays at -O1)
+#ifdef __ANDROID__  // unit 0 is the shipped entry file; retain the profile flags if scanning fails
             Unit *nu = &units.u[next];
             if (next > 0 && !nu->marked) {
                 nu->marked = true;
                 if (!mark_cold(nu->src, &nu->o0, &nu->alone))
                     LOG("[gamebuild] couldn't mark cold functions in %s\n", nu->src);
-                if (nu->alone) LOG("[gamebuild] %s has a giant function: at -O0, no other compiler beside it\n", nu->src);
+                if (nu->alone) LOG("[gamebuild] %s has a giant function: %s, no other compiler beside it\n", nu->src,
+                                   GAMELIB_PERFORMANCE ? "at -O3/ThinLTO" : "at -O0");
             }
             // (a giant function's file waits for the others to finish, and nothing starts beside it: HEAVY_LINES)
             bool alone_running = false;
@@ -830,8 +860,11 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     // the C, the objects, the logs - kept after a failure, for the next build to go on from
     if (ok) rt_remove_game_file(game_dir, ".gamebuild");
 #ifdef __ANDROID__
-    LOG("[gamebuild] %llu of %llu functions cold (optnone, or %llu files all cold at -O0), %llu giant (their files at "
-        "-O0)\n", g_cold_fns, g_all_fns, g_cold_files, g_heavy_fns);
+    if (GAMELIB_PERFORMANCE)
+        LOG("[gamebuild] all %llu functions at -O3/ThinLTO; %llu giant functions compiled alone\n", g_all_fns, g_heavy_fns);
+    else
+        LOG("[gamebuild] %llu of %llu functions cold (optnone, or %llu files all cold at -O0), %llu giant (their files at "
+            "-O0)\n", g_cold_fns, g_all_fns, g_cold_files, g_heavy_fns);
 #endif
     LOG("[gamebuild] %s in %.0fs\n", ok ? "done" : "failed", (double)(plat_now_ns() - t0) / 1e9);
     if (ok && o->progress) o->progress(1, "Finishing...");

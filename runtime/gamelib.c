@@ -14,6 +14,13 @@
 #include "platform.h"
 #include "rt.h"
 
+#ifndef GAMELIB_BUILD_PROFILE
+#define GAMELIB_BUILD_PROFILE "dev"
+#endif
+// Keep these in the stripped APK's dynamic symbol table so packaging/deployment can inspect the actual runtime.
+GAMELIB_EXPORT const char gamelib_runtime_id[] = GAMELIB_ID;
+GAMELIB_EXPORT const char gamelib_runtime_profile[] = GAMELIB_BUILD_PROFILE;
+
 static const GameLibTables *g_tables;
 static char g_error[256];
 
@@ -114,14 +121,26 @@ bool gamelib_present(const char *game_dir) {
     return false;
 }
 
-static const GameLibTables *open_lib(const char *path) {
+static const GameLibTables *open_lib(const char *path, bool managed) {
 #ifdef _WIN32
     HMODULE h = LoadLibraryA(path);
     if (!h) { snprintf(g_error, sizeof g_error, "can't load %s (error %lu)", path, GetLastError()); return NULL; }
     GameLibEntry entry = (GameLibEntry)(void *)GetProcAddress(h, GAMELIB_ENTRY);
 #else
     void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
-    if (!h) { snprintf(g_error, sizeof g_error, "%s", dlerror()); return NULL; }
+    if (!h) {
+        const char *error = dlerror();
+        snprintf(g_error, sizeof g_error, "%s", error ? error : path);
+        // A managed build with unresolved compiler/runtime symbols must be rebuilt (upstream #56/#60).
+        // Explicit test libraries remain intact: their caller selects a matching runtime or another artifact.
+        if (managed && error && (strstr(error, "cannot locate symbol") || strstr(error, "undefined symbol"))) {
+            char id[1200];
+            snprintf(id, sizeof id, "%s.id", path);
+            remove(id);
+            snprintf(g_error, sizeof g_error, "%.180s\n\nThe game code needs rebuilding. Set up the game files again.", error);
+        }
+        return NULL;
+    }
     GameLibEntry entry = (GameLibEntry)dlsym(h, GAMELIB_ENTRY);
 #endif
     if (!entry) { snprintf(g_error, sizeof g_error, "%s: not game code", path); return NULL; }
@@ -157,7 +176,7 @@ bool gamelib_load(const char *game_dir, char *why, size_t why_size) {
                 snprintf(g_error, sizeof g_error, "%s was built for another version", c[i]);
                 continue;
             }
-            g_tables = open_lib(c[i]);
+            g_tables = open_lib(c[i], !given);
             if (g_tables) LOG("[gamelib] %s (main %llu, sdk %llu, subsdk0 %llu, rtld %llu functions)\n", c[i],
                               (unsigned long long)*g_tables->main_count, (unsigned long long)*g_tables->sdk_count,
                               (unsigned long long)*g_tables->subsdk0_count, (unsigned long long)*g_tables->rtld_count);

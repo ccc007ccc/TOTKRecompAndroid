@@ -18,6 +18,10 @@ include(${R}/android/gamelib_id.cmake)  # (GAMELIB_ID: the same as totkgame.so's
 message(STATUS "GAMELIB_ID ${GAMELIB_ID}")
 
 add_subdirectory(${R}/third_party/libadrenotools ${CMAKE_BINARY_DIR}/adrenotools)
+foreach(native_target adrenotools linkernsbypass hook_impl main_hook file_redirect_hook gsl_alloc_hook)
+    target_compile_options(${native_target} PRIVATE ${TOTK_RUNTIME_FLAGS})
+    totk_link_profile(${native_target})
+endforeach()
 
 add_library(SDL3 SHARED IMPORTED)
 set_target_properties(SDL3 PROPERTIES IMPORTED_LOCATION ${DEPS}/lib/libSDL3.so)
@@ -47,8 +51,27 @@ add_library(main SHARED ${RT_SRC} ${R}/runtime/platform/android.c ${VK_SRC} ${UI
             ${DEPS}/volk/volk.c ${R}/android/common/guest_window.c)
 # the UI sources are plain C++ apart from __APPLE__ blocks (compiled as C++ on Android)
 set_source_files_properties(${UI_SRC} PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-xc++")
-set_source_files_properties(${R}/runtime/gamelib.c PROPERTIES COMPILE_DEFINITIONS "GAMELIB_ID=\"${GAMELIB_ID}\"")
+set_source_files_properties(${R}/runtime/gamelib.c PROPERTIES COMPILE_DEFINITIONS
+    "GAMELIB_ID=\"${GAMELIB_ID}\";GAMELIB_BUILD_PROFILE=\"${TOTK_BUILD_PROFILE}\"")
 set_source_files_properties(${R}/runtime/gamebuild.c PROPERTIES COMPILE_DEFINITIONS "GAMELIB_ID=\"${GAMELIB_ID}\"")
+# Use the same profile when the player builds on the phone. A high-performance APK must not create O1/optnone
+# game code carrying an O3 identity merely because the desktop CMake target was configured correctly.
+string(JOIN " " _phone_game_flags ${GAMELIB_FLAGS})
+set(_phone_cflags "-target aarch64-linux-musl ${_phone_game_flags} -mllvm -dag-maps-huge-region=500 -fno-sanitize=undefined -fno-stack-protector -g0")
+if(TOTK_BUILD_PROFILE STREQUAL "dev" AND TOTK_DISABLE_LICM_PROMOTION)
+    string(APPEND _phone_cflags " -mllvm -disable-licm-promotion")
+endif()
+set(_phone_link_flags "-target aarch64-linux-musl -shared -nostdlib -Wl,-z,max-page-size=16384")
+set(_phone_performance 0)
+if(NOT TOTK_BUILD_PROFILE STREQUAL "dev")
+    set(_phone_performance 1)
+    # Zig 0.17 rejects LLD's --lto-O3/--thinlto-jobs/-mllvm linker arguments. Its driver selects the LTO
+    # optimization level with -O3. The compile-time LICM workaround remains in GAMELIB_FLAGS.
+    string(APPEND _phone_link_flags " -O3 -flto=thin")
+endif()
+set_property(SOURCE ${R}/runtime/gamebuild.c APPEND PROPERTY COMPILE_DEFINITIONS
+    "GAMELIB_ANDROID_CFLAGS=\"${_phone_cflags}\"" "GAMELIB_ANDROID_SHARED=\"${_phone_link_flags}\""
+    "GAMELIB_PERFORMANCE=${_phone_performance}")
 
 target_include_directories(main PRIVATE ${R}/runtime ${R}/runtime/nvn ${IMGUI} ${IMGUI}/backends ${DEPS}/include
                            ${DEPS}/volk ${BOTW_GEN_DIR} ${R}/third_party/smaa/Textures ${R}/android/common)
@@ -60,10 +83,11 @@ if(HAVE_FFMPEG)
 else()
     target_compile_definitions(main PRIVATE LARECOMP_NO_FFMPEG)
 endif()
-# -O2 -g whatever the Gradle build type (the Android runtime optimization flags): a debug build left the runtime at -O0, about half of the
-# game thread's time
-target_compile_options(main PRIVATE -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Wno-format  # (as on Linux: %llx for uint64_t)
+# Debug stays usable at -O2; release profiles use -O3 and ThinLTO while preserving guest floating-point semantics.
+target_compile_options(main PRIVATE ${TOTK_RUNTIME_FLAGS} -g -fno-strict-aliasing -Wall -Wno-unused-function -Wno-format  # (as on Linux: %llx for uint64_t)
     $<$<COMPILE_LANGUAGE:CXX>:-std=c++17>)
+totk_link_profile(main)
+message(STATUS "TotK runtime profile: ${TOTK_BUILD_PROFILE}; flags: ${TOTK_RUNTIME_FLAGS}")
 target_link_libraries(main PRIVATE SDL3 shaderc_shared adrenotools android nativewindow log dl m z)
 # (runtime/hle.h, ipc.h, main.c: tables in named sections found through __start_ / __stop_ symbols)
 target_link_options(main PRIVATE -Wl,-z,nostart-stop-gc)

@@ -18,7 +18,7 @@ PACKAGE='com.totkrecomp.android'
 def main():
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--serial',required=True)
-    ap.add_argument('--package',default=PACKAGE,choices=[PACKAGE,PACKAGE+'.perftest'])
+    ap.add_argument('--package',default=PACKAGE,choices=[PACKAGE,PACKAGE+'.debug',PACKAGE+'.perftest'])
     ap.add_argument('--session',help='Private runtime control directory')
     ap.add_argument('--output',type=Path,default=Path('.work/totk-port/performance-phone/session'))
     commands=ap.add_subparsers(dest='command',required=True)
