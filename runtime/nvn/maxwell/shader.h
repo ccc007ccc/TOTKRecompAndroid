@@ -50,6 +50,7 @@ typedef struct {
     uint8_t glsl;           // emit Vulkan GLSL (see the contract above) instead of MSL
     bool gmem_linear_lookup;  // Qualcomm compute: cached linear GMap lookup avoids its compiler's binary-search failure
     uint8_t gather_bias_bits; // 0: native gather; otherwise compensate host subtexel truncation (half a subtexel)
+    bool vertex_snap;        // experimental vertex UV quantization; part of program identity, off by default for TotK
 } ShaderKey;
 
 typedef struct {

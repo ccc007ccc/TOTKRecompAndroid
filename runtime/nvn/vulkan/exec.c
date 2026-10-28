@@ -2391,6 +2391,16 @@ static uint8_t gather_bias_bits(void) {
     return (uint8_t)bits;
 }
 
+static bool vertex_snap_on(void) { // shader keys are constructed on the render thread
+    static int on = -1;
+    if(on<0) {
+        const char *value=getenv("LARECOMP_VS_SNAP");
+        on=value&&atoi(value)!=0&&!getenv("LARECOMP_NO_VS_SNAP");
+        if(on)LOG("[vk] experimental vertex sampling quantization enabled\n");
+    }
+    return on!=0;
+}
+
 static void translate_program(void *arg) {
     Prog *p = arg;
     pthread_mutex_lock(&translate_lock);
@@ -5110,6 +5120,7 @@ static void draw_(CmdRec *r, bool indexed) {
     ShaderKey vkey = {0}, fkey = {0};
     vkey.glsl = fkey.glsl = 1;
     vkey.gather_bias_bits = fkey.gather_bias_bits = gather_bias_bits();
+    vkey.vertex_snap = vertex_snap_on();
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
     vkey.depth_minus_one = nvn_depth_mode() == 0;
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
