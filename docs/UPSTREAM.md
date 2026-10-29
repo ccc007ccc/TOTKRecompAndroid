@@ -32,6 +32,9 @@
 
 ## 参考工程与继承致谢
 
+2026-10-29 已按问题选择性适配 IADD3、QUAD_STRIP、全局 arena 一致性，并将 MacNativeGames 清单固定到 `032a05df`。
+来源、Vulkan 差异、验证与范围见 [本轮整合记录](UPSTREAM-MERGE-20261029.md)。这不表示已整体合并 BOTW v0.2.3-beta。
+
 - 本地 `TotK-Native`：四模块装载、服务和 NVN 语义参考；未采用其指令改写执行器。
 - [Ryujinx Neo gather 修正](https://github.com/Sunshinin11/Ryujinx_Neo/commit/734fe55f8f7e2d2ae69449374476e360521e4d51)：Turnip 子纹素边界补偿参考。
 - [Banner Turnip](https://github.com/The412Banner/Banners-Turnip/releases)：用户指定的自定义驱动来源；当前实机使用 A8xx r5。

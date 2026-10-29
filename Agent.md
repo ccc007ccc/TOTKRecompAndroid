@@ -192,6 +192,8 @@ TOTK_STAGE=.work/totk-port/packages/debug-dev
 | APK/库身份、端侧参数 | `"$PYTHON" tools/test_android_packages.py`；`"$PYTHON" tools/test_gamebuild_flags.py`；实际构建相关 variant/profile |
 | 着色器缓存/编译 | `bash tools/test_shader_runtime.sh`；`bash tools/test_shader_cache_compat.sh`；`bash tools/test_shader_dictionaries.sh` |
 | 驱动常量 | `"$PYTHON" tools/test_shader_driver_constants.py`（点尺寸上限、阶段隔离、存储表和派发尺寸） |
+| 整数着色器语义 | `"$PYTHON" tools/test_shader_int32.py --out .work/totk-port/shader-int32-tests`（含 IADD3 移位/半字选择） |
+| 图元展开/全局内存类型 | `"$PYTHON" tools/test_primitive_indices.py`；`"$PYTHON" tools/test_global_arena_memory.py` |
 | 程序/管线索引容量、重启 | `"$PYTHON" tools/test_shader_program_cache.py`；`"$PYTHON" tools/test_shader_lifetimes.py` |
 | 共享映射、异步复制 | `bash tools/test_shared_memory.sh`；`bash tools/test_buffer_copy.sh` |
 | 纹理描述符注册/队列 | `bash tools/test_texture_registration.sh`（含真实请求队列、引用寿命和对象锁回归） |
@@ -326,6 +328,9 @@ UI 只查询收据身份，独立可取消任务逐项检查模块和字典；�
   资源销毁等待真正使用它的 GPU 工作完成，测试覆盖局部释放、并发读取、失败和重启。
 - buffer-copy 的 CPU 读写保护在获取将要使用的 command buffer/render pass **之前**完成；
   等待可能提交并切换命令缓冲。保留提交快照语义和 overlap/不支持情况的正确回退。
+- CPU 展开图元索引也必须经过 GPU 写入预检查。QUAD_STRIP 保留顶点对、各段重启/奇数尾与 NVN 平面属性来源；
+  调整到 Vulkan 的 provoking vertex 规则，不能只把三角形数量改对。
+- CPU 直接读写的全局 arena 要求 HOST_COHERENT；普通非一致读回保留完成等待、主机可见屏障和缓存失效。
 - 复制结果直接绑定 UBO 时，预检查必须固定绑定决定，并把读取寿命延长到实际绘制/计算提交；
   复制完成不能解除后续 GPU 读取的 CPU 写入保护。纹理句柄等 CPU 读取单独预检查，
   容量不足回退 CPU 路径，描述符绑定期间不得等待。命令热路径的 pending 判断不查询驱动完成序号。

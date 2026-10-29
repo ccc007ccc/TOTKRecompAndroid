@@ -20,13 +20,17 @@ def helper(name):
 fixture = (root / 'tools/test_buffer_copy.c').read_text().split('int main(', 1)[0]
 inline_start = execution.index('enum { UBO_INLINE_SLOTS')
 inline_code = execution[inline_start:execution.index('\n#endif', inline_start)]
+draw_start = execution.index('static void draw_(CmdRec *r, bool indexed) {')
+preflight_start = execution.index('#ifdef __ANDROID__', draw_start) + len('#ifdef __ANDROID__')
+draw_preflight = execution[preflight_start:execution.index('#endif', preflight_start)]
 unit = out / 'buffer-copy-uniforms.c'
 unit.write_text(fixture + r'''
 #include <stdatomic.h>
 #undef HEAP_BASE
 #define HEAP_BASE 0x10000ull
 typedef struct { uint64_t addr, size; } Range;
-static struct { NvnProgram *program; Range ubuf[6][18], sbuf[6][16]; } st;
+static struct { NvnProgram *program; Range ubuf[6][18], sbuf[6][16], vbuf[16];
+    struct { int ncolor; NvnTexture *color[8], *depth; } rt; } st;
 VkG g_vk;
 static VkBuffer gmem_buf = (VkBuffer)1;
 static uint64_t gmem_size = sizeof memory;
@@ -45,7 +49,8 @@ static NvnTexture *shader_texture_object(int stage, ShaderTexture *texture) {
 }
 ''' + inline_code + helper('ubo_shared') + helper('copy_uniform_begin') +
     helper('copy_uniform_cpu_diagnostic') + helper('copy_stage_inputs') +
-    helper('copy_texture_input') + helper('copy_stage_textures') + r'''
+    helper('copy_texture_input') + helper('copy_stage_textures') +
+    'static void draw_preflight(CmdRec *r, bool indexed) {' + draw_preflight + '}\n' + r'''
 int main(void) {
     setenv("LARECOMP_VK_ASYNC_BUFFER_COPY", "1", 1);
     memset(memory, 0x51, 32);
@@ -106,7 +111,17 @@ int main(void) {
     st.sbuf[5][0] = (Range){0x10100, 32};
     assert(vk_buffer_copy_async(0x10000, 0x10110, 16));
     copy_uniform_begin(); copy_stage_inputs(5); assert(waits == 12);
-    puts("PASS: direct uniform preflight, late inline mark, bindless CPU reads, actual binding seq, snapshots/diagnostics and unsupported-range fallback");
+    // QUAD_STRIP expansion reads indices on the CPU. The actual draw preflight
+    // must complete a preceding GPU copy before it can acquire a command buffer
+    // or expand those indices; no unsupported-GPU-source draw is skipped.
+    memset(&st, 0, sizeof st); st.program = &program;
+    const uint16_t indices[] = {4,5,6,7,8,9};
+    memcpy(memory, indices, sizeof indices); memset(memory + 0x100, 0, 16);
+    assert(vk_buffer_copy_async(0x10000, 0x10100, 12));
+    CmdRec draw = {.op = CMD_DRAW_ELEMENTS, .x = {8,1,6,0x10100}};
+    draw_preflight(&draw, true);
+    assert(waits == 13 && !memcmp(memory + 0x100, indices, sizeof indices));
+    puts("PASS: direct uniform preflight, bindless/quad-strip CPU reads, binding seq, snapshots/diagnostics and fallback");
 }
 ''')
 binary = out / 'test-buffer-copy-uniforms'

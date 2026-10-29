@@ -26,8 +26,8 @@ if not args.generated_only:
     subprocess.run([str(math)], check=True)
 
 paths = sorted([*out.glob('case*.comp'), *out.glob('case*.vert'), *out.glob('case*.frag')])
-if len(paths) != 186:
-    raise RuntimeError(f'Expected 186 shaders from the production translator, found {len(paths)}')
+if len(paths) != 2130:
+    raise RuntimeError(f'Expected 2130 shaders from the production translator, found {len(paths)}')
 
 
 def check(path):

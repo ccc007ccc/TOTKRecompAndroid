@@ -1792,6 +1792,19 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             }
             if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = uint(sum);\n", d); }
             sp(&c->body, "    }\n");
+        } else if (OPM(0x5cc0000000000000ull, 0xfff0000000000000ull) && bits(w, 31, 8)) {
+            // SavageWindRecomp 7ce70fa, via BOTWRecompAndroid 2901800 (MIT;
+            // LICENSE-SavageWindRecomp.txt). Select halves before negation;
+            // .RS/.LS shift the wrapped sum of a+b before adding c. Only the
+            // register form owns these bits: constants/immediates use them for B.
+            static const char *const half[4] = {"", " & 0xFFFFu", " >> 16", ""};
+            int shift = (int)bits(w, 37, 2);
+            char ra[96], rb[96], rc[96];
+            snprintf(ra, sizeof ra, "%s(%s%s)", bits(w, 51, 1) ? "-" : "", R(a), half[bits(w, 35, 2)]);
+            snprintf(rb, sizeof rb, "%s(%s%s)", bits(w, 50, 1) ? "-" : "", B(false), half[bits(w, 33, 2)]);
+            snprintf(rc, sizeof rc, "%s(%s%s)", bits(w, 49, 1) ? "-" : "", R((int)bits(w, 39, 8)), half[bits(w, 31, 2)]);
+            sprintf(t, "(((%s + %s)%s) + %s)", ra, rb, shift == 1 ? " >> 16u" : shift == 2 ? " << 16u" : "", rc);
+            set_reg(c, d, t);
         } else {
             sprintf(t, "(%s%s + %s%s + %s%s)", bits(w, 51, 1) ? "-" : "", R(a), bits(w, 50, 1) ? "-" : "", B(false),
                     bits(w, 49, 1) ? "-" : "", R((int)bits(w, 39, 8)));

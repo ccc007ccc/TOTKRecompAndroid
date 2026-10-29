@@ -1,7 +1,7 @@
 # MacNativeGames shader metadata tools
 
 Unmodified MIT sources from [MacNativeGames](https://github.com/ly05010419/MacNativeGames),
-commit `f024ef04c707c4b4bb5b6328bfc55ae89642af40`. See `LICENSE` and `UPSTREAM.json`.
+commit `032a05dff7215177912edfb2d01c9e20089d92a7`. See `LICENSE` and `UPSTREAM.json`.
 `shader_list.tsv.gz` is the upstream TotK identifier/state list compressed with gzip;
 it contains no game binaries or compiled shaders. Its recorded checksum is for the
 uncompressed upstream file.

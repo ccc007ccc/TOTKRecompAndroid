@@ -4083,18 +4083,28 @@ static bool gres_init(void) {
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = GA_SIZE,
                              .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                       VK_BUFFER_USAGE_TRANSFER_SRC_BIT};
+    // BOTWRecompAndroid 056a9a0: CPU copies and GPU stores use ga_ptr without
+    // flush/invalidate. Cached memory alone is not coherent (e.g. Mali 0xb).
+    // Ordinary readbacks have their own explicit invalidation and stay cached.
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
                                   .flags = (getenv("LARECOMP_GA_UNCACHED") ? VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
                                                                            : VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT) |
-                                           VMA_ALLOCATION_CREATE_MAPPED_BIT};  // (cached: read back; LARECOMP_GA_UNCACHED=1, a test)
+                                           VMA_ALLOCATION_CREATE_MAPPED_BIT,
+                                  .requiredFlags = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT};
     VmaAllocationInfo inf;
-    if (vmaCreateBuffer(g_vk.vma, &bi, &ai, &ga_buf, &ga_mem, &inf) != VK_SUCCESS || !inf.pMappedData) {
+    VkResult result = vmaCreateBuffer(g_vk.vma, &bi, &ai, &ga_buf, &ga_mem, &inf);
+    if (result != VK_SUCCESS || !inf.pMappedData) {
+        if (result == VK_SUCCESS) vmaDestroyBuffer(g_vk.vma, ga_buf, ga_mem);
+        ga_buf = VK_NULL_HANDLE; ga_mem = NULL;
         LOG("[vk] global memory arena: not available\n");
         return false;
     }
     ga_ptr = inf.pMappedData;
     gres_state = 1;
-    LOG("[vk] global memory arena: %llu MB (what shaders store stays on the GPU)\n", (unsigned long long)(GA_SIZE >> 20));
+    VkMemoryPropertyFlags flags;
+    vmaGetMemoryTypeProperties(g_vk.vma, inf.memoryType, &flags);
+    LOG("[vk] global memory arena: %llu MB (what shaders store stays on the GPU), memory type %u (flags %#x)\n",
+        (unsigned long long)(GA_SIZE >> 20), inf.memoryType, flags);
     return true;
 }
 
@@ -5378,21 +5388,50 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed);
 static void diagnostic_draw(Prog *pr, CmdRec *r, bool indexed);
 static void diagnostic_sampled_textures(Prog *pr);
 
-// Quads / fans / polygons as a 32-bit triangle index list.
-static uint32_t *expand_indices(uint32_t mode, uint32_t count, const void *indices, int itype, uint32_t first, uint32_t *out_count) {
-    uint32_t tris = mode == 7 ? count / 4 * 2 : count >= 3 ? count - 2 : 0;
-    uint32_t *out = malloc(tris * 3 * 4 + 4);
+static uint32_t expand_index(const void *indices, int itype, uint32_t first, uint32_t i) {
+    if (!indices) return first + i;
+    uint32_t value = 0;
+    memcpy(&value, (const uint8_t *)indices + (uint64_t)i * (1u << itype), 1u << itype);
+    return value;
+}
+// Quads / quad strips / fans / polygons as a 32-bit triangle index list.
+static uint32_t *expand_indices(uint32_t mode, uint32_t count, const void *indices, int itype, uint32_t first,
+                               bool restart_on, uint32_t restart, uint32_t *out_count) {
+    if (indices && (itype < 0 || itype > 2)) FATAL("Invalid NVN index type %d\n", itype);
+    uint64_t tris = mode == 7 ? count / 4 * 2ull : mode == 8 ? (count >= 4 ? (count / 2 - 1) * 2ull : 0) : count >= 3 ? count - 2 : 0;
+    uint64_t capacity = tris * 3;
+    if (capacity > UINT32_MAX || capacity > SIZE_MAX / 4 - 1) FATAL("NVN index expansion too large\n");
+    uint32_t *out = malloc((size_t)(capacity + 1) * sizeof *out);
+    if (!out) FATAL("Out of memory expanding NVN indices\n");
     uint32_t n = 0;
-#define IDX(i) (indices ? (itype == 0 ? ((const uint8_t *)indices)[i] : itype == 1 ? ((const uint16_t *)indices)[i] : ((const uint32_t *)indices)[i]) : first + (i))
+#define IDX(i) expand_index(indices, itype, first, (i))
     if (mode == 7) {
         for (uint32_t q = 0; q + 3 < count; q += 4) {
             out[n++] = IDX(q); out[n++] = IDX(q + 1); out[n++] = IDX(q + 2);
             out[n++] = IDX(q); out[n++] = IDX(q + 2); out[n++] = IDX(q + 3);
         }
+    } else if (mode == 8) {
+        // MacNativeGames bff585f2 (MIT, third_party/macnativegames/LICENSE):
+        // successive pairs form (a,b,d,c). NVN's last provoking vertex is d;
+        // cyclically rotate both triangles so Vulkan's first vertex is d.
+        // Restart is explicit/custom in NVN, not every all-ones index.
+        if (itype == 0) restart &= UINT8_MAX;
+        else if (itype == 1) restart &= UINT16_MAX;
+        uint32_t pair[4], used = 0;
+        for (uint32_t i = 0; i < count; ++i) {
+            uint32_t value = IDX(i);
+            if (indices && restart_on && value == restart) { used = 0; continue; }
+            pair[used++] = value;
+            if (used != 4) continue;
+            out[n++] = pair[3]; out[n++] = pair[0]; out[n++] = pair[1];
+            out[n++] = pair[3]; out[n++] = pair[2]; out[n++] = pair[0];
+            pair[0] = pair[2]; pair[1] = pair[3]; used = 2;
+        }
     } else {
         for (uint32_t i = 1; i + 1 < count; i++) { out[n++] = IDX(0); out[n++] = IDX(i); out[n++] = IDX(i + 1); }
     }
 #undef IDX
+    out[n] = 0; // the upload's four-byte padding is initialized, including empty strips
     *out_count = n;
     return out;
 }
@@ -6036,7 +6075,7 @@ static void draw_(CmdRec *r, bool indexed) {
         first = (uint32_t)r->x[1]; base_inst = (uint32_t)r->x[3]; inst = (uint32_t)r->x[4] ? (uint32_t)r->x[4] : 1;
         max_index = first + count;
         if (!native) {
-            uint32_t *e = expand_indices(mode, count, NULL, 0, first, &icount);
+            uint32_t *e = expand_indices(mode, count, NULL, 0, first, false, 0, &icount);
             ib = vk_transient_copy(e, (uint64_t)icount * 4 + 4, 4);
             free(e);
         }
@@ -6077,7 +6116,7 @@ static void draw_(CmdRec *r, bool indexed) {
             itype_vk = VK_INDEX_TYPE_UINT16;
             icount = count;
         } else {
-            uint32_t *e = expand_indices(mode, count, src, (int)itype, 0, &icount);
+            uint32_t *e = expand_indices(mode, count, src, (int)itype, 0, st.prim_restart, st.restart_index, &icount);
             for (uint32_t i = 0; i < icount; i++) if (e[i] > max_index) max_index = e[i];
             ib = vk_transient_copy(e, (uint64_t)icount * 4 + 4, 4);
             free(e);

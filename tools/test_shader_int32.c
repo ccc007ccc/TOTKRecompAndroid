@@ -6,13 +6,22 @@ typedef struct { uint64_t w; int kind; } Case;
 
 int main(int argc, char **argv) {
     if (argc != 2) return 2;
-    Case cases[256]; int count = 0;
+    Case cases[1024]; int count = 0;
     for (int flags = 0; flags < 8; flags++)
         cases[count++] = (Case){0x1c00000000000000ull | (uint64_t)(flags & 1) << 52 |
             (uint64_t)((flags >> 1) & 1) << 53 | (uint64_t)(flags >> 2) << 56 | 0xFFFFFFFFull << 20, 0};
     for (int flags = 0; flags < 32; flags++)
         cases[count++] = (Case){0x5cc0000000000000ull | (uint64_t)(flags & 1) << 47 |
             (uint64_t)((flags >> 1) & 1) << 48 | (uint64_t)((flags >> 2) & 7) << 49 | 2ull << 20 | 3ull << 39, 1};
+    // IADD3: full/low/high halves of all operands, .RS/.LS, and negation after
+    // selecting the half. The original carry/address cases above stay separate.
+    for (int shift = 0; shift < 3; shift++)
+        for (int halves = 0; halves < 27; halves++)
+            for (int neg = 0; neg < 8; neg++)
+                cases[count++] = (Case){0x5cc0000000000000ull | 2ull << 20 | 3ull << 39 |
+                    (uint64_t)shift << 37 | (uint64_t)(halves % 3) << 35 |
+                    (uint64_t)(halves / 3 % 3) << 33 | (uint64_t)(halves / 9) << 31 |
+                    (uint64_t)neg << 49, 5};
     cases[count++] = (Case){0x5cf8000000000000ull | 2ull << 20 | 3ull << 39, 2};
     cases[count++] = (Case){0x5bf8000000000000ull | 2ull << 20 | 3ull << 39, 3};
     const int offsets[] = {0, 1, -1, 0x7FFFFF, -0x800000};
@@ -97,6 +106,11 @@ int main(int argc, char **argv) {
         "if(field(w,53,1))n+=cc;expected=uint(n);if(field(w,52,1))ec=uint(n>>32)&1;}\n"
         "if(c.kind==1){uint a=field(w,51,1)?-r[1]:r[1],b=field(w,50,1)?-r[2]:r[2],d=field(w,49,1)?-r[3]:r[3];"
         "uint64_t n=uint64_t(a)+b+d+(field(w,48,1)?cc:0);expected=uint(n);if(field(w,47,1))ec=uint(n>>32)&1;}\n"
+        "if(c.kind==5){uint v[3];for(int j=0;j<3;j++){uint half=field(w,35-2*j,2);"
+        "uint x=half==1?r[j+1]%65536u:half==2?r[j+1]/65536u:r[j+1];"
+        "v[j]=field(w,51-j,1)?uint(0x100000000ull-x):x;}"
+        "uint64_t sum=(uint64_t(v[0])+v[1])%0x100000000ull;uint sh=field(w,37,2);"
+        "if(sh==1)sum/=65536;else if(sh==2)sum=(sum*65536)%0x100000000ull;expected=uint(sum+v[2]);}\n"
         "if(c.kind==2)expected=uint(((uint64_t(r[3])<<32)|r[1])>>(r[2]&31));\n"
         "if(c.kind==3)expected=uint((((uint64_t(r[3])<<32)|r[1])<<(r[2]&31))>>32);\n"
         "if(c.kind==4){int64_t off=int64_t(int32_t(field(w,20,24)<<8)>>8);uint64_t a=uint64_t(r[1])|(field(w,45,1)?uint64_t(r[2])<<32:0);"

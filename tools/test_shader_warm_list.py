@@ -116,9 +116,9 @@ class SharedListTests(unittest.TestCase):
 
     def test_pinned_real_list(self):
         shared, provenance = importer.verified_list()
-        self.assertEqual(provenance['commit'], 'f024ef04c707c4b4bb5b6328bfc55ae89642af40')
-        self.assertEqual(len(shared.variants), 13802)
-        self.assertEqual(len(shared.warm), 70971)
+        self.assertEqual(provenance['commit'], '032a05dff7215177912edfb2d01c9e20089d92a7')
+        self.assertEqual(len(shared.variants), 13821)
+        self.assertEqual(len(shared.warm), 73397)
         self.assertEqual(sum('t' in flags for flags in shared.warm.values()), 1177)
 
     def test_portable_sha256_against_hashlib(self):
