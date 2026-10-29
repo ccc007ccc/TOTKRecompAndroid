@@ -1042,11 +1042,12 @@ static VkSpan copy_dedupe(int slot, const void *data, uint64_t size, uint64_t al
 
 // Guest memory copied once per submission: draws binding the same range share the copy.
 #define GCOPY_TAB 4096
-static struct { uint64_t addr, size, seq, listed; VkSpan span; } gcopy[GCOPY_TAB];
+static struct { uint64_t addr, size, seq, listed, heap_gen; VkSpan span; } gcopy[GCOPY_TAB];
 static uint16_t gcopy_active[GCOPY_TAB];
 static int gcopy_nactive;
 static uint64_t gcopy_active_seq;
 static uint64_t gcopy_gen;  // bumped to drop every shared copy (guest memory written mid-list)
+static uint64_t gcopy_heap_gen;  // shader global stores can only reach the main heap
 static const void *submitted_data(uint64_t addr, uint64_t size) {
 #ifdef __ANDROID__
     const void *data = submit_snapshot_data(addr, size);
@@ -1070,7 +1071,9 @@ static VkSpan guest_copy(uint64_t addr, uint64_t size) {
     uint64_t seq = vk_pending_seq() + (gcopy_gen << 40), h = (addr * 0x9E3779B97F4A7C15ull) ^ (size * 0xC2B2AE3D27D4EB4Full);
     if (gcopy_active_seq != seq) { gcopy_active_seq = seq; gcopy_nactive = 0; }
     uint32_t slot = (uint32_t)(h ^ (h >> 32)) & (GCOPY_TAB - 1);
-    bool same = gcopy[slot].seq == seq && gcopy[slot].addr == addr && gcopy[slot].size == size;
+    bool in_heap = addr < HEAP_BASE + HEAP_MAX && (addr >= HEAP_BASE || size > HEAP_BASE - addr);
+    bool same = gcopy[slot].seq == seq && gcopy[slot].addr == addr && gcopy[slot].size == size &&
+                (!in_heap || gcopy[slot].heap_gen == gcopy_heap_gen);
     if (same) {
         stat_cb_hits++;
         return gcopy[slot].span;
@@ -1086,6 +1089,7 @@ static VkSpan guest_copy(uint64_t addr, uint64_t size) {
     VkSpan s = vk_transient_copy(submitted_data(addr, size), size, 256);
     stat_cb_copied += size;
     gcopy[slot].addr = addr; gcopy[slot].size = size; gcopy[slot].seq = seq; gcopy[slot].span = s;
+    gcopy[slot].heap_gen = gcopy_heap_gen;
     return s;
 }
 
@@ -4199,13 +4203,13 @@ static void gres_learn(uint32_t off) {
 // Load-only arena copies are immutable until their submission retires. Compare against that exact copy;
 // no assumption that guest memory remains unchanged between draws.
 static uint64_t ga_load_copy(uint64_t at, uint64_t size) {
-    static struct { uint64_t at, size, off, seq, gen; bool valid; } cache[64];
+    static struct { uint64_t at, size, off, seq, gen, heap_gen; bool valid; } cache[64];
     static int reuse = -1;
     if (reuse < 0) { const char *e = getenv("LARECOMP_GCOPY_REUSE"); reuse = !e || atoi(e) != 0; }
     uint64_t seq = vk_pending_seq();
     unsigned slot = (unsigned)((at >> 8) ^ (size >> 8)) & 63;
     const uint8_t *src = submitted_data(HEAP_BASE + at, size);
-    if (reuse && cache[slot].valid && cache[slot].seq == seq && cache[slot].gen == gcopy_gen &&
+    if (reuse && cache[slot].valid && cache[slot].seq == seq && cache[slot].gen == gcopy_gen && cache[slot].heap_gen == gcopy_heap_gen &&
         cache[slot].at == at && cache[slot].size == size && !memcmp(ga_ptr + cache[slot].off, src, size))
         return cache[slot].off;
     uint64_t off = ga_ring(size);
@@ -4213,6 +4217,7 @@ static uint64_t ga_load_copy(uint64_t at, uint64_t size) {
     memcpy(ga_ptr + off, src, size);
     cache[slot].at = at; cache[slot].size = size; cache[slot].off = off;
     cache[slot].seq = seq; cache[slot].gen = gcopy_gen; cache[slot].valid = true;
+    cache[slot].heap_gen = gcopy_heap_gen;
     return off;
 }
 
@@ -4558,7 +4563,10 @@ static void vc_mark_sbufs(int stage) {
     // STG can follow pointers beyond the declared SBUF ranges. Without a precise store footprint, conservatively
     // invalidate captures across the mapped heap; preserve the existing GPU-resident/fence path for these reads.
     submit_snapshot_write(HEAP_BASE, HEAP_MAX, vk_pending_seq());
-    guest_copy_flush();
+    // LDG/STG and the copy/window tables are restricted to HEAP_BASE..HEAP_MAX.
+    // Keep immutable uploads outside it (notably ALIAS vertex streams), while
+    // invalidating every heap upload even when a store follows an unbound pointer.
+    ++gcopy_heap_gen;
 #endif
     for (int i = 0; i < 16; i++) {
         uint64_t a = st.sbuf[stage][i].addr, sz = st.sbuf[stage][i].size;

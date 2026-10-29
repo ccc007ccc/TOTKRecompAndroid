@@ -24,6 +24,8 @@ copy_start = execution.index('// Guest memory copied once per submission:')
 copy_helpers = execution[copy_start:execution.index('// ================================================================== worker threads', copy_start)]
 memory_start = execution.index('void vk_memory_written(')
 memory_helper = execution[memory_start:execution.index('\n}\n', memory_start) + 3]
+store_start = execution.index('static void vc_mark_sbufs(')
+store_helper = execution[store_start:execution.index('\n}\n', store_start) + 3]
 preamble = r"""
 typedef unsigned long long uint64_t;
 typedef unsigned int size_t;
@@ -74,7 +76,9 @@ void abort(void) { __builtin_trap(); }
 char *getenv(const char *name) { return NULL; }
 int atoi(const char *s) { return 0; }
 typedef struct { uint64_t data_hash; } TexBackend;
-static uint8_t guest[65536], arena[4096];
+static struct { uint8_t before[256], heap[65536], after[256]; } guest_memory;
+#define guest guest_memory.heap
+static uint8_t arena[4096];
 #define HEAP_BASE ((uintptr_t)guest)
 #define HEAP_MAX sizeof guest
 static uint32_t page_gen[16], *vc_page_gen = page_gen, vc_gen = 7;
@@ -90,11 +94,17 @@ static void plat_write_tracking_enable(uint64_t lo, uint64_t hi) {
     tracking_lo = lo; tracking_hi = hi;
 }
 static uint8_t *ga_ptr = arena;
-static uint64_t gcopy_gen, seq = 1, top;
+static uint64_t gcopy_gen, gcopy_heap_gen, seq = 1, top;
 static uint64_t vk_pending_seq(void) { return seq; }
 static const void *submitted_data(uint64_t addr, uint64_t size);
 static const void *submit_snapshot_data(uint64_t addr, uint64_t size) { return NULL; }
-static void submit_snapshot_write(uint64_t addr, uint64_t size, uint64_t seq) {}
+static uint64_t snapshot_write_addr, snapshot_write_size, snapshot_write_seq;
+static void submit_snapshot_write(uint64_t addr, uint64_t size, uint64_t seq) {
+    snapshot_write_addr = addr; snapshot_write_size = size; snapshot_write_seq = seq;
+}
+static struct { struct { uint64_t addr, size; } sbuf[6][16]; } st;
+static unsigned gpu_marks;
+static void vc_mark_gpu(uint64_t lo, uint64_t hi) { gpu_marks++; }
 static uint64_t ga_ring(uint64_t n) {
     if (top + n > sizeof arena) return ~0ull;
     uint64_t off = top; top += n; return off;
@@ -167,6 +177,39 @@ int test(void) {
         guest_copy(keys[0], 16);
     }
     CHECK(gcopy_nactive == 1);
+    // Global stores invalidate all heap captures, including unbound pointers,
+    // but cannot modify ALIAS/other memory outside the shader heap descriptor.
+    for (unsigned stage = 0; stage < 6; stage++) {
+        if (stage != 0 && stage != 1 && stage != 5) continue;
+        seq++;
+        uint64_t outer_addr = (uintptr_t)guest_memory.before;
+        VkSpan outer = guest_copy(outer_addr, 16);
+        VkSpan inner = guest_copy((uintptr_t)(guest + 1024), 16);
+        VkSpan edge = guest_copy(HEAP_BASE - 8, 16);
+        VkSpan end = guest_copy(HEAP_BASE + HEAP_MAX - 8, 16);
+        VkSpan after = guest_copy(HEAP_BASE + HEAP_MAX, 16);
+        st.sbuf[stage][0].addr = HEAP_BASE + 4096;
+        st.sbuf[stage][0].size = 16;
+        unsigned marked = gpu_marks;
+        vc_mark_sbufs(stage);
+        CHECK(gpu_marks == marked + 1);
+        CHECK(snapshot_write_addr == HEAP_BASE && snapshot_write_size == HEAP_MAX && snapshot_write_seq == seq);
+        CHECK(guest_copy(outer_addr, 16).ptr == outer.ptr);
+        CHECK(guest_copy(HEAP_BASE + HEAP_MAX, 16).ptr == after.ptr);
+        CHECK(guest_copy((uintptr_t)(guest + 1024), 16).ptr != inner.ptr);
+        CHECK(guest_copy(HEAP_BASE - 8, 16).ptr != edge.ptr);
+        CHECK(guest_copy(HEAP_BASE + HEAP_MAX - 8, 16).ptr != end.ptr);
+        // Explicit CPU/copy writes still invalidate retained outside uploads.
+        guest_memory.before[0]++;
+        guest_copy_invalidate(outer_addr, outer_addr + 1);
+        VkSpan updated = guest_copy(outer_addr, 16);
+        CHECK(updated.ptr != outer.ptr && updated.ptr[0] == outer.ptr[0] + 1);
+        guest_copy_flush();
+        CHECK(guest_copy(outer_addr, 16).ptr != updated.ptr);
+        VkSpan last = guest_copy(outer_addr, 16);
+        seq++;
+        CHECK(guest_copy(outer_addr, 16).ptr != last.ptr);
+    }
     VkSpan later = guest_copy((uintptr_t)(guest + 100), 16);
     guest[100] = 77;
     guest_copy_invalidate((uintptr_t)(guest + 100), (uintptr_t)(guest + 101));
@@ -247,6 +290,10 @@ int test(void) {
     uint64_t d = ga_load_copy(0, 64);
     CHECK(d != c);
     CHECK(ga_load_copy(0, 64) == d);
+    vc_mark_sbufs(5);
+    uint64_t after_store = ga_load_copy(0, 64);
+    CHECK(after_store != d && ga_load_copy(0, 64) == after_store);
+    d = after_store;
     top = sizeof arena;
     guest[20]++;
     CHECK(ga_load_copy(0, 64) == ~0ull);
@@ -257,7 +304,7 @@ int test(void) {
 }
 """
 source = OUT / 'upload_caches.c'
-source.write_text(preamble + ubo_helper + descriptor_helpers + texture_helpers + arena_helper + heap_fallback + copy_helpers + memory_helper + tests)
+source.write_text(preamble + ubo_helper + descriptor_helpers + texture_helpers + arena_helper + heap_fallback + copy_helpers + memory_helper + store_helper + tests)
 subprocess.run([str(BIN / ('clang' + EXE)), '-target', 'wasm32', '-D__ANDROID__', '-ffreestanding', '-fno-builtin', '-O2', '-c', str(source), '-o', str(OUT / 'upload_caches.o')], check=True)
 subprocess.run([str(BIN / ('ld.lld' + EXE)), '-flavor', 'wasm', '--no-entry', '--export=test', str(OUT / 'upload_caches.o'), '-o', str(OUT / 'upload_caches.wasm')], check=True)
 runner = OUT / 'upload_caches.cjs'
