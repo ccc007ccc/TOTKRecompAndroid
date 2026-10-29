@@ -13,6 +13,7 @@ Generators, compilers, Python and Java use temporary storage under `.work/totk-p
 "$PYTHON" tools/test_exclusive_pair.py
 "$PYTHON" tools/test_local_branches.py
 "$PYTHON" tools/test_shader_control_flow.py
+"$PYTHON" tools/test_shader_driver_constants.py
 ```
 
 These cover input contracts/streaming extraction, RomFS building, paired-exclusive instructions, local branches and shader control flow.
@@ -99,6 +100,13 @@ Each frame includes:
 Per-frame budgets are 24 MiB for stage images, 8 MiB for code/inputs and 4 MiB for logs. The two-frame core buffers use about 80 MiB,
 with additional driver/encoder overhead. Shader records are capped at 128 KiB each and constants at 4 KiB, with original and saved lengths.
 Log space is reserved for later draw/skip summaries and shader code/key associations. Exceeding a data budget records omissions instead of discarding the event.
+
+For targeted inputs, set `LARECOMP_DIAGNOSTIC_VS=<hex vertex-code address>` or `rt:<width>x<height>:<hex NVN format>`.
+The first matching draw in each captured frame records sampled GPU thumbnails and CPU storage mirrors (up to 2 MiB each)
+within the existing budgets. `sampled` log rows connect bindings to `image_slot=16+binding` and `cpu_blob`.
+Images show the selected mip/layer backing before view swizzles; overlapping textures and sampler borders are also logged.
+This adds GPU synchronization and is not a performance measurement. `LARECOMP_TRACE_GPU_COPIES=1` logs up to 256 GPU texture
+source overlaps in buffer copies. `LARECOMP_WATCH_TEXADDR` also logs explicit CPU texture flushes covering that address.
 Files use gzip; actual size depends on scene contents. The threshold defaults to 8% (2%–40%). A light session stops after 64 events or 512 MiB.
 
 Files remain under `/storage/emulated/0/Android/data/com.totkrecomp.android/files/flicker/<timestamp>/`:

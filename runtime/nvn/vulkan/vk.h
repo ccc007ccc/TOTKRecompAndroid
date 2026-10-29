@@ -157,6 +157,8 @@ typedef struct TexBackend {
 } TexBackend;
 
 TexBackend *vk_tex(NvnTexture *t, bool for_render);  // backend image (uploads CPU contents unless for_render)
+void vk_texture_diagnostic_aliases(NvnTexture *t); // render thread, explicit sampled-input diagnostic only
+void vk_texture_copy_diagnostic(uint64_t src, uint64_t dst, uint64_t size);
 VkFormat vk_format(uint32_t nvn_format);
 bool vk_format_alpha_one(uint32_t nvn_format);
 bool renderer_texture_scalable(NvnTexture *t);

@@ -3494,6 +3494,12 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
                 e[1] = (uint32_t)(st.sbuf[stage][i].addr >> 32);
                 e[2] = (uint32_t)st.sbuf[stage][i].size;
             }
+            if (stage == STAGE_VERTEX) {
+                // NVN's c0[0x610] is the point-size ceiling. TotK's grass-cut
+                // stamps clamp their point size to it; zero discards the stamp.
+                float limit = fminf(2047.9375f, g_vk.props.limits.pointSizeRange[1]);
+                memcpy(&drv[0x610 / 4], &limit, sizeof limit);
+            }
         }
         uint64_t size = si->cbuf_size[0] > sizeof drv ? sizeof drv : (si->cbuf_size[0] ? si->cbuf_size[0] : 256);
         if (size < 0x500 && stage == 5) size = 0x500;
@@ -5301,6 +5307,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
 // ================================================================== draws
 static void debug_draw(Prog *pr, CmdRec *r, bool indexed);
 static void diagnostic_draw(Prog *pr, CmdRec *r, bool indexed);
+static void diagnostic_sampled_textures(Prog *pr);
 
 // Quads / fans / polygons as a 32-bit triangle index list.
 static uint32_t *expand_indices(uint32_t mode, uint32_t count, const void *indices, int itype, uint32_t first, uint32_t *out_count) {
@@ -6094,6 +6101,7 @@ static void draw_(CmdRec *r, bool indexed) {
 #endif
     }
     vertex_debug_finish();
+    diagnostic_sampled_textures(pr);
 }
 
 // Opt-in snapshot of one draw's guest inputs for offline vertex/shader diagnosis.
@@ -6153,6 +6161,35 @@ static unsigned diagnostic_range(unsigned kind, uint64_t address, uint64_t size,
     return vk_diag_blob(kind,address,(const void *)(uintptr_t)address,size,limit);
 }
 
+// Capture the actual GPU inputs of the first selected vertex draw, alongside
+// the existing lightweight frame record. This is opt-in and ends its pass
+// before readback; ordinary captures keep their existing image budget.
+static void diagnostic_sampled_textures(Prog *pr) {
+    if (!vk_diag_active() || !vertex_debug_selected(getenv("LARECOMP_DIAGNOSTIC_VS"), pr->code[0], false)) return;
+    static uint64_t saved_frame = ~0ull;
+    uint64_t frame = renderer_present_count();
+    if (saved_frame == frame) return;
+    saved_frame = frame;
+    vk_end_pass();
+    for (int k = 0; k < pr->vi->ntex && k < 64; k++) {
+        NvnTexEntry *e = shader_texture_entry(0, &pr->vi->tex[k]);
+        NvnTexture *t = e ? e->tex : NULL;
+        NvnTexture *source = t && naliases ? alias_read(t) : t;
+        TexBackend *b = source ? source->backend : NULL;
+        for (int n = 0; n < nfeedback; n++)
+            if (t == feedback_tex[n] && is_attachment_entry(e)) b = feedback_snap[n];
+        if (!b) continue;
+        uint32_t lv = e->has_view && (e->view.setmask & 1) ? e->view.base_level : 0;
+        uint32_t ly = e->has_view && (e->view.setmask & 2) ? e->view.min_layer : 0;
+        unsigned cpu = diagnostic_range(20, t->addr, tegra_total_size(&t->layout), 2u << 20);
+        vk_diag_log("sampled group=%u stage=0 binding=%d image_slot=%d address=%llx flags=%x stride=%llu mip=%u layer=%u cpu_blob=%u\n",
+            vk_diag_group(), k, 16 + k, (unsigned long long)t->addr, t->flags, (unsigned long long)t->stride, lv, ly, cpu);
+        VkImageAspectFlags aspect = b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : b->aspect;
+        vk_diag_image(b, t->addr, 16 + k, lv, ly, aspect);
+        vk_texture_diagnostic_aliases(t);
+    }
+}
+
 static void diagnostic_draw(Prog *pr, CmdRec *r, bool indexed) {
     vk_diag_log("draw group=%u fs_hash=%016llx indexed=%d count=%llu viewport=%g,%g,%g,%g depth_range=%g,%g scissor=%d,%d,%u,%u depth=%u,%u,%u stencil=%u,%u/%u mask=%x polygon=%u,%u,%u,%u bias=%g,%g,%g\n",
         vk_diag_group(),(unsigned long long)g_cur_fs_hash,indexed,(unsigned long long)r->x[2],
@@ -6185,8 +6222,9 @@ static void diagnostic_draw(Prog *pr, CmdRec *r, bool indexed) {
             unsigned sampler=(handle>>20)&0xfff;
             if(st.spool&&sampler<(unsigned)st.spool->count) {
                 const NvnSamplerDesc *sd=&((const NvnSamplerDesc*)st.spool->entries)[sampler];
-                vk_diag_log(" sampler stage=%d binding=%d min=%u mag=%u wrap=%u,%u,%u lod=%g,%g bias=%g compare=%u,%u\n",
-                    stage,k,sd->min_filter,sd->mag_filter,sd->wrap[0],sd->wrap[1],sd->wrap[2],sd->lod_min,sd->lod_max,sd->lod_bias,sd->compare_mode,sd->compare_func);
+                vk_diag_log(" sampler stage=%d binding=%d min=%u mag=%u wrap=%u,%u,%u lod=%g,%g bias=%g compare=%u,%u border=%g,%g,%g,%g custom_supported=%d\n",
+                    stage,k,sd->min_filter,sd->mag_filter,sd->wrap[0],sd->wrap[1],sd->wrap[2],sd->lod_min,sd->lod_max,sd->lod_bias,sd->compare_mode,sd->compare_func,
+                    sd->border[0],sd->border[1],sd->border[2],sd->border[3],g_vk.custom_border);
             }
         }
     }
@@ -7418,6 +7456,7 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_COPY_BUFFER_TO_TEXTURE: copy_buffer_to_texture(r->x[0], x); break;
         case CMD_COPY_TEXTURE_TO_BUFFER: copy_texture_to_buffer(x, r->x[3]); break;
         case CMD_COPY_BUFFER_TO_BUFFER:
+            vk_texture_copy_diagnostic(r->x[0], r->x[1], r->x[2]);
             if (trace_copy_bytes) {
                 buffer_copy_stats.count++; buffer_copy_stats.bytes += r->x[2];
                 if (r->x[2] > buffer_copy_stats.size) {

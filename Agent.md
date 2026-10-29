@@ -190,6 +190,7 @@ TOTK_STAGE=.work/totk-port/packages/debug-dev
 | 输入/生成器 | `"$PYTHON" tools/test_totk.py`、`"$PYTHON" tools/test_romfs_build.py`、`"$PYTHON" tools/test_exclusive_pair.py`、`"$PYTHON" tools/test_local_branches.py` |
 | APK/库身份、端侧参数 | `"$PYTHON" tools/test_android_packages.py`；`"$PYTHON" tools/test_gamebuild_flags.py`；实际构建相关 variant/profile |
 | 着色器缓存/编译 | `bash tools/test_shader_runtime.sh`；`bash tools/test_shader_cache_compat.sh`；`bash tools/test_shader_dictionaries.sh` |
+| 驱动常量 | `"$PYTHON" tools/test_shader_driver_constants.py`（点尺寸上限、阶段隔离、存储表和派发尺寸） |
 | 程序/管线索引容量、重启 | `"$PYTHON" tools/test_shader_program_cache.py`；`"$PYTHON" tools/test_shader_lifetimes.py` |
 | 共享映射、异步复制 | `bash tools/test_shared_memory.sh`；`bash tools/test_buffer_copy.sh` |
 | 清单/准备/生命周期 | `bash tools/test_shader_warm_list.sh`；`bash tools/test_shader_warm_prepare.sh`；`bash tools/test_shader_warm_background.sh` |

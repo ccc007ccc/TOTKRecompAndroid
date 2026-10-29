@@ -31,3 +31,4 @@
 
 - [项目收尾与剩余任务](PROJECT-CLOSEOUT.md)
 - [画面复现与验收](VISUAL-VALIDATION.md)
+- [草地交互修复与音频核对](GRASS-AND-AUDIO.md)

@@ -43,9 +43,9 @@ The user confirmed that this device build fixed the reported halo clipping and s
 
 ## Remaining validation
 
-- Intermittent missing grass occurs in both Performance Test and the ordinary app, and has also recovered. The user requested submission now and investigation later. The previous row-stride fix remains; vertex sampling quantization is now opt-in, without a proven connection to the grass fault.
+- On 2026-10-29 the missing vertex driver point-size limit was filled, restoring grass interaction-map updates; the user reported that grass had recovered. Earlier captures of field-wide disappearance with an empty terrain-normal input are retained; this short run is not long-session acceptance. See [grass and audio follow-up (Chinese)](../GRASS-AND-AUDIO.md). Vertex sampling quantization stays opt-in.
 - The automatic-loading black grid was fixed on 2026-10-29 by preserving the normal menu confirmation flow and stopping test input when the selected progress file is read. See [visual validation](../VISUAL-VALIDATION.md); the historical intermittent UI fault below remains separate.
-- Missing loading UI layers and single-frame scene blackouts remain unresolved. Correcting the texture layout removed the blue spawn-platform rectangles; this does not establish a fix for the other two faults. The capture controls provide lightweight stage/state diagnostics by default, with full replay as an advanced option; see [testing](TESTING.md#on-device-flicker-capture).
+- On 2026-10-29 the user reported that UI flicker appears to have recovered alongside other changes. Its fixing commit and mechanism are unknown, so it is no longer listed as a currently reproduced fault. Historical single-frame sky-island blackouts were not separately reconfirmed. Capture controls provide lightweight stage/state diagnostics by default, with full replay as an advanced option; see [testing](TESTING.md#on-device-flicker-capture).
 - Broader scenes, ordinary shadows, transparency and long sessions still need coverage. Current scene acceptance does not cover every game area or device.
 - Some views previously encountered an unimplemented vertex `DMUL`; this change does not address it, and its relation to the fixed faults was not established.
 - Other audio scenes, effect types not yet observed, input flows, save transactions/crash recovery and performance remain unverified.

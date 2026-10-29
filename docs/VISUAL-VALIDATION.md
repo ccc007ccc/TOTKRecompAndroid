@@ -1,5 +1,9 @@
 # 2026-10-29 画面复现与验收
 
+后续反馈：用户确认当前听感正常，UI 闪烁似乎已随其他提交恢复；下文保留当时的检查范围。
+进一步移动并挥剑后已取得草整片消失前后的同进程捕获，不能沿用本轮较短路线的“未复现”结论排除故障。
+后续点尺寸常量修复、用户反馈和音频解释见 [草地与音频核对](GRASS-AND-AUDIO.md)。
+
 本轮从 `15eb0c1` 继续，优先处理有明确对照的自动读档加载背景黑底，并复查旧草地存档。
 设备为一加 13 / PJZ110 / Adreno 830 / Banner Turnip。所有构建、测试和 ADB 均在 `dev`。
 草地原存档只读克隆到 perftest 的独立会话；普通应用未安装或启停。
@@ -71,6 +75,8 @@ Battery Service 的 `temperature` 均为 38.0°C；Thermal Service 状态均为 
 
 标准短测后段出现一次 `AAUDIO_ERROR_DISCONNECTED`，随后日志再次记录 `Low latency audio enabled`，
 采样仍完成且由运行时退出。断连原因与实际音频表现未在本轮验收，不把会话成功当作音频无异常证明。
+后续源码核对：这两条来自 SDL 3.4.16 的 AAudio 后端；`AAUDIO_PlayDevice` 在错误回调后调用
+`RecoverAAudioDevice`，重建输出流时打印低延迟设置。用户反馈声音正常，因此这条日志不列为已确认的当前音频故障。
 最后核对 perftest 进程已退出。
 
 完整私有证据位于 `.work/visual-validation-20261029/`：`loading-image-check.json`、`loading-comparison.png`、

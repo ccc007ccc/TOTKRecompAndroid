@@ -14,9 +14,10 @@
 "$PYTHON" tools/test_exclusive_pair.py
 "$PYTHON" tools/test_local_branches.py
 "$PYTHON" tools/test_shader_control_flow.py
+"$PYTHON" tools/test_shader_driver_constants.py
 ```
 
-这些检查分别覆盖输入契约／流式提取、RomFS 构建、成对独占指令、局部跳转和着色器控制流。
+这些检查分别覆盖输入契约／流式提取、RomFS 构建、成对独占指令、局部跳转、着色器控制流和驱动常量。
 着色器测试还需要 `cc`、`glslangValidator`、`spirv-val`；它们应安装在 `dev`。
 服务、LDC、gather、打包纹理和局部纹理更新另有 `tools/test_*.c` 合成测试，历史结果见 [适配记录](TOTK-PORT.md)。
 上游 RomFS 测试中的 BOTW 版本检查是继承代码的回归验证，不能代替 TOTK 资源验收。
@@ -94,6 +95,13 @@ Android 可通过 `adb -s "$ANDROID_SERIAL" shell input keyevent KEYCODE_F9` 发
 
 每帧的阶段图、常量/着色器、日志预算分别为24、8、4 MiB；一组两帧核心缓冲约80 MiB，驱动和压缩线程另有开销。
 着色器单份最多128 KiB，常量单份最多4 KiB，并记录原长度和实际保存长度。日志给后续绘制/跳过摘要和着色器原码/参数关联预留空间。
+
+定向输入检查可设置 `LARECOMP_DIAGNOSTIC_VS=<顶点代码地址十六进制>`，或 `rt:<宽>x<高>:<NVN格式十六进制>`。
+每次捕获的首个匹配绘制结束后，沿用原预算记录其 GPU 采样输入缩略图和 CPU 存储镜像（每份至多 2 MiB），
+`draws.txt.gz` 的 `sampled` 行关联 binding、`image_slot=16+binding` 与 `cpu_blob`。
+图像为所选 mip/layer 的 backing 内容，未应用采样视图的 swizzle；重叠纹理和边界色另记。
+此检查会增加 GPU 同步，不用于性能比较。`LARECOMP_TRACE_GPU_COPIES=1` 最多记录 256 项 buffer-copy 的 GPU 纹理源重叠；
+已有 `LARECOMP_WATCH_TEXADDR` 同时记录命中地址的显式 CPU 纹理 flush。
 达到某项预算时只省略该项并计数，**不丢弃整个事件**。数据使用gzip压缩；实际文件大小取决于场景。
 默认阈值8%，可调2%–40%。存储达到64组或512 MiB后结束当前轻量会话。
 

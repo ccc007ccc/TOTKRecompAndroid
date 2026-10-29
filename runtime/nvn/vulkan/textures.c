@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "vk.h"
+#include "diagnostic.h"
 #include "../astc.h"
 #include "../renderer.h"
 #include "../texpatch.h"
@@ -526,6 +527,45 @@ static void destroy_image(TexBackend *b) {
 static NvnTexture **g_live;
 static int g_nlive, g_cap_live;
 
+void vk_texture_copy_diagnostic(uint64_t src, uint64_t dst, uint64_t size) {
+    static int on = -1;
+    static unsigned shown;
+    if (on < 0) on = getenv("LARECOMP_TRACE_GPU_COPIES") != NULL;
+    if (!on || shown >= 256 || !size || size > UINT64_MAX - src) return;
+    for (int i = 0; i < g_nlive && shown < 256; i++) {
+        NvnTexture *t = g_live[i];
+        TexBackend *b = t->backend;
+        uint64_t n = tegra_total_size(&t->layout);
+        if (!t->addr || !b || !b->gpu_owned || n > UINT64_MAX - t->addr ||
+            src >= t->addr + n || t->addr >= src + size) continue;
+        LOG("[texture-copy] frame %llu src=%llx dst=%llx bytes=%llx GPU texture=%llx dims=%u,%u levels=%u format=%x flags=%x finalized=%d\n",
+            (unsigned long long)renderer_present_count(), (unsigned long long)src, (unsigned long long)dst,
+            (unsigned long long)size, (unsigned long long)t->addr, t->width, t->height, t->levels, t->format, t->flags, t->finalized);
+        shown++;
+    }
+}
+
+void vk_texture_diagnostic_aliases(NvnTexture *t) {
+    if (!vk_diag_active() || !t || !t->addr) return;
+    uint64_t size = tegra_total_size(&t->layout);
+    if (size > UINT64_MAX - t->addr) return;
+    unsigned shown = 0;
+    // The render-thread registry avoids taking the guest object lock while a
+    // guest texture release may be waiting for this queue to finish.
+    for (int i = 0; i < g_nlive && shown < 32; i++) {
+        NvnTexture *other = g_live[i];
+        TexBackend *b = other->backend;
+        uint64_t n = tegra_total_size(&other->layout);
+        if (other == t || !b || !other->addr || n > UINT64_MAX - other->addr ||
+            other->addr >= t->addr + size || t->addr >= other->addr + n) continue;
+        vk_diag_log("sampled_alias source=%llx other=%llx size=%llu dims=%u,%u levels=%u flags=%x stride=%llu format=%x gpu_owned=%d uploaded=%d finalized=%d\n",
+            (unsigned long long)t->addr, (unsigned long long)other->addr, (unsigned long long)n,
+            other->width, other->height, other->levels, other->flags, (unsigned long long)other->stride,
+            other->format, b->gpu_owned, b->uploaded, other->finalized);
+        shown++;
+    }
+}
+
 #ifdef __ANDROID__
 void vk_texture_memory_written(uint64_t addr, uint64_t size) {
     if (!size || addr > UINT64_MAX - size) return;
@@ -992,6 +1032,11 @@ void vk_make_scalable_like(NvnTexture *t, NvnTexture *like) {
 }
 void backend_pool_written(uint64_t addr, uint64_t size) {
     if (!size || addr > UINT64_MAX - size) return;
+    extern uint64_t nvn_watch_texaddr(void);
+    uint64_t watch = nvn_watch_texaddr();
+    if (watch && addr <= watch && watch - addr < size)
+        LOG("[watch] CPU texture flush %llx+%llx frame %llu\n", (unsigned long long)addr,
+            (unsigned long long)size, (unsigned long long)renderer_present_count());
     nvn_texture_cpu_written(addr, size);
 #ifdef __ANDROID__
     vk_async_memory_written(addr, size);

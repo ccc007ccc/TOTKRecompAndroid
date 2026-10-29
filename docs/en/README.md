@@ -30,3 +30,4 @@ Inherited touch UI and the Zepp companion are described in [status](STATUS.md); 
 
 - [Project closeout and remaining work (Chinese)](../PROJECT-CLOSEOUT.md)
 - [Visual validation (Chinese)](../VISUAL-VALIDATION.md)
+- [Grass interaction and audio follow-up (Chinese)](../GRASS-AND-AUDIO.md)
