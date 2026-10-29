@@ -7056,7 +7056,7 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
 }
 
 // ================================================================== executor (renderer.m exec_list)
-// LARECOMP_VK_SPLIT_US=<us> (Android, async; 3000 on Turnip): a pass translating that long without a submission is
+// LARECOMP_VK_SPLIT_US=<us> (Android, async): a pass translating that long without a submission is
 // ended and submitted after a draw, so the GPU starts on it while the rest is translated (the next draw reopens it,
 // loading its targets). BOTW's G-buffer is one pass of ~3250 draws, ~10 ms of translation the GPU waited for.
 // LARECOMP_AB=<frames>:<switch> (a measurement): the switch alternates every <frames> presented frames - on (1) in
@@ -7082,10 +7082,16 @@ int vk_ab(const char *what) {
 static void split_long_pass(void) {
 #ifdef __ANDROID__
     static long split = -1;
-    if (split < 0) {  // (3 ms by default; not on Qualcomm's driver, as LARECOMP_VK_CHUNK_US)
+    if (split < 0) {
         extern bool vk_driver_is_qualcomm(void);
+        extern bool vk_driver_is_turnip(void), vk_adreno_8xx(const char *name);
         const char *e = getenv("LARECOMP_VK_SPLIT_US");
-        split = e ? atol(e) : vk_driver_is_qualcomm() ? 0 : 3000;
+        // On Adreno 8xx/Turnip, starting long passes earlier overlaps their
+        // work with CPU translation and shortens the later buffer-copy wait.
+        // Retain the established policy on other GPUs/drivers.
+        split = e ? atol(e) : vk_driver_is_qualcomm() ? 0 :
+                vk_driver_is_turnip() && vk_adreno_8xx(g_vk.props.deviceName) ? 1000 : 3000;
+        LOG("[vk] long-pass split interval %ld us\n", split);
     }
     extern bool vk_async_on(void);
     static unsigned n;  // (the clock every 32 draws: a clock read per draw showed up in the profile)
@@ -7107,6 +7113,7 @@ static void copy_command_inputs(const CmdRec *r) {
     case CMD_BIND_POLYGON: case CMD_BIND_VERTEX_ATTRIB: case CMD_BIND_VERTEX_STREAM:
     case CMD_BIND_VERTEX_BUFFERS: case CMD_BIND_UNIFORM_BUFFERS: case CMD_BIND_STORAGE_BUFFERS:
     case CMD_BIND_TEXTURES: case CMD_BIND_IMAGES: case CMD_SET_TEXTURE_POOL: case CMD_SET_SAMPLER_POOL:
+    case CMD_SET_RENDER_TARGETS: // capture_targets only records GPU image copies; no guest buffer access
     case CMD_SET_VIEWPORTS: case CMD_SET_SCISSORS: case CMD_SET_DEPTH_RANGES:
     case CMD_SET_BLEND_COLOR: case CMD_SET_STENCIL: case CMD_SET_POLYGON_OFFSET:
     case CMD_SET_PRIMITIVE_RESTART: case CMD_SET_DEPTH_CLAMP: case CMD_SET_COPY_STRIDES:
@@ -7119,10 +7126,28 @@ static void copy_command_inputs(const CmdRec *r) {
         vk_buffer_copy_cpu_read(r->x[1], 32); return;
     case CMD_UPDATE_UNIFORM_BUFFER:
         vk_buffer_copy_cpu_write(r->x[0] + r->x[2], r->x[3]); return;
+    case CMD_CLEAR_COLOR: case CMD_CLEAR_DEPTH_STENCIL:
+        // begin_pass may upload attachments. Their guest ranges, not unrelated
+        // buffers, must be ready before it acquires a command buffer.
+        for (int i = 0; i < st.rt.ncolor; ++i) copy_texture_input(st.rt.color[i]);
+        copy_texture_input(st.rt.depth); return;
+    case CMD_CLEAR_TEXTURE:
+        copy_texture_input((NvnTexture *)(uintptr_t)*(const uint64_t *)r->extra); return;
+    case CMD_REPORT_COUNTER:
+        vk_buffer_copy_cpu_write(r->x[1], 16);
+        // pace_end_counter can read the preceding counter's timestamp when
+        // the two records are adjacent. Reading a copy source is harmless;
+        // overwriting either an in-flight source or destination is not.
+        if (r->x[1] >= 8) vk_buffer_copy_cpu_read(r->x[1] - 8, 8);
+        return;
     default:
-        // Texture copies/clears, target capture, counters and unknown commands
-        // can read/upload/write guest memory. Keep the original completion
+        // Texture copies and unknown commands can read/upload/write guest
+        // memory. Keep the original completion
         // guarantee until they have their own complete range description.
+        if (vk_timing_trace_on()) {
+            static unsigned logged;
+            if (logged++ < 64) LOG("[buffer-copy-dependency] conservative command %u\n", r->op);
+        }
         vk_buffer_copy_cpu_write(0, UINT64_MAX); return;
     }
 }

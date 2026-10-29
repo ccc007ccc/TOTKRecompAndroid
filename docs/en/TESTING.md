@@ -25,6 +25,12 @@ BOTW version cases in the inherited RomFS suite do not establish TOTK resource c
 Run checks relevant to the change. APK commands are in [building](BUILD.md).
 The inherited `tools/test_lift.py` depends on macOS/ARM64 and was not run successfully on this x86_64 Linux development host.
 
+For the automatic phone benchmark, `--gpu-profile-frame 1150` timestamps one absolute frame and
+`--timing-trace` records queue waits and GPU counter pairs. Both enable profiling; timestamp readback changes
+timing, so keep these results separate from ordinary FPS measurements. `--render-split-us 0..20000` overrides
+the long-pass submission interval without enabling profiling; 0 disables mid-pass splitting. All three options
+are recorded in `launch.json`. See the [phone workflow](../PHONE-PERFORMANCE.md) for the full command and device rules.
+
 Shared-list parsing, deduplication, game/stage filtering and type preservation, plus cache-first runtime loading:
 
 ```bash

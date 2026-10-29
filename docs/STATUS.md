@@ -2,6 +2,7 @@
 
 2026-10-29 收尾：完整准备门禁、代码失效、重启资源回收及两条实验内存路径见 [收尾记录](PROJECT-CLOSEOUT.md)。
 草地修复后的性能采样、减少重复上传与实机对照见 [首轮性能优化](PERFORMANCE-20261029.md)。
+Turnip / Adreno 8xx 提前提交长绘制阶段及复制依赖修正见 [第二轮性能优化](PERFORMANCE-PIPELINE-20261029.md)。
 
 简体中文 | [English](en/STATUS.md)
 

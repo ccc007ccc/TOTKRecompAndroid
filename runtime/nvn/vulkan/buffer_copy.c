@@ -2,6 +2,7 @@
 // their input intersects a not-yet-completed destination (as in the upstream
 // deferred-copy designs); a later GPU consumer is ordered by the barriers.
 #include "vk.h"
+#include "timing_trace.h"
 #include "../renderer.h"
 #include <stdlib.h>
 #ifdef __ANDROID__
@@ -33,6 +34,12 @@ static void cpu_access(uint64_t addr, uint64_t size, bool write) {
     if (!needed) return;
     uint64_t done = vk_completed_seq();
     if (done < needed) {
+        if (vk_timing_trace_on()) {
+            static unsigned logged;
+            if (logged++ < 64) LOG("[buffer-copy-dependency] %s %llx+%llx seq %llu done %llu\n",
+                write ? "write" : "read", (unsigned long long)addr, (unsigned long long)size,
+                (unsigned long long)needed, (unsigned long long)done);
+        }
         vk_buffer_copy_wait();
         done = vk_completed_seq();
         if (done < needed) FATAL("[buffer-copy] CPU input is still in flight after waiting\n");

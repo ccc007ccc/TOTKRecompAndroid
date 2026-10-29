@@ -225,6 +225,8 @@ TOTK_STAGE=.work/totk-port/packages/release-snapdragon-8elite-perftest
 指定槽位保留正常菜单确认流程，实际读取目标进度文件后停止自动按键；不要改写标题入口跳过界面初始化。
 默认 15 秒，可选 1–60 秒。就绪条件是连续 90 帧场景 G-buffer/绘制量启发式，不是内部“已可操作”标志。
 `--profile` 是诊断计数开关，和构建脚本的 `--profile <编译档>` 含义不同；诊断/回读结果单独记账。
+`--gpu-profile-frame` / `--timing-trace` 自动启用诊断；`--render-split-us` 只覆盖提交阈值。
+这些参数记录在 `launch.json`，用法与时间戳回读的影响见 [手机性能测试](docs/PHONE-PERFORMANCE.md)。
 
 控制器对同一工作区的设备序列号加进程锁；`benchmark --apk` 将安装纳入该锁。
 直接 ADB、其他工作区、手动操作不受它保护，`start` 返回后也不持有整个交互会话的锁。
@@ -251,6 +253,7 @@ CPU 渲染墙钟含等待，GPU 时间可能与它重叠；复制字节占比不
 | 等待首次需要的着色器/管线 | 开 | 默认完成后执行绘制/计算；`LARECOMP_ASYNC_SKIP_DRAWS=1` 仅诊断旧跳过策略 |
 | 提交时内存快照 | 关 | `LARECOMP_VK_SUBMIT_SNAPSHOT=1`，`submit_snapshot.c` |
 | 顶点采样量化 | 关 | `LARECOMP_VS_SNAP=1`，`exec.c`；不能标成已修复草消失 |
+| 长绘制阶段拆分 | 按驱动 | Turnip + Adreno 8xx 为 1 ms，其他非高通原厂驱动为 3 ms，高通原厂关闭；`LARECOMP_VK_SPLIT_US` / `exec.c`，仍保留阶段边界提交与同步 |
 
 `LARECOMP_VK_SHARED_ALIAS` 与 `LARECOMP_VK_ASYNC_BUFFER_COPY` 默认关闭，
 分别对应 `shared_memory.c`、`buffer_copy.c`，通过手机控制器的 `--shared-alias` / `--async-buffer-copy` 验证。

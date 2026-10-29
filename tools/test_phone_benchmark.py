@@ -99,7 +99,7 @@ class PhoneBenchmarkTests(unittest.TestCase):
         launches=[shlex_call[1] for shlex_call in calls if shlex_call[0]=='shell' and shlex_call[1].startswith('am start ')]
         self.assertEqual(len(launches),1)
         self.assertIn('LARECOMP_FPS=60',launches[0])
-        profiling='--profile' in extra or '--compare-ubo' in extra
+        profiling=any(option in extra for option in ('--profile','--compare-ubo','--gpu-profile-frame','--timing-trace'))
         self.assertEqual('LARECOMP_VK_PROF=1' in launches[0],profiling)
         self.assertEqual('LARECOMP_LOG_PACE=1' in launches[0],profiling)
         if '--compare-ubo' in extra:
@@ -167,6 +167,32 @@ class PhoneBenchmarkTests(unittest.TestCase):
         manifest=json.loads(next((self.path/'reports').glob('benchmark-*/launch.json')).read_text())
         self.assertTrue(manifest['profiling'])
         self.assertEqual(manifest['ubo_ab_frames'],60)
+
+    def test_gpu_diagnostics_are_explicit_and_recorded(self):
+        proc=self.run_cli('success','--gpu-profile-frame','1150','--timing-trace')
+        self.assertEqual(proc.returncode,0,proc.stderr)
+        manifest=json.loads(next((self.path/'reports').glob('benchmark-*/launch.json')).read_text())
+        self.assertTrue(manifest['profiling'])
+        self.assertTrue(manifest['timing_trace'])
+        self.assertEqual(manifest['gpu_profile_frame'],1150)
+        self.assertIn('LARECOMP_GPUPROF_AT=1150',manifest['env'])
+        self.assertIn('LARECOMP_TIMING_TRACE=1',manifest['env'])
+
+    def test_gpu_profile_frame_rejected_before_touching_device(self):
+        for frame in ('0','-1','1000001'):
+            proc=subprocess.run([sys.executable,str(ROOT/'tools/phone_test_session.py'),'--serial','phone-benchmark-test',
+                'benchmark','--gpu-profile-frame',frame],capture_output=True,text=True,timeout=5)
+            self.assertNotEqual(proc.returncode,0)
+            self.assertIn('gpu-profile-frame must be',proc.stderr)
+        self.assertFalse((self.path/'calls.jsonl').exists())
+
+    def test_render_split_zero_is_forwarded_without_enabling_profiling(self):
+        proc=self.run_cli('success','--render-split-us','0')
+        self.assertEqual(proc.returncode,0,proc.stderr)
+        manifest=json.loads(next((self.path/'reports').glob('benchmark-*/launch.json')).read_text())
+        self.assertFalse(manifest['profiling'])
+        self.assertEqual(manifest['render_split_us'],0)
+        self.assertIn('LARECOMP_VK_SPLIT_US=0',manifest['env'])
 
     def test_old_runtime_is_refused_and_closed_without_sampling(self):
         proc=self.run_cli('legacy','--seconds','1')

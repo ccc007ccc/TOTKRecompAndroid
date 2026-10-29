@@ -19,6 +19,7 @@ static void complete(void) {
     ncopies = 0; done = seq++;
 }
 uint64_t vk_completed_seq(void) { return done; }
+bool vk_timing_trace_on(void) { return false; }
 uint64_t vk_pending_seq(void) { return seq; }
 void vk_buffer_copy_wait(void) { ++waits; if (!timeout) complete(); }
 void vk_end_pass(void) {}

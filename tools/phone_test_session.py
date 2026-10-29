@@ -38,10 +38,13 @@ def main():
                             help='Enable experimental submit-time buffer snapshots for a separate comparison')
         launch.add_argument('--shared-alias',choices=['on','off'],help='Enable/disable GPU-visible resource mappings for a controlled comparison')
         launch.add_argument('--async-buffer-copy',choices=['on','off'],help='Enable/disable deferred GPU buffer copies for a controlled comparison')
+        launch.add_argument('--render-split-us',type=int,help='Long-pass submission interval, 0..20000 microseconds; 0 disables splitting')
     benchmark.add_argument('--save-slot',type=int,choices=range(6),default=0)
     benchmark.add_argument('--seconds',type=float,default=15,help='Measurement duration after loading, 1..60 seconds (default 15)')
     benchmark.add_argument('--timeout',type=float,help='Overall startup and measurement timeout')
     benchmark.add_argument('--profile',action='store_true',help='Record CPU/GPU timing and constant-buffer copy counters during the automatic run')
+    benchmark.add_argument('--gpu-profile-frame',type=int,help='Diagnostic only: timestamp each GPU pass in this absolute frame; enables profiling')
+    benchmark.add_argument('--timing-trace',action='store_true',help='Diagnostic only: trace GPU counters and queue waits; enables profiling')
     benchmark.add_argument('--compare-ubo',type=int,metavar='FRAMES',help='Diagnostic only: alternate copied/shared uniform buffers every 30..600 frames; enables profiling')
     start.add_argument('--diagnostic-present-interval',type=int,choices=[1,2,3],
                        help='Override the game present interval for diagnosis; may change game speed, not a gameplay FPS result')
@@ -60,8 +63,14 @@ def main():
     args=ap.parse_args()
     launching=args.command in ('start','benchmark')
     timed=args.command=='benchmark'
+    if launching and args.render_split_us is not None and not 0<=args.render_split_us<=20000:
+        ap.error('render-split-us must be 0..20000')
     if timed:
         if not math.isfinite(args.seconds) or not 1<=args.seconds<=60:ap.error('seconds must be 1..60')
+        if args.gpu_profile_frame is not None:
+            if not 1<=args.gpu_profile_frame<=1000000:ap.error('gpu-profile-frame must be 1..1000000')
+            args.profile=True
+        if args.timing_trace:args.profile=True
         if args.compare_ubo is not None:
             if not 30<=args.compare_ubo<=600:ap.error('compare-ubo must be 30..600 frames')
             args.profile=True
@@ -148,11 +157,14 @@ def main():
         else:env+=['LARECOMP_VK_PROF=1','LARECOMP_LOG_CBUF_BYTES=1','LARECOMP_TEXTURE_TRACE=1','LARECOMP_LOG_FRAMEPACE=120']
         if timed and args.profile:
             env+=['LARECOMP_VK_PROF=1','LARECOMP_LOG_CBUF_BYTES=1','LARECOMP_LOG_PACE=1']
+        if timed and args.gpu_profile_frame is not None:env+=['LARECOMP_GPUPROF_AT='+str(args.gpu_profile_frame)]
+        if timed and args.timing_trace:env+=['LARECOMP_TIMING_TRACE=1']
         if timed and args.compare_ubo is not None:
             env+=['LARECOMP_AB='+str(args.compare_ubo)+':ubo']
         if args.submit_snapshot:env+=['LARECOMP_VK_SUBMIT_SNAPSHOT=1','LARECOMP_LOG_SUBMIT_SNAPSHOT=1']
         if args.shared_alias is not None:env+=['LARECOMP_VK_SHARED_ALIAS='+('1' if args.shared_alias=='on' else '0')]
         if args.async_buffer_copy is not None:env+=['LARECOMP_VK_ASYNC_BUFFER_COPY='+('1' if args.async_buffer_copy=='on' else '0')]
+        if args.render_split_us is not None:env+=['LARECOMP_VK_SPLIT_US='+str(args.render_split_us)]
         if args.shader_warm is not None:env+=['LARECOMP_SHADER_WARM='+('1' if args.shader_warm=='on' else '0')]
         if args.pipeline_warm is not None:env+=['LARECOMP_PIPELINE_WARM='+('1' if args.pipeline_warm=='on' else '0')]
         settings_copy=None;settings_sha=None
@@ -187,7 +199,10 @@ def main():
                   'submit_snapshot':args.submit_snapshot,
                   'shared_alias':args.shared_alias,
                   'async_buffer_copy':args.async_buffer_copy,
+                  'render_split_us':args.render_split_us,
                   'profiling':args.profile if timed else True,
+                  'gpu_profile_frame':args.gpu_profile_frame if timed else None,
+                  'timing_trace':args.timing_trace if timed else False,
                   'ubo_ab_frames':args.compare_ubo if timed else None,
                   'benchmark_seconds':args.seconds if timed else None,
                   'diagnostic_present_interval':args.diagnostic_present_interval}
