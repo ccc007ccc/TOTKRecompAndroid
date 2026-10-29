@@ -186,11 +186,8 @@ static void boot(const char *root) {
     vk_shader_warm_stop(); // settings_load below may change the translation profile
     // Strict mode applies the same preparation gate to direct and launcher starts.
     extern void ui_window_init(void);
-    extern bool vk_shader_game_ready(const char *game);
     extern bool vk_shader_runtime_compile_enabled(void);
     ui_window_init();
-    if (!vk_shader_runtime_compile_enabled() && !vk_shader_game_ready(root))
-        FATAL("Game graphics are not prepared. Prepare graphics or enable runtime shader compilation before playing.\n");
 #endif
     char exefs[1024], romfs[1024], npdm_path[1024];
     snprintf(exefs, sizeof exefs, "%s/exefs", root);
@@ -204,7 +201,8 @@ static void boot(const char *root) {
     { extern void settings_load(void); settings_load(); }
 #ifdef __ANDROID__
     extern bool vk_shader_boot_warm(const char* game,void (*idle)(void));
-    vk_shader_boot_warm(root,reboot_idle);
+    if(!vk_shader_boot_warm(root,reboot_idle) && !vk_shader_runtime_compile_enabled())
+        FATAL("Prepared game graphics are missing or damaged. Prepare graphics or enable runtime shader compilation before playing.\n");
     extern void vk_pipeline_warm_begin(void);
     vk_pipeline_warm_begin();
 #endif

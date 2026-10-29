@@ -12,8 +12,7 @@ cache = source[source.index("#define PROG_TAB_INITIAL"):source.index("// =======
 hash_function = source[source.index("static uint64_t hash_words(uint64_t h, const void *p, size_t n) {"):
                        source.index("static uint64_t hmix(uint64_t h, const void *p, size_t n) {")]
 reset = source[source.index("void vk_exec_reset(void)"):source.index("static void texture_info(")]
-assert "program_cache_reset();" in reset
-assert "shader_object_clear(&pipe_tab);" in reset
+assert "shader_programs_destroy();" in reset
 assert "shader_object_find(&pipe_tab, ph)" in source and "shader_object_put(&pipe_tab, ph, pp)" in source
 preamble = r'''
 #include "runtime/nvn/vulkan/shaders.h"
@@ -24,6 +23,8 @@ preamble = r'''
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include "runtime/nvn/vulkan/shader_code_state.h"
+static ShaderCodeState shader_code_state;
 #define MAX_BIND 96
 void rt_fatal_trace(void) { abort(); }
 '''
@@ -47,9 +48,15 @@ int main(void) {
     ShaderKey v = {0}, f = {0}; v.glsl = f.glsl = 1;
     Prog *first = get_program(&np, &v, &f);
     assert(first && get_program(&np, &v, &f) == first && translated == 1);
+    ++np.generation; // SetShaders rebinds may reuse exactly the same addresses.
+    Prog *rebound=get_program(&np,&v,&f);assert(rebound!=first && translated==2);
+    shader_code_written(&shader_code_state,0x10000000,16);
+    assert(get_program(&np,&v,&f)==rebound && translated==2);
+    shader_code_written(&shader_code_state,0x1000,4);
+    assert(get_program(&np,&v,&f)!=rebound && translated==3);
     program_cache_reset();
     Prog *reboot = get_program(&np, &v, &f);
-    assert(reboot && reboot != first && translated == 2 && prog_tab.count == 1);
+    assert(reboot && reboot != first && translated == 4 && prog_tab.count == 1);
     Prog *programs[5000];
     unsigned before = translated;
     for (unsigned i = 0; i < 5000; ++i) {
@@ -72,6 +79,7 @@ int main(void) {
     program_cache_reset();
     for (unsigned i = 0; i < translated; ++i) free(allocated[i]);
     free(prog_tab.entries);
+    shader_code_reset(&shader_code_state);
     ShaderObjectTable pipelines = {.initial_capacity = 8192};
     int objects[10000];
     for (unsigned i = 0; i < 10000; ++i) {
@@ -90,7 +98,7 @@ int main(void) {
     free(pipelines.entries);
     ShaderObjectTable invalid = {.initial_capacity = 3};
     assert(!shader_object_put(&invalid, 1, &objects[0]) && !invalid.entries);
-    puts("PASS: reboot clears last-program shortcut; 5000 programs and 10000 pipeline entries grow, reuse and reset");
+    puts("PASS: code rebind/write invalidation; reboot clears last-program shortcut; 5000 programs and 10000 pipeline entries grow, reuse and reset");
 }
 '''
 (out / "programs.c").write_text(preamble + program + hash_function + stubs + cache + test)
@@ -98,3 +106,46 @@ subprocess.run(["clang", "-O1", "-g", "-fsanitize=address,undefined", "-I", str(
                 "-I", str(ROOT / "android/deps/out/include"), "-I", str(ROOT / "android/deps/out/volk"),
                 str(out / "programs.c"), "-o", str(out / "test-programs")], check=True)
 subprocess.run([str(out / "test-programs")], check=True, timeout=15)
+
+# Compute uses its own cache: local workgroup metadata must follow rebinding too.
+cs_type = source[source.index("typedef struct { Prog p; ShaderInfo *si;"):source.index("\n\nstatic void build_compute")]
+cs_table = source[source.index("static struct CsEnt"):source.index("static void shader_programs_destroy(void) {")]
+start = source.index("static CsProg *compute_program(")
+cs_function = source[start:source.index("\n}\n", start)+3]
+cs_stubs = r"""
+static int g_cs_n;
+static unsigned computed;
+void vk_shader_prepare_configure(void) {}
+static uint16_t compute_image_kinds(void) {return 0;}
+static unsigned gather_bias_bits(void) {return 8;}
+static pthread_mutex_t translate_lock=PTHREAD_MUTEX_INITIALIZER;
+ShaderInfo* maxwell_translate_bounded(const uint8_t* code,size_t bytes,size_t constants,int stage,const ShaderKey* key) {
+    (void)code;(void)bytes;(void)constants;(void)key;assert(stage==STAGE_COMPUTE);
+    ShaderInfo* info=calloc(1,sizeof *info);info->msl=strdup("test");return info;
+}
+static void save_glsl(const char* text,uint64_t addr,const char* suffix){(void)text;(void)addr;(void)suffix;}
+static void build_compute(void* p){++computed;atomic_store(&((CsProg*)p)->p.state,1);}
+static void run_job(void(*fn)(void*),void* p){fn(p);}
+"""
+cs_test = r"""
+int main(void) {
+    uint8_t control[0x880]={0};uint32_t size=4;memcpy(control+0x748,&size,4);
+    NvnProgram np={0};np.generation=1;
+    np.stages[5]=(NvnShaderStage){.code_addr=0x100000,.control=control,.entry_offset=0x100,.const_offset=0x200,.const_size=32};
+    CsProg* first=compute_program(&np);assert(first->local[0]==4 && computed==1);
+    assert(compute_program(&np)==first && computed==1);
+    size=8;memcpy(control+0x748,&size,4);++np.generation;
+    CsProg* second=compute_program(&np);assert(second!=first && second->local[0]==8 && computed==2);
+    shader_code_written(&shader_code_state,0x100000,4);
+    assert(compute_program(&np)!=second && computed==3);
+    for(int i=0;i<g_cs_n;++i){free(g_cs_tab[i].cp->si->msl);free(g_cs_tab[i].cp->si);free(g_cs_tab[i].cp);}
+    free(g_cs_tab);shader_code_reset(&shader_code_state);
+    puts("PASS: compute same-address rebind refreshes workgroup metadata; code writes invalidate compute lookup");
+}
+"""
+(out / "compute.c").write_text(preamble.replace('#define MAX_BIND', '#include "runtime/nvn/vulkan/pipeline_warm.h"\n#define MAX_BIND') +
+                                program + cs_type + cs_table + cs_stubs + cs_function + cs_test)
+subprocess.run(["clang", "-O1", "-g", "-fsanitize=address,undefined", "-pthread", "-I", str(ROOT),
+                "-I", str(ROOT / "android/deps/out/include"), "-I", str(ROOT / "android/deps/out/volk"),
+                str(out / "compute.c"), "-o", str(out / "test-compute")], check=True)
+subprocess.run([str(out / "test-compute")], check=True, timeout=15)

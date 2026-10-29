@@ -4,6 +4,9 @@
 #include "shader_variant_plan.hpp"
 #include "shader_prepare_queue.hpp"
 #include "shader_prepare.h"
+#include "shader_cache_receipt.hpp"
+#include "shader_warm_state.hpp"
+#include "shader_warm_job.hpp"
 #include <array>
 #include <memory>
 #include <mutex>
@@ -11,6 +14,7 @@
 #include <unistd.h>
 extern "C" {
 #include "../maxwell/shader.h"
+#include "shader_warm.h"
 }
 #ifndef SHADER_BUILD_ID
 #define SHADER_BUILD_ID "development"
@@ -27,6 +31,7 @@ uint64_t hash(const void *data, size_t n, uint64_t h = 0xcbf29ce484222325ull) {
     return h;
 }
 std::string identity(const char *game) {
+    if(!game || !*game)return {};
     struct stat st{}; std::string image = std::string(game) + "/romfs.bin";
     if (stat(image.c_str(), &st)) return {};
     char s[256];
@@ -34,30 +39,64 @@ std::string identity(const char *game) {
         (unsigned long long)st.st_size, (unsigned long long)st.st_mtim.tv_sec,
         (unsigned long long)st.st_mtim.tv_nsec, (unsigned long long)st.st_ino,
         (unsigned long long)vk_shader_prepare_profile());
-    return s;
+    return std::string("full-v1:") + s + ":" + vk_shader_cache_namespace();
 }
+struct TranslationScope {
+    TranslationScope(){vk_shader_translate_begin();}
+    ~TranslationScope(){vk_shader_prepare_configure();vk_shader_translate_end();}
+};
 struct Record { Shader shader; uint32_t inputs = 0, outputs = 0; };
 Info translate(const Shader &s, const ShaderKey &key) {
     return Info(maxwell_translate_bounded(s.binary.data(), s.constants,
         s.binary.size() - s.constants, s.stage, &key), maxwell_free);
 }
 } // namespace
+namespace {
+constexpr size_t full_receipt_limit=4u*1024*1024;
+std::string receipt_path(const char* game) {return shader_warm::state_directory(game)+"/full.receipt";}
+bool verify_game(const char* game,const shader_warm::Checkpoint& checkpoint={},const shader_warm::Progress& progress={}) {
+    auto id=identity(game);if(id.empty())return false;
+    if(progress)progress(0,"Checking prepared game graphics...");
+    size_t count=0;
+    bool ok=shader_receipt::check(receipt_path(game),id,count,full_receipt_limit,checkpoint,
+        [&](size_t done,size_t total){if(progress)progress(double(done)/total,"Checking prepared game graphics...");});
+    return ok && count && identity(game)==id;
+}
+shader_warm::Job& check_job() {static auto* owner=new shader_warm::Job;return *owner;}
+}
+extern "C" bool vk_shader_game_has_receipt(const char* game) {
+    auto id=identity(game);if(id.empty())return false;
+    std::ifstream file;size_t count=0;
+    return shader_receipt::header(file,receipt_path(game),id,count,full_receipt_limit) && count;
+}
 extern "C" bool vk_shader_game_ready(const char *game) {
-    auto id = identity(game); if (id.empty()) return false;
-    std::string path = std::string(game) + "/.shaders-ready";
-    FILE *f = fopen(path.c_str(), "rb"); if (!f) return false;
-    char saved[256]{}; size_t n = fread(saved, 1, sizeof saved, f); fclose(f);
-    return n == id.size() && !memcmp(saved, id.data(), n);
+    try{return verify_game(game);}catch(const std::exception&){return false;}
+}
+extern "C" void vk_shader_check_start(const char* game) {
+    if(!game)return;
+    std::string root=game;
+    check_job().start(root+'\n'+identity(game),[root](bool first,const shader_warm::Checkpoint& checkpoint,const shader_warm::Progress& progress){
+        if(first && !verify_game(root.c_str(),checkpoint,progress))
+            throw std::runtime_error("Prepared graphics are missing or damaged. Prepare graphics again or enable runtime compilation.");
+    });
+}
+extern "C" void vk_shader_check_stop(void) {check_job().stop();}
+extern "C" ShaderCheckStatus vk_shader_check_status(void) {
+    auto state=check_job().status();ShaderCheckStatus result={state.running,state.title_ready,state.failed,state.progress,{}};
+    snprintf(result.message,sizeof result.message,"%s",state.message.c_str());return result;
 }
 extern "C" bool vk_shader_prepare_game(const char *game, void (*progress)(double, const char *), char *why, size_t capacity) {
     std::unique_lock<std::mutex> lock(vk_shader_preparation_mutex, std::try_to_lock);
     if (!lock.owns_lock()) { snprintf(why, capacity, "graphics preparation is already running"); return false; }
     const auto id = identity(game);
-    std::string ready = std::string(game) + "/.shaders-ready", log_path = std::string(game) + "/shader-prepare.log";
+    if(id.empty()){snprintf(why,capacity,"game data missing");return false;}
+    std::string ready=receipt_path(game),log_path=shader_warm::state_directory(game)+"/full.log";
+    // A valid receipt can be reused without rebuilding the library.
+    if(verify_game(game,{},progress))return true;
     // A failed retry must never leave an old completion marker behind.
     remove(ready.c_str());
     FILE *log = fopen(log_path.c_str(), "wb");
-    if (!log) { snprintf(why, capacity, "cannot write graphics preparation log"); return false; }
+    if(!log)log=stderr;
     bool success = false;
     try {
         require(!id.empty(), "game data missing");
@@ -75,7 +114,7 @@ extern "C" bool vk_shader_prepare_game(const char *game, void (*progress)(double
         fprintf(log,"catalog models=%zu program_selectors=%zu named_programs=%zu explicit_pairs=%zu\n",catalog.models.size(),selectors,catalog.named_programs.size(),pairs);
         require(!records.empty(), "no game shaders found");
         std::vector<shader_variant_plan::Usage> usage(records.size());
-        vk_shader_prepare_configure();
+        TranslationScope translation_scope;
         fprintf(log, "double-arithmetic %s\n", maxwell_fp32_double ? "fp32-preferred" : "integer-binary64"); fflush(log);
         unsigned failed = 0; std::array<unsigned, 6> stages{};
         std::set<uint32_t> vertex_outputs;
@@ -99,7 +138,7 @@ extern "C" bool vk_shader_prepare_game(const char *game, void (*progress)(double
         }
         fprintf(log, "inventory total=%zu vertex=%u fragment=%u compute=%u translation_failures=%u\n",
             records.size(), stages[0], stages[1], stages[5], failed); fflush(log);
-        if (failed) throw std::runtime_error(std::to_string(failed) + " game shaders are not supported by this translator. See shader-prepare.log; graphics are not ready.");
+        if (failed) throw std::runtime_error(std::to_string(failed) + " game shaders are not supported by this translator. See full.log; graphics are not ready.");
         // Preserve source-defined links; unknown interface fields stay general.
         size_t linked_fragments=0,known_masks=0,unlinked_fragments=0;
         for(size_t i=0;i<records.size();++i)if(records[i].shader.stage==STAGE_FRAGMENT) {
@@ -168,14 +207,15 @@ extern "C" bool vk_shader_prepare_game(const char *game, void (*progress)(double
         compilers.finish();
         fprintf(log,"prepared-source-keys %zu\nshared-base-keys %zu\n",compilers.unique_sources(),compilers.unique_bases());
         require(done==total && compilers.done()==total && identity(game)==id,"graphics profile or game data changed during preparation");
-        std::string part=ready+".part"; FILE *f=fopen(part.c_str(),"wb");require(f,"cannot write graphics completion marker");
-        bool ok=fwrite(id.data(),1,id.size(),f)==id.size();if(fclose(f))ok=false;
-        if(!ok || rename(part.c_str(),ready.c_str())) {remove(part.c_str());throw std::runtime_error("cannot save graphics completion marker");}
+        auto keys=compilers.source_keys();
+        require(!keys.empty() && keys.size()<=full_receipt_limit,"graphics receipt is too large");
+        require(shader_receipt::save(ready,id,keys),"cannot save graphics completion receipt");
+        require(verify_game(game,{},progress),"prepared graphics could not be verified");
         fprintf(log,"complete shaders=%zu variants=%llu\n",records.size(),(unsigned long long)done);
         if(progress)progress(1,"Game graphics ready.");success=true;
     } catch (const std::exception &e) {
+        remove(ready.c_str());
         snprintf(why,capacity,"%s",e.what());fprintf(log,"incomplete %s\n",e.what());
     }
-    vk_shader_prepare_configure();
-    fclose(log);return success;
+    if(log==stderr)fflush(log);else fclose(log);return success;
 }

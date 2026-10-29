@@ -92,6 +92,7 @@ typedef struct NvnProgram {
     NvnShaderStage stages[6];
     uint32_t stage_mask;
     void *backend;
+    uint64_t generation; // unique SetShaders lifetime, even when host/code addresses are reused
 } NvnProgram;
 
 typedef struct NvnWindow {

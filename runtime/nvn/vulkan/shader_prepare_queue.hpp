@@ -111,6 +111,12 @@ public:
     uint64_t done(){std::lock_guard<std::mutex> lock(mutex);return completed;}
     size_t unique_sources(){std::lock_guard<std::mutex> lock(mutex);return seen.size();}
     size_t unique_bases(){std::lock_guard<std::mutex> lock(mutex);return bases.size();}
+    // Call after finish(): only successful, fully persisted requests enter a receipt.
+    std::vector<uint64_t> source_keys() {
+        std::lock_guard<std::mutex> lock(mutex);
+        if(!stopped || active || !error.empty())throw std::logic_error("shader preparation is not complete");
+        std::vector<uint64_t> keys(seen.begin(),seen.end());std::sort(keys.begin(),keys.end());return keys;
+    }
     void finish() {
         {
             std::unique_lock<std::mutex> lock(mutex);changed.wait(lock,[&]{return !error.empty() || (pending.empty() && !active);});

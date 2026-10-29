@@ -559,6 +559,7 @@
 {"Graphics warm-up complete.", "常用遊戲圖形準備完成。"},
 {"Graphics will be prepared during play.", "圖形將在遊戲執行時準備。"},
 {"Preparing game graphics...", "正在預先編譯遊戲圖形…"},
+{"Checking prepared game graphics...", "正在檢查已準備的遊戲圖形……"},
 {"Game graphics ready.", "遊戲圖形準備完成。"},
 {"Game graphics preparation failed", "遊戲圖形預先編譯未完成"},
 {"Prepare graphics again after updating the app.", "更新應用程式後重新準備遊戲圖形。"},

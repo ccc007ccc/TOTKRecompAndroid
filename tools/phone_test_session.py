@@ -36,6 +36,8 @@ def main():
         launch.add_argument('--pipeline-warm',choices=['on','off'],help='Enable/disable pipeline preparation while retaining the shader preparation setting')
         launch.add_argument('--submit-snapshot',action='store_true',
                             help='Enable experimental submit-time buffer snapshots for a separate comparison')
+        launch.add_argument('--shared-alias',choices=['on','off'],help='Enable/disable GPU-visible resource mappings for a controlled comparison')
+        launch.add_argument('--async-buffer-copy',choices=['on','off'],help='Enable/disable deferred GPU buffer copies for a controlled comparison')
     benchmark.add_argument('--save-slot',type=int,choices=range(6),default=0)
     benchmark.add_argument('--seconds',type=float,default=15,help='Measurement duration after loading, 1..60 seconds (default 15)')
     benchmark.add_argument('--timeout',type=float,help='Overall startup and measurement timeout')
@@ -149,6 +151,8 @@ def main():
         if timed and args.compare_ubo is not None:
             env+=['LARECOMP_AB='+str(args.compare_ubo)+':ubo']
         if args.submit_snapshot:env+=['LARECOMP_VK_SUBMIT_SNAPSHOT=1','LARECOMP_LOG_SUBMIT_SNAPSHOT=1']
+        if args.shared_alias is not None:env+=['LARECOMP_VK_SHARED_ALIAS='+('1' if args.shared_alias=='on' else '0')]
+        if args.async_buffer_copy is not None:env+=['LARECOMP_VK_ASYNC_BUFFER_COPY='+('1' if args.async_buffer_copy=='on' else '0')]
         if args.shader_warm is not None:env+=['LARECOMP_SHADER_WARM='+('1' if args.shader_warm=='on' else '0')]
         if args.pipeline_warm is not None:env+=['LARECOMP_PIPELINE_WARM='+('1' if args.pipeline_warm=='on' else '0')]
         settings_copy=None;settings_sha=None
@@ -181,6 +185,8 @@ def main():
                   'settings_seed':args.settings_seed,'settings_copy':settings_copy,'settings_sha256':settings_sha,
                   'shader_warm':args.shader_warm,'pipeline_warm':args.pipeline_warm,
                   'submit_snapshot':args.submit_snapshot,
+                  'shared_alias':args.shared_alias,
+                  'async_buffer_copy':args.async_buffer_copy,
                   'profiling':args.profile if timed else True,
                   'ubo_ab_frames':args.compare_ubo if timed else None,
                   'benchmark_seconds':args.seconds if timed else None,

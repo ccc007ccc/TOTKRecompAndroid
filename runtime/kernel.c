@@ -235,7 +235,7 @@ static void merge_physical_locked(void) {
         } else i++;
     }
 }
-static uint32_t physical_memory(uint64_t addr, uint64_t size, bool map) {
+static uint32_t physical_memory_apply(uint64_t addr, uint64_t size, bool map) {
     if (!system_resource_size) return R_INVALID_STATE;
     if (!size || ((addr | size) & 0xfff) || size > ALIAS_SIZE || addr < ALIAS_BASE ||
         addr - ALIAS_BASE > ALIAS_SIZE - size) return R_INVALID_ADDRESS;
@@ -266,6 +266,10 @@ static uint32_t physical_memory(uint64_t addr, uint64_t size, bool map) {
             if (covered) continue;
             if (nregions == MAX_REGIONS) { result = R_OUT_OF_RESOURCE; goto done; }
             int i = region_add_locked(cursor, next - cursor, 5, 3);
+#ifdef __ANDROID__
+            extern bool vk_shared_memory_place(uint64_t addr, uint64_t size);
+            vk_shared_memory_place(cursor, next - cursor);
+#endif
             memset((void *)(uintptr_t)cursor, 0, next - cursor);
             regions[i].physical = true;
             merge_physical_locked();
@@ -273,10 +277,19 @@ static uint32_t physical_memory(uint64_t addr, uint64_t size, bool map) {
         }
     } else {
         if (nregions == MAX_REGIONS) { result = R_OUT_OF_RESOURCE; goto done; }
+#ifdef __ANDROID__
+        extern bool vk_shared_memory_unmap(uint64_t addr, uint64_t size);
+        if (!vk_shared_memory_unmap(addr, size)) { result = R_OUT_OF_RESOURCE; goto done; }
+#endif
         // Release only whole host pages wholly inside the unmapped interval.
         // Guest pages at either edge are cleared if subsequently mapped again.
         uint64_t lo = (addr + PLAT_PAGE - 1) & ~(PLAT_PAGE - 1), hi = end & ~(PLAT_PAGE - 1);
+#ifdef __ANDROID__
+        extern bool vk_shared_memory_reset_cpu(uint64_t lo, uint64_t hi);
+        if (lo < hi && !vk_shared_memory_reset_cpu(lo, hi)) { result = R_OUT_OF_RESOURCE; goto done; }
+#else
         if (lo < hi && !plat_reset_guest(lo, hi)) { result = R_OUT_OF_RESOURCE; goto done; }
+#endif
         for (int i = 0; i < nregions;) {
             Region r = regions[i];
             uint64_t re = r.addr + r.size;
@@ -294,6 +307,32 @@ static uint32_t physical_memory(uint64_t addr, uint64_t size, bool map) {
 done:
     pthread_mutex_unlock(&g_memlock);
     return result;
+}
+
+#ifdef __ANDROID__
+typedef struct { uint64_t addr, size; uint32_t result; } PhysicalRelease;
+static void physical_memory_release(void *arg) {
+    PhysicalRelease *r = arg;
+    r->result = physical_memory_apply(r->addr, r->size, false);
+}
+#endif
+static uint32_t physical_memory(uint64_t addr, uint64_t size, bool map) {
+#ifdef __ANDROID__
+    extern bool vk_shared_memory_enabled(void);
+    extern void vk_async_call_sync(void (*call)(void *), void *arg);
+    if (!map && vk_shared_memory_enabled()) {
+        // Even with no current regions, a concurrent mapper can create the
+        // first backing before this call obtains g_memlock. Select queue order
+        // from the fixed startup option, not the racy current region count.
+        // Enter render-queue order before taking g_memlock. Prior translation
+        // can query guest mappings; waiting on it while holding the kernel's
+        // map lock would deadlock. Validation and release remain atomic below.
+        PhysicalRelease r = {addr, size, R_OUT_OF_RESOURCE};
+        vk_async_call_sync(physical_memory_release, &r);
+        return r.result;
+    }
+#endif
+    return physical_memory_apply(addr, size, map);
 }
 
 // ------------------------------------------------------------------ threads

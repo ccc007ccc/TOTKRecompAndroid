@@ -14,11 +14,12 @@ unset LARECOMP_VK_OPT
 
 CC="$CC" CXX="$CXX" sh tools/build_host_shader_compiler.sh "$SHADER_TEST_OUT"
 $CC "${FLAGS[@]}" -c runtime/nvn/vulkan/shaders.c -o "$SHADER_TEST_OUT/shaders.o"
+$CC "${FLAGS[@]}" -Ithird_party/d2r-digest/include -c third_party/d2r-digest/digest.c -o "$SHADER_TEST_OUT/digest.o"
 $CC -O2 -c runtime/nvn/maxwell/translate.c -o "$SHADER_TEST_OUT/translate.o"
 $CXX -std=c++17 "${FLAGS[@]}" tools/test_shader_prepare_workers.cpp "$SHADER_TEST_OUT/shaders.o" \
     "${LIBS[@]}" -o "$SHADER_TEST_OUT/test-workers"
 $CXX -std=c++17 "${FLAGS[@]}" tools/test_shader_prepare_ready.cpp "$SHADER_TEST_OUT/shaders.o" \
-    "$SHADER_TEST_OUT/translate.o" "${LIBS[@]}" -o "$SHADER_TEST_OUT/test-ready"
+    "$SHADER_TEST_OUT/translate.o" "$SHADER_TEST_OUT/digest.o" "${LIBS[@]}" -o "$SHADER_TEST_OUT/test-ready"
 "$SHADER_TEST_OUT/test-ready" "$SHADER_TEST_OUT/ready-tests"
 for test in queue variant_plan; do
     source=tools/test_shader_prepare_queue.cpp

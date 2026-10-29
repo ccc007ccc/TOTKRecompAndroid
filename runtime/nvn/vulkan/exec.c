@@ -1089,6 +1089,27 @@ static VkSpan guest_copy(uint64_t addr, uint64_t size) {
     return s;
 }
 
+// guest_copy serves vertex streams as well as uniforms. Keep actual copied
+// bytes separate so a large vertex upload is not diagnosed as UBO traffic.
+enum { COPY_UNIFORM, COPY_SHADER_CONSTANTS, COPY_VERTEX, COPY_KINDS };
+static bool trace_copy_bytes;
+static struct { uint64_t bytes, outside_heap, peak_addr, peak_size; } copy_stats[COPY_KINDS];
+static struct { uint64_t count, bytes, src, dst, size; } buffer_copy_stats;
+static VkSpan guest_copy_typed(uint64_t addr, uint64_t size, unsigned kind) {
+    if (!trace_copy_bytes) return guest_copy(addr, size);
+    uint64_t before = stat_cb_copied;
+    VkSpan span = guest_copy(addr, size);
+    uint64_t copied = stat_cb_copied - before;
+    copy_stats[kind].bytes += copied;
+    if (copied > copy_stats[kind].peak_size) {
+        copy_stats[kind].peak_addr = addr;
+        copy_stats[kind].peak_size = copied;
+    }
+    if (addr < HEAP_BASE || size > HEAP_MAX || addr - HEAP_BASE > HEAP_MAX - size)
+        copy_stats[kind].outside_heap += copied;
+    return span;
+}
+
 // ================================================================== worker threads (shader / pipeline builds)
 // Compiles run on workers; a draw waits for its actual program and pipeline.
 // LARECOMP_SYNC_SHADERS=1 also runs the build itself on the requesting thread.
@@ -1363,7 +1384,21 @@ const char *renderer_stats(void) {
             (unsigned long long)stat_cb_hits, (unsigned long long)stat_cb_misses, (unsigned long long)stat_cb_collisions);
         stat_cb_bytes[0] = stat_cb_bytes[1] = stat_cb_n[0] = stat_cb_n[1] = stat_cb_copied = 0;
         stat_cb_hits = stat_cb_misses = stat_cb_collisions = 0;
+        LOG("[copy-bytes] uniform %.1f MB (outside heap %.1f), shader constants %.1f MB (outside heap %.1f), vertex %.1f MB (outside heap %.1f)\n",
+            copy_stats[COPY_UNIFORM].bytes / 1048576.0, copy_stats[COPY_UNIFORM].outside_heap / 1048576.0,
+            copy_stats[COPY_SHADER_CONSTANTS].bytes / 1048576.0, copy_stats[COPY_SHADER_CONSTANTS].outside_heap / 1048576.0,
+            copy_stats[COPY_VERTEX].bytes / 1048576.0, copy_stats[COPY_VERTEX].outside_heap / 1048576.0);
+        LOG("[copy-ranges] vertex %llx+%llx, buffer-copy %llu calls %.3f MB, largest %llx -> %llx +%llx\n",
+            (unsigned long long)copy_stats[COPY_VERTEX].peak_addr, (unsigned long long)copy_stats[COPY_VERTEX].peak_size,
+            (unsigned long long)buffer_copy_stats.count, buffer_copy_stats.bytes / 1048576.0,
+            (unsigned long long)buffer_copy_stats.src, (unsigned long long)buffer_copy_stats.dst,
+            (unsigned long long)buffer_copy_stats.size);
+#ifdef __ANDROID__
+        vk_shared_memory_stats();
+#endif
     }
+    memset(copy_stats, 0, sizeof copy_stats);
+    memset(&buffer_copy_stats, 0, sizeof buffer_copy_stats);
     {   // (GPU memory in use, every heap, and the game's textures with an image)
         VmaBudget bud[VK_MAX_MEMORY_HEAPS];
         vmaGetHeapBudgets(g_vk.vma, bud);
@@ -1453,6 +1488,7 @@ static void st_defaults(void) {
 
 void vk_exec_init(void) {
     prof = getenv("LARECOMP_VK_PROF") != NULL;
+    trace_copy_bytes = getenv("LARECOMP_LOG_CBUF_BYTES") != NULL;
 #ifdef __ANDROID__
     gcopy_mode = !g_vk.host_import && !getenv("LARECOMP_VK_NO_GCOPY");
     if (gcopy_mode) LOG("[vk] no heap import: shader global memory through CPU copies\n");
@@ -2596,11 +2632,14 @@ static void translate_program(void *arg) {
     run_job(compile_program, p);
 }
 
+#include "shader_code_state.h"
+static ShaderCodeState shader_code_state;
+
 #define PROG_TAB_INITIAL 4096
 static ShaderObjectTable prog_tab = {.initial_capacity = PROG_TAB_INITIAL};
 static struct {
     NvnProgram *np;
-    uint64_t code[2];
+    uint64_t code[2],generation,epoch;
     ShaderKey vertex, fragment;
     Prog *prog;
 } prog_last;
@@ -2616,18 +2655,19 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     if (!(np->stage_mask & 1) || !(np->stage_mask & 2)) return NULL;
     // (the previous draw's program and keys again - most draws: no hashing; the code addresses are part of it, as
     // the program object can be reused for other code)
-    if (prog_last.prog && np == prog_last.np && prog_last.code[0] == np->stages[0].code_addr && prog_last.code[1] == np->stages[1].code_addr &&
+    if (prog_last.prog && np == prog_last.np && prog_last.generation == np->generation && prog_last.epoch == shader_code_state.epoch && prog_last.code[0] == np->stages[0].code_addr && prog_last.code[1] == np->stages[1].code_addr &&
         !memcmp(vkey, &prog_last.vertex, sizeof *vkey) && !memcmp(fkey, &prog_last.fragment, sizeof *fkey))
         return prog_last.prog;
     prog_last.np = np; prog_last.code[0] = np->stages[0].code_addr; prog_last.code[1] = np->stages[1].code_addr;
     prog_last.vertex = *vkey; prog_last.fragment = *fkey;
+    prog_last.generation=np->generation;prog_last.epoch=shader_code_state.epoch;
+    shader_code_watch(&shader_code_state,&np->stages[0]);shader_code_watch(&shader_code_state,&np->stages[1]);
     uint64_t h = 0xcbf29ce484222325ull;
     for (int i = 0; i < 2; i++) { uint64_t a = np->stages[i].code_addr; for (int k = 0; k < 8; k++) { h ^= (a >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; } }
     h = hash_words(h, vkey, sizeof *vkey);  // (8 bytes a step: the table is in memory only)
-    for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
-#ifdef __ANDROID__
-    if (fkey->no_ds_write) { h ^= 0xE1; h *= 0x100000001B3ull; }  // (keys without it hash as before)
-#endif
+    h = hash_words(h, fkey, sizeof *fkey);
+    h = hash_words(h, &np->generation, sizeof np->generation);
+    h = hash_words(h, &shader_code_state.epoch, sizeof shader_code_state.epoch);
     if (!h) h = 1;
     Prog *cached = shader_object_find(&prog_tab, h);
     if (cached) return prog_last.prog = cached;
@@ -2814,6 +2854,7 @@ typedef struct { Prog *prog; VkPipelineState state; } PipeKey;
 
 typedef struct { PipeKey k; uint64_t hash; VkPipeline pipe; VkPipelineWarmProduct warmed; _Atomic int state; } Pipe;  // state: 0 building, 1 ready, 2 failed
 static ShaderObjectTable pipe_tab = {.initial_capacity = 8192};
+static Pipe *last_pipeline;
 
 // 8 bytes a step (PipeKey is ~700 bytes, hashed per draw); in-memory tables only - hmix values are compared with
 // stored constants (fragment-shader hashes) and must not change.
@@ -3462,7 +3503,7 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
         NvnShaderStage *ss = &st.program->stages[stage];
         uint64_t size = ss->const_size ? ss->const_size : 16;
         if (size < si->cbuf_size[1]) size = si->cbuf_size[1];
-        return ubo_span(guest_copy(ss->code_addr + ss->const_offset, size), size);  // (constant: shared per submission)
+        return ubo_span(guest_copy_typed(ss->code_addr + ss->const_offset, size, COPY_SHADER_CONSTANTS), size);
     }
     int idx = k - 3;  // cbuf_base
     Range r = (idx >= 0 && idx < 18) ? st.ubuf[stage][idx] : (Range){0, 0};
@@ -3573,7 +3614,7 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
     stat_cb_n[dk]++, stat_cb_bytes[dk] += size;
     if (dk && ct_on()) LOG("[ct] dyncbuf stage %d k %d addr %llx size %llx (bound %llx) fs %016llx\n", stage, k, (unsigned long long)r.addr,
                            (unsigned long long)size, (unsigned long long)r.size, (unsigned long long)g_cur_fs_hash);
-    return ubo_span(guest_copy(r.addr, size), size);
+    return ubo_span(guest_copy_typed(r.addr, size, COPY_UNIFORM), size);
 }
 
 // Global memory (shader LDG/STG, maxwell_gmem_base = HEAP_BASE): the guest heap imported as a GPU buffer
@@ -3585,6 +3626,19 @@ static VkDeviceMemory gmem_mem;
 static uint64_t gmem_size;
 #ifdef __ANDROID__
 static bool gmem_placed;  // (gmem_buf is the guest heap itself, usable as a uniform buffer: vk_heap_place)
+
+bool vk_guest_shared_buffer(uint64_t addr, uint64_t size, VkBuffer *buffer, VkDeviceSize *offset) {
+    if (!size || addr > UINT64_MAX - size) return false;
+    if (gmem_placed && addr >= HEAP_BASE && addr - HEAP_BASE <= gmem_size && size <= gmem_size - (addr - HEAP_BASE)) {
+        *buffer = gmem_buf; *offset = addr - HEAP_BASE; return true;
+    }
+    return vk_shared_memory_lookup(addr, size, buffer, offset);
+}
+
+void vk_buffer_copy_wait(void) {
+    wait_why = "buffer copy CPU dependency";
+    renderer_flush();
+}
 
 static bool ubo_direct(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out) {
     static int on = -1;
@@ -4633,6 +4687,7 @@ void vc_flush(void) {
 // gres_sync uploads only the blocks the CPU actually changed.
 void vk_memory_written(uint64_t addr, uint64_t size) {
     if (!size || addr > UINT64_MAX - size) return;
+    shader_code_written(&shader_code_state,addr,size);
     guest_copy_invalidate(addr, addr + size);
     if (addr + size <= HEAP_BASE) return;
     uint64_t lo = addr > HEAP_BASE ? addr - HEAP_BASE : 0;
@@ -4657,10 +4712,12 @@ void vk_memory_written(uint64_t addr, uint64_t size) {
 static bool guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {
     static int copy = -1;
     if (copy < 0) copy = getenv("LARECOMP_VK_COPY_VERTICES") != NULL;
-    if (copy || addr < HEAP_BASE) return false;
+    if (copy || !size || addr > UINT64_MAX - size) return false;
 #ifdef __ANDROID__
+    if (addr < HEAP_BASE) return vk_shared_memory_lookup(addr, size, buf, off);
     if (gcopy_mode && !gmem_buf) return addr + size <= HEAP_BASE + HEAP_MAX && vcache_lookup(addr, size, buf, off);  // (else copied)
 #endif
+    if (addr < HEAP_BASE) return false;
     if (addr + size > HEAP_BASE + gmem_size && kernel_heap_size() != gmem_tried) { gmem_tried = kernel_heap_size(); gmem_info(); }
     if (!gmem_buf || addr + size > HEAP_BASE + gmem_size) return false;
     if (vcache_lookup(addr, size, buf, off)) return true;
@@ -4670,19 +4727,23 @@ static bool guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSi
 }
 
 static int g_cs_n;  // (compute program table below)
+static void shader_programs_destroy(void);
 
-// In-place reboot (device.c backend_reset; GPU idle): drop what is keyed by guest addresses - programs by code
-// address (the old Prog / Pipe objects are leaked, so pipeline keys holding their pointers can't collide), compute
-// programs, shared copies - and the heap import: its pages are replaced (re-imported on first use).
+// In-place reboot: submission, translation, compilation and GPU work have all
+// drained in backend_reset. Release pipelines before their programs/layouts.
 void vk_exec_reset(void) {
 #ifdef __ANDROID__
+    vk_shared_memory_reset();
+    vk_buffer_copy_reset();
     submit_snapshot_reset();
     atomic_store_explicit(&submit_retired, 0, memory_order_release);
     memset(ubo_inline, 0, sizeof ubo_inline);  // old guest addresses must not keep a reboot's UBOs on the copy path
 #endif
-    program_cache_reset();
-    shader_object_clear(&pipe_tab);
-    g_cs_n = 0;
+    shader_programs_destroy();
+    ss_forget();
+#ifdef __ANDROID__
+    gmem_placed=false;gwin_mode=false;
+#endif
     gcopy_gen++;
     if (gmem_buf) {
         vkDestroyBuffer(g_vk.dev, gmem_buf, NULL);
@@ -5004,8 +5065,36 @@ static void build_compute(void *arg) {
     free(spv);
 }
 
-static struct CsEnt { uint64_t addr; CsProg *cp; uint16_t kinds,kind_mask; } *g_cs_tab;
+static struct CsEnt { uint64_t addr; CsProg *cp; uint16_t kinds,kind_mask; uint64_t generation,epoch; } *g_cs_tab;
 static unsigned g_cs_capacity;
+
+static void shader_programs_destroy(void) {
+    last_pipeline=NULL;pipeline_dirty=true;
+    shader_code_reset(&shader_code_state);
+    for(size_t i=0;i<pipe_tab.capacity;++i)if(pipe_tab.entries[i].key) {
+        Pipe* pipe=pipe_tab.entries[i].object;
+        if(pipe->warmed.pipeline)vk_pipeline_warm_discard(&pipe->warmed);
+        else if(pipe->pipe)vkDestroyPipeline(g_vk.dev,pipe->pipe,NULL);
+        free(pipe);
+    }
+    shader_object_clear(&pipe_tab);
+    for(size_t i=0;i<prog_tab.capacity;++i)if(prog_tab.entries[i].key) {
+        Prog* program=prog_tab.entries[i].object;
+        graphics_program_release(program);
+        maxwell_free(program->vi);maxwell_free(program->fi);free(program);
+    }
+    program_cache_reset();
+    for(int i=0;i<g_cs_n;++i) {
+        CsProg* program=g_cs_tab[i].cp;
+        if(program->warmed.pipeline)vk_pipeline_warm_discard(&program->warmed);
+        else if(program->pipe)vkDestroyPipeline(g_vk.dev,program->pipe,NULL);
+        graphics_program_release(&program->p);
+        maxwell_free(program->si);free(program);
+    }
+    free(g_cs_tab);g_cs_tab=NULL;g_cs_n=0;g_cs_capacity=0;
+    free(prog_tab.entries);prog_tab.entries=NULL;prog_tab.capacity=0;
+    free(pipe_tab.entries);pipe_tab.entries=NULL;pipe_tab.capacity=0;
+}
 
 static uint16_t compute_image_kinds(void) {
     uint16_t result=0;
@@ -5025,8 +5114,10 @@ static CsProg *compute_program(NvnProgram *np) {
     struct CsEnt *tab = g_cs_tab;
     int n = g_cs_n;
     uint16_t kinds=compute_image_kinds();
-    for (int i = 0; i < n; i++) if (tab[i].addr == ss->code_addr && !((tab[i].kinds^kinds)&tab[i].kind_mask)) return tab[i].cp;
+    shader_code_watch(&shader_code_state,ss);
+    for (int i = 0; i < n; i++) if (tab[i].addr == ss->code_addr && tab[i].generation == np->generation && tab[i].epoch == shader_code_state.epoch && !((tab[i].kinds^kinds)&tab[i].kind_mask)) return tab[i].cp;
     CsProg *cp = calloc(1, sizeof *cp);
+    if(!cp)FATAL("compute program allocation failed\n");
     cp->code_addr = ss->code_addr;
     pthread_mutex_lock(&translate_lock);  // (the translator's globals too: the translator thread sets them for graphics)
     vk_shader_prepare_configure();
@@ -5043,6 +5134,7 @@ static CsProg *compute_program(NvnProgram *np) {
     cp->si = maxwell_translate_bounded((const uint8_t *)(uintptr_t)(ss->code_addr + ss->entry_offset),
                                       ss->const_offset - ss->entry_offset, ss->const_size, STAGE_COMPUTE, &k);
     pthread_mutex_unlock(&translate_lock);
+    if(!cp->si)FATAL("compute shader translation allocation failed\n");
     cp->p.vi = cp->si;
     if((unsigned)n==g_cs_capacity){
         unsigned capacity=g_cs_capacity?g_cs_capacity*2:256;
@@ -5050,7 +5142,7 @@ static CsProg *compute_program(NvnProgram *np) {
         tab=g_cs_tab=next;g_cs_capacity=capacity;
     }
     uint16_t mask=0;for(unsigned i=0;i<NVN_IMAGE_BINDINGS;++i)if(cp->si->image_format_mask&(1u<<i))mask|=3u<<(2*i);
-    tab[n]=(struct CsEnt){ss->code_addr,cp,kinds,mask};g_cs_n=n+1;
+    tab[n]=(struct CsEnt){ss->code_addr,cp,kinds,mask,np->generation,shader_code_state.epoch};g_cs_n=n+1;
     if (!cp->si->msl) {
         LOG("[compute] translate failed: %s (code %llx)\n", cp->si->error, (unsigned long long)ss->code_addr);
         atomic_store(&cp->p.state, 2);
@@ -5068,11 +5160,45 @@ static CsProg *compute_program(NvnProgram *np) {
     return cp;
 }
 
+#ifdef __ANDROID__
+// Preflight CPU inputs before translation/upload records any commands. A wait
+// may submit and replace vk_cmd(), so it must never happen inside stage_set or
+// after begin_pass. These conservative ranges also cover diagnostic CPU reads.
+static void copy_stage_inputs(int stage) {
+    if (!vk_buffer_copy_pending() || !st.program) return;
+    NvnShaderStage *s = &st.program->stages[stage];
+    if (s->code_addr) {
+        uint64_t code = s->const_offset ? s->const_offset : 0x10000;
+        uint64_t constants = s->const_size > 0x10000 ? s->const_size : 0x10000;
+        vk_buffer_copy_cpu_read(s->code_addr, code + constants);
+    }
+    if (s->control) vk_buffer_copy_cpu_read((uintptr_t)s->control, 0x880);
+    for (int i = 0; i < 18; ++i) if (st.ubuf[stage][i].addr)
+        vk_buffer_copy_cpu_read(st.ubuf[stage][i].addr, st.ubuf[stage][i].size > 16 ? st.ubuf[stage][i].size : 16);
+    for (int i = 0; i < 16; ++i) if (st.sbuf[stage][i].addr)
+        vk_buffer_copy_cpu_read(st.sbuf[stage][i].addr, st.sbuf[stage][i].size);
+}
+static void copy_texture_input(NvnTexture *t) {
+    if (t) vk_buffer_copy_cpu_read(t->addr, tegra_total_size(&t->layout));
+}
+static void copy_stage_textures(int stage, ShaderInfo *si) {
+    if (!vk_buffer_copy_pending() || !si) return;
+    for (int i = 0; i < si->ntex; ++i) {
+        NvnTexture *t = shader_texture_object(stage, &si->tex[i]);
+        copy_texture_input(t);
+        if (t && naliases) copy_texture_input(alias_read(t));
+    }
+}
+#endif
+
 static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     if(vk_diag_active())vk_diag_log("dispatch group=%u groups=%u,%u,%u shader=%llx\n",vk_diag_group(),gx,gy,gz,
         st.program?(unsigned long long)st.program->stages[5].code_addr:0ull);
     snap_reason = "compute"; snapshots_invalidate(NULL);
     if (!st.program || !gx || !gy || !gz) return;
+#ifdef __ANDROID__
+    copy_stage_inputs(5);
+#endif
     {   extern uint64_t nvn_watch_texaddr(void);
         uint64_t wa = nvn_watch_texaddr();
         for (int i = 0; wa && i < 16; i++)
@@ -5090,6 +5216,9 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
         vk_diag_log("skip compute_state=%d\n",cp?atomic_load(&cp->p.state):-1);
         stat_skipped++; return;
     }
+#ifdef __ANDROID__
+    copy_stage_textures(5, cp->si);
+#endif
     if(vk_diag_active()) {
         NvnShaderStage *s=&st.program->stages[5];
         unsigned code=diagnostic_range(6,s->code_addr,s->const_offset?s->const_offset:65536,128<<10);
@@ -5218,6 +5347,17 @@ static uint64_t prof_tp_;
 static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
     if (!st.program) { stat_skipped++; return; }
+#ifdef __ANDROID__
+    copy_stage_inputs(0);
+    copy_stage_inputs(1);
+    if (vk_buffer_copy_pending()) {
+        for (int i = 0; i < 16; ++i) if (st.vbuf[i].addr)
+            vk_buffer_copy_cpu_read(st.vbuf[i].addr, st.vbuf[i].size);
+        if (indexed) vk_buffer_copy_cpu_read(r->x[3], (uint64_t)(uint32_t)r->x[2] * (r->x[1] == 0 ? 1 : r->x[1] == 1 ? 2 : 4) + 4);
+        for (int i = 0; i < st.rt.ncolor; ++i) copy_texture_input(st.rt.color[i]);
+        copy_texture_input(st.rt.depth);
+    }
+#endif
     ShaderKey vkey = {0}, fkey = {0};
     vkey.glsl = fkey.glsl = 1;
     vkey.gather_bias_bits = fkey.gather_bias_bits = gather_bias_bits();
@@ -5260,6 +5400,10 @@ static void draw_(CmdRec *r, bool indexed) {
         vk_diag_log("skip shader_state=%d\n",pr?atomic_load(&pr->state):-1);
         stat_skipped++; return;
     }
+#ifdef __ANDROID__
+    copy_stage_textures(0, pr->vi);
+    copy_stage_textures(1, pr->fi);
+#endif
     {   // fragment-shader hash: interior backdrop detection (widescreen), skip lists, item twinkle (renderer.m)
         static uint64_t last_fs, last_hash;
         uint64_t fs = st.program->stages[1].code_addr;
@@ -5571,7 +5715,6 @@ static void draw_(CmdRec *r, bool indexed) {
                 for (int i = 0; i < 4; i++) fx.sop[f][i] = (uint8_t)sface[f][i];
     }
     // ---- pipeline
-    static Pipe *last_pipeline;
     static int reuse = -1, verify;
     if (reuse < 0) {
         const char *e = getenv("LARECOMP_VK_PIPE_REUSE");
@@ -5920,7 +6063,7 @@ static void draw_(CmdRec *r, bool indexed) {
             else need = (uint64_t)max_index * stride + 256;
             if (v.size && need > v.size) need = v.size;
             if (!v.addr) { static const uint8_t zero[256]; sp = vk_transient_copy(zero, 256, 16); }
-            else sp = guest_copy(v.addr, need ? need : 16);
+            else sp = guest_copy_typed(v.addr, need ? need : 16, COPY_VERTEX);
         }
         VkDeviceSize off = sp.off;
         if (ss_on && (ss.vb_known >> s & 1) && ss.vb[s] == sp.buf && ss.vo[s] == off) continue;
@@ -6906,10 +7049,50 @@ static void split_long_pass(void) {
 #endif
 }
 
+#ifdef __ANDROID__
+static void copy_command_inputs(const CmdRec *r) {
+    if (!vk_buffer_copy_pending()) return;
+    switch (r->op) {
+    // These records only read their captured payload. Draw/dispatch preflight
+    // their resource inputs separately, before opening a Vulkan command buffer.
+    case CMD_END: case CMD_JUMP: case CMD_CALL:
+    case CMD_BIND_PROGRAM: case CMD_BIND_BLEND: case CMD_BIND_CHANNEL_MASK:
+    case CMD_BIND_COLOR: case CMD_BIND_DEPTH_STENCIL: case CMD_BIND_MULTISAMPLE:
+    case CMD_BIND_POLYGON: case CMD_BIND_VERTEX_ATTRIB: case CMD_BIND_VERTEX_STREAM:
+    case CMD_BIND_VERTEX_BUFFERS: case CMD_BIND_UNIFORM_BUFFERS: case CMD_BIND_STORAGE_BUFFERS:
+    case CMD_BIND_TEXTURES: case CMD_BIND_IMAGES: case CMD_SET_TEXTURE_POOL: case CMD_SET_SAMPLER_POOL:
+    case CMD_SET_VIEWPORTS: case CMD_SET_SCISSORS: case CMD_SET_DEPTH_RANGES:
+    case CMD_SET_BLEND_COLOR: case CMD_SET_STENCIL: case CMD_SET_POLYGON_OFFSET:
+    case CMD_SET_PRIMITIVE_RESTART: case CMD_SET_DEPTH_CLAMP: case CMD_SET_COPY_STRIDES:
+    case CMD_SET_RENDER_ENABLE: case CMD_DRAW_ARRAYS: case CMD_DRAW_ELEMENTS: case CMD_DISPATCH:
+    case CMD_BARRIER: case CMD_FENCE_SYNC: case CMD_COPY_BUFFER_TO_BUFFER:
+        return;
+    case CMD_BIND_TEXTURES_DEFERRED:
+        vk_buffer_copy_cpu_read(r->x[3], (r->x[2] < 32 ? r->x[2] : 32) * 8); return;
+    case CMD_SET_RENDER_ENABLE_CONDITIONAL:
+        vk_buffer_copy_cpu_read(r->x[1], 32); return;
+    case CMD_UPDATE_UNIFORM_BUFFER:
+        vk_buffer_copy_cpu_write(r->x[0] + r->x[2], r->x[3]); return;
+    default:
+        // Texture copies/clears, target capture, counters and unknown commands
+        // can read/upload/write guest memory. Keep the original completion
+        // guarantee until they have their own complete range description.
+        vk_buffer_copy_cpu_write(0, UINT64_MAX); return;
+    }
+}
+#endif
+
 static void exec_list(uint64_t handle, int depth) {
     uint64_t p = handle;
     for (int guard = 0; guard < 10000000; guard++) {
+#ifdef __ANDROID__
+        vk_buffer_copy_cpu_read(p, sizeof(CmdRec));
+#endif
         CmdRec *r = (CmdRec *)(uintptr_t)p;
+#ifdef __ANDROID__
+        vk_buffer_copy_cpu_read(p, r->size);
+        copy_command_inputs(r);
+#endif
         void *x = r->extra;
         if (r->op < CMD_COUNT) op_counts[r->op]++;
         switch (r->op) {
@@ -7235,10 +7418,24 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_COPY_BUFFER_TO_TEXTURE: copy_buffer_to_texture(r->x[0], x); break;
         case CMD_COPY_TEXTURE_TO_BUFFER: copy_texture_to_buffer(x, r->x[3]); break;
         case CMD_COPY_BUFFER_TO_BUFFER:
+            if (trace_copy_bytes) {
+                buffer_copy_stats.count++; buffer_copy_stats.bytes += r->x[2];
+                if (r->x[2] > buffer_copy_stats.size) {
+                    buffer_copy_stats.src = r->x[0]; buffer_copy_stats.dst = r->x[1]; buffer_copy_stats.size = r->x[2];
+                }
+            }
+#ifdef __ANDROID__
+            // A submitted snapshot has command-time bytes; a GPU copy from the
+            // live address would violate that capture, so preserve its fallback.
+            if (!submit_snapshot_enabled() && vk_buffer_copy_async(r->x[0], r->x[1], r->x[2])) break;
+#endif
             wait_why = "buffer -> buffer copy";
             renderer_flush();
             memmove((void *)(uintptr_t)r->x[1], submitted_data(r->x[0], r->x[2]), r->x[2]);
-            if (r->x[2] <= UINT64_MAX - r->x[1]) guest_copy_invalidate(r->x[1], r->x[1] + r->x[2]);
+            vk_memory_written(r->x[1],r->x[2]);
+#ifdef __ANDROID__
+            vk_texture_memory_written(r->x[1],r->x[2]);
+#endif
             break;
         default: {
             static bool reported[CMD_COUNT];

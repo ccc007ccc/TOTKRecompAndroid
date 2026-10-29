@@ -35,8 +35,11 @@ extern "C" bool vk_shader_prepare_variant(ShaderPrepareBase*,const ShaderPrepare
 int main() {
     {
         ShaderPrepareQueue queue(3);
+        bool premature=false;try{queue.source_keys();}catch(const std::logic_error&){premature=true;}assert(premature);
         for(unsigned i=0;i<128;++i)queue.submit(("source"+std::to_string(i%7)).c_str(),i%2,"test");
         queue.finish();assert(queue.done()==128 && queue.unique_sources()==14 && compiled==14);
+        auto keys=queue.source_keys();assert(keys.size()==14 && std::is_sorted(keys.begin(),keys.end()));
+        assert(std::adjacent_find(keys.begin(),keys.end())==keys.end());
         assert(sessions==0 && opened>=1 && opened<=3 && closed==opened);
         bool rejected=false;try{queue.submit("source0",0,"closed");}catch(const std::runtime_error&){rejected=true;}assert(rejected);
     }
@@ -45,6 +48,8 @@ int main() {
         for(unsigned i=0;i<300;++i){ShaderPrepareVariant v{};v.key=i%27;v.kinds[0]=i%3;variants.push_back(v);}
         queue.submit("base",0,"family",variants);queue.submit("base",0,"duplicate-family",variants);
         queue.finish();assert(queue.done()==600 && queue.unique_sources()==27 && queue.unique_bases()==1);
+        auto keys=queue.source_keys();assert(keys.size()==27);
+        for(unsigned i=0;i<27;++i)assert(keys[i]==i);
         assert(derived==27 && base_opened==1 && base_closed==1 && compiled==14 && sessions==0);
     }
     for(const char* source:{"base","bad-base"}) {

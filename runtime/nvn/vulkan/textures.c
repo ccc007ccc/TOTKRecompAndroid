@@ -525,6 +525,21 @@ static void destroy_image(TexBackend *b) {
 // Live game textures: an in-place reboot (vk_textures_reset) destroys them all.
 static NvnTexture **g_live;
 static int g_nlive, g_cap_live;
+
+#ifdef __ANDROID__
+void vk_texture_memory_written(uint64_t addr, uint64_t size) {
+    if (!size || addr > UINT64_MAX - size) return;
+    // Render thread only. Do not take the NVN object registry lock here:
+    // texture_release holds it while draining this queue. The backend registry
+    // stays stable until that drain finishes; unused textures have no cached
+    // upload or descriptor to invalidate yet.
+    for (int i = 0; i < g_nlive; ++i) {
+        NvnTexture *t = g_live[i];
+        if (t->addr && t->addr < addr + size && addr < t->addr + tegra_total_size(&t->layout))
+            __atomic_add_fetch(&t->cpu_write_epoch, 1, __ATOMIC_RELEASE);
+    }
+}
+#endif
 int vk_texture_count(void) {
     static int log_diag = -1;
     if (log_diag < 0) log_diag = getenv("LARECOMP_LOG_TEXDIAG") ? 1 : 0;

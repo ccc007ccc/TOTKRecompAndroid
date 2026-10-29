@@ -91,6 +91,22 @@ uint64_t vk_completed_seq(void);
 void vk_memory_written(uint64_t addr, uint64_t size); // render-thread invalidation after a CPU flush
 void vk_async_memory_written(uint64_t addr, uint64_t size); // order invalidation with queued command lists
 void vk_async_call_sync(void (*call)(void *), void *arg);
+bool vk_shared_memory_place(uint64_t addr, uint64_t size);
+bool vk_shared_memory_active(void);
+bool vk_shared_memory_enabled(void);
+void vk_shared_memory_stats(void);
+bool vk_shared_memory_unmap(uint64_t addr, uint64_t size);
+bool vk_shared_memory_reset_cpu(uint64_t lo, uint64_t hi);
+bool vk_shared_memory_lookup(uint64_t addr, uint64_t size, VkBuffer *buffer, VkDeviceSize *offset);
+void vk_shared_memory_reset(void);
+bool vk_guest_shared_buffer(uint64_t addr, uint64_t size, VkBuffer *buffer, VkDeviceSize *offset);
+bool vk_buffer_copy_pending(void);
+bool vk_buffer_copy_async(uint64_t src, uint64_t dst, uint64_t size);
+void vk_buffer_copy_cpu_read(uint64_t addr, uint64_t size); // render thread, before starting the consuming command
+void vk_buffer_copy_cpu_write(uint64_t addr, uint64_t size);
+void vk_buffer_copy_wait(void); // flush with a distinct profiling reason
+void vk_texture_memory_written(uint64_t addr, uint64_t size); // render thread; no NVN object registry lock
+void vk_buffer_copy_reset(void);
 void vk_wait_seq(uint64_t seq);
 void vk_full_barrier(VkCommandBuffer cb);
 void vk_end_pass(void);

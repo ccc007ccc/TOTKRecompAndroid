@@ -212,7 +212,7 @@ static std::string check_game_files(const std::string &root) {
     std::string why = check_copied_files(root);
     if (why.empty() && !gamelib_present(root.c_str())) return "The game code needs building";
 #ifdef __ANDROID__
-    if (why.empty() && !vk_shader_runtime_compile_enabled() && !vk_shader_game_ready(root.c_str()))
+    if (why.empty() && !vk_shader_runtime_compile_enabled() && !vk_shader_game_has_receipt(root.c_str()))
         return "Game graphics need preparing";
 #endif
     return why;
@@ -1618,7 +1618,7 @@ extern "C" void launcher_run(const char *root) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
 #ifdef __ANDROID__
-            if(e.type==SDL_EVENT_WILL_ENTER_BACKGROUND){warm_suspended=true;vk_shader_warm_stop();}
+            if(e.type==SDL_EVENT_WILL_ENTER_BACKGROUND){warm_suspended=true;vk_shader_warm_stop();vk_shader_check_stop();}
             if(e.type==SDL_EVENT_DID_ENTER_FOREGROUND)warm_suspended=false;
 #endif
             if (page == SETTINGS && bind_capture_event(&e)) continue;  // (waiting for a new binding: controls_ui.mm)
@@ -1646,6 +1646,16 @@ extern "C" void launcher_run(const char *root) {
         bool graphics_ready=true;
 #ifdef __ANDROID__
         ShaderWarmStatus warming={};
+        ShaderCheckStatus checking={};
+        if(page==MAIN && status.empty() && !busy && !warm_suspended && !vk_shader_runtime_compile_enabled()) {
+            vk_shader_check_start(g_root.c_str());checking=vk_shader_check_status();
+            graphics_ready=checking.ready;
+            if(checking.failed) {
+                status="Game graphics need preparing";page=SETUP;
+                set_job("Game graphics preparation failed",true,"Prepare graphics again after updating the app.");
+                set_job_detail(checking.message);requested_play=false;
+            }
+        } else vk_shader_check_stop();
         if(page==MAIN && status.empty() && !busy && !warm_suspended && vk_shader_runtime_compile_enabled() &&
            vk_shader_warm_enabled() && warm_manifest[0]) {
             vk_shader_warm_start(g_root.c_str(),warm_manifest);warming=vk_shader_warm_status();
@@ -1805,7 +1815,10 @@ extern "C" void launcher_run(const char *root) {
                     sparkle(dl, ImVec2(play_at.x + w - h * 0.32f, play_at.y + h * 0.08f), h * 0.11f, k2 * 0.8f, -t * 0.8f);
                 }
 #ifdef __ANDROID__
-                if(!graphics_ready)ImGui::TextDisabled("%s",tr("Preparing game graphics..."));
+                if(!graphics_ready) {
+                    ImGui::TextDisabled("%s",tr(checking.running ? "Checking prepared game graphics..." : "Preparing game graphics..."));
+                    if(checking.running)ImGui::ProgressBar(float(checking.progress),ImVec2(240*s,0));
+                }
                 else if(warming.failed && !warming.title_ready)
                     ImGui::TextDisabled("%s",tr("Graphics will be prepared during play."));
 #endif
@@ -1825,7 +1838,7 @@ extern "C" void launcher_run(const char *root) {
                 if (g_refocus == SETTINGS) ImGui::SetKeyboardFocusHere(), g_refocus = MAIN;  // (back from Settings: it
                 if (menu_item("SETTINGS", true)) {                                             //  stays selected)
 #ifdef __ANDROID__
-                    requested_play=false;vk_shader_warm_stop();
+                    requested_play=false;vk_shader_warm_stop();vk_shader_check_stop();
 #endif
                     static bool opened;
                     menu_tabs_focus(!opened);  // (first time this session: Prelaunch; later: the selected tab)
@@ -1837,7 +1850,7 @@ extern "C" void launcher_run(const char *root) {
                     if (g_refocus == SETUP) ImGui::SetKeyboardFocusHere(), g_refocus = MAIN;
                     if (menu_item("SET UP GAME FILES", !busy)) {
 #ifdef __ANDROID__
-                        requested_play=false;vk_shader_warm_stop();
+                        requested_play=false;vk_shader_warm_stop();vk_shader_check_stop();
 #endif
                         page = SETUP;
                     }
@@ -2210,6 +2223,9 @@ extern "C" void launcher_run(const char *root) {
 #endif
         }
     }
+#ifdef __ANDROID__
+    vk_shader_check_stop();
+#endif
     // play: hand the window to the game
     settings_save();
 #ifdef __APPLE__

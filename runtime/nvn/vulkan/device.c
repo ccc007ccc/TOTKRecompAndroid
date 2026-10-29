@@ -1252,6 +1252,7 @@ void backend_represent(void) {
 
 #ifdef __ANDROID__
 void vk_present_now(NvnTexture *t) {  // (the window's half of backend_present)
+    if (t) vk_buffer_copy_cpu_read(t->addr, tegra_total_size(&t->layout));
 #else
 void backend_present(NvnTexture *t) {
 #endif
@@ -1840,6 +1841,7 @@ void backend_reset(void) {
     extern void vk_pipeline_warm_stop(void);
     vk_pipeline_warm_stop();
     vk_shader_jobs_drain();
+    renderer_flush(); // submit and retire recorded commands before releasing their objects
     vk_pipeline_cache_save();
     vkDeviceWaitIdle(g_vk.dev);
     extern void vk_textures_reset(void);

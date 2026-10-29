@@ -31,7 +31,14 @@ void vk_shader_prepare_configure(void);
 unsigned vk_shader_prepare_gather(void);
 bool vk_shader_prepare_vertex_snap(void);
 bool vk_shader_prepare_game(const char *game, void (*progress)(double, const char *), char *why, size_t capacity);
+// Cheap UI metadata query; never proves module completeness.
+bool vk_shader_game_has_receipt(const char *game);
+// Full blocking audit for tools/setup workers. UI uses the cancellable job below.
 bool vk_shader_game_ready(const char *game);
+typedef struct {bool running,ready,failed;double progress;char message[256];} ShaderCheckStatus;
+void vk_shader_check_start(const char *game);
+void vk_shader_check_stop(void);
+ShaderCheckStatus vk_shader_check_status(void);
 const char *vk_builtin_source(const char *name, int *stage);
 // Private compiler plugin ABI. Allocations are released by the caller with free().
 typedef uint32_t *(*ShaderPrepareCompile)(const char *, int, unsigned, bool, size_t *, char *, size_t);

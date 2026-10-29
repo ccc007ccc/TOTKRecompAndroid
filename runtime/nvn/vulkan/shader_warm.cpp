@@ -4,6 +4,7 @@
 #include "shader_warm_observed.hpp"
 #include "shader_warm_requests.hpp"
 #include "shader_prepare_queue.hpp"
+#include "shader_cache_receipt.hpp"
 #include <chrono>
 #include <cerrno>
 #include <iomanip>
@@ -44,24 +45,10 @@ void require_profile(uint64_t profile) {
     if(current!=profile)throw std::runtime_error("graphics configuration changed during warm-up");
 }
 bool warm_cached(const std::string& path,const std::string& identity,size_t& count,const shader_warm::Checkpoint& checkpoint={}) {
-    if(identity.empty())return false;
-    struct stat st{};if(stat(path.c_str(),&st) || st.st_size>8u*1024*1024)return false;
-    std::ifstream file(path);std::string header;
-    if(!std::getline(file,header) || header!=identity || !(file>>count) || count>262144)return false;
-    for(size_t i=0;i<count;++i) {
-        if(checkpoint)checkpoint();
-        std::string key;if(!(file>>key) || key.size()!=16 || key.find_first_not_of("0123456789abcdef")!=std::string::npos)return false;
-        if(!vk_shader_cached(std::stoull(key,nullptr,16)))return false;
-    }
-    file>>std::ws;return file.eof();
+    return shader_receipt::check(path,identity,count,262144,checkpoint);
 }
 bool save_receipt(const std::string& path,const std::string& identity,const std::set<uint64_t>& keys) {
-    if(identity.empty())return false;
-    auto temporary=path+".part";
-    std::ofstream file(temporary);file<<identity<<'\n'<<keys.size()<<'\n';
-    for(auto key:keys)file<<std::hex<<std::setw(16)<<std::setfill('0')<<key<<'\n';
-    file.close();if(file && !rename(temporary.c_str(),path.c_str()))return true;
-    remove(temporary.c_str());return false;
+    return shader_receipt::save(path,identity,keys);
 }
 }
 

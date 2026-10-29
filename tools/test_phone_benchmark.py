@@ -104,6 +104,11 @@ class PhoneBenchmarkTests(unittest.TestCase):
         self.assertEqual('LARECOMP_LOG_PACE=1' in launches[0],profiling)
         if '--compare-ubo' in extra:
             self.assertIn('LARECOMP_AB='+extra[extra.index('--compare-ubo')+1]+':ubo',launches[0])
+        for option, key in [('--shared-alias','LARECOMP_VK_SHARED_ALIAS'),('--async-buffer-copy','LARECOMP_VK_ASYNC_BUFFER_COPY')]:
+            if option in extra:
+                value=extra[extra.index(option)+1]
+                self.assertIn(key+'='+('1' if value=='on' else '0'),launches[0])
+            else:self.assertNotIn(key+'=',launches[0])
         self.assertFalse(any(c[0]=='shell' and ('screencap' in c[1] or ('/command' in c[1] and ' rm -f ' not in c[1])) for c in calls))
         self.assertFalse(any(c[0]=='exec-out' and 'window.png' in c for c in calls))
         return proc
@@ -168,6 +173,13 @@ class PhoneBenchmarkTests(unittest.TestCase):
         self.assertNotEqual(proc.returncode,0)
         self.assertIn('does not support',proc.stderr)
         self.assertFalse(list((self.path/'reports').glob('benchmark-*/sample-0001.json')))
+
+    def test_memory_optimization_switches_are_recorded(self):
+        proc=self.run_cli('success','--shared-alias','on','--async-buffer-copy','off')
+        self.assertEqual(proc.returncode,0,proc.stderr)
+        manifest=json.loads(next((self.path/'reports').glob('benchmark-*/launch.json')).read_text())
+        self.assertEqual(manifest['shared_alias'],'on')
+        self.assertEqual(manifest['async_buffer_copy'],'off')
 
     def test_apk_install_is_part_of_the_locked_launch(self):
         apk=self.path/'test.apk';apk.write_bytes(b'test')

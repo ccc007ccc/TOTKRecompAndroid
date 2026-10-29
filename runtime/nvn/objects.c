@@ -1332,8 +1332,10 @@ NVN(nvnProgramSetDebugLabel) { (void)c; }
 NVN(nvnProgramSetSampleShading) { (void)c; }
 NVN(nvnProgramSetSubroutineLinkage) { RET(1); }
 #include "shader_control.h"
+static uint64_t program_generation;
 static void set_shaders(Cpu *c, int stride) {
     NvnProgram *p = HOST(NvnProgram, A(0));
+    p->generation=__atomic_add_fetch(&program_generation,1,__ATOMIC_RELAXED);
     int n = (int)A(1);
     const uint8_t *data = AP(2);  // NVNshaderData[n] = {u64 data (GPU addr), const void* control}
     memset(p->stages, 0, sizeof p->stages);

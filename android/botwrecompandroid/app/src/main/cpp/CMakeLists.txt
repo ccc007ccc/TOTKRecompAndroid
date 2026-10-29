@@ -62,6 +62,8 @@ foreach(source runtime/nvn/maxwell/translate.c runtime/nvn/maxwell/shader.h runt
         runtime/nvn/vulkan/shader_catalog.hpp runtime/nvn/vulkan/shader_material.hpp
         runtime/nvn/vulkan/shader_variant_plan.hpp runtime/nvn/vertex_format.h
         runtime/nvn/vulkan/shader_prepare_queue.hpp runtime/nvn/vulkan/shader_prepare.h
+        runtime/nvn/vulkan/shader_cache_receipt.hpp runtime/nvn/vulkan/shader_code_state.h
+        runtime/nvn/vulkan/shader_warm_state.hpp runtime/nvn/vulkan/shader_warm_job.hpp
         runtime/nvn/vulkan/shader_interface.hpp runtime/nvn/vulkan/shader_interface.cpp
         runtime/nvn/vulkan/exec.c runtime/nvn/vulkan/shader_object_cache.h
         runtime/nvn/vulkan/pipeline_state.h runtime/nvn/vulkan/pipeline_state.c

@@ -47,6 +47,9 @@ typedef enum {
     VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
 } VkDescriptorType;
 typedef struct { uint32_t set, binding; VkDescriptorType type; } VkBindingInfo;
+// Code lifetime has its own native ASan regression; keep this upload-only fixture independent.
+static int shader_code_state;
+static void shader_code_written(int *state,uint64_t addr,uint64_t size) {(void)state;(void)addr;(void)size;}
 static unsigned char heap[2 << 20];
 static unsigned used;
 static int fail_alloc;
