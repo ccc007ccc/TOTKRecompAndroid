@@ -28,6 +28,7 @@
 //   LARECOMP_MOVIE_FPS / LARECOMP_MENU_FPS / LARECOMP_EVENT_FPS=<n>  the frame rate there (default 30; 0: the chosen one)
 //   LARECOMP_LOG_FRAMEPACE=<n>   every n clock updates: target, frame length, VFR ratio and interval
 //   LARECOMP_NO_CONTROLLER_STEP=1  the controllers count presented frames (as the game does)
+#include "../diagnostics_build.h"
 #include <math.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -80,7 +81,7 @@ bool framepace_on_title(void) {
     bool on = mgr && !*(uint32_t *)(uintptr_t)PAUSE_STATE && VF(uint32_t, mgr, 0x28) > 1 && VF(uint64_t, mgr, 0x30) &&
               *(uint64_t *)(uintptr_t)(VF(uint64_t, mgr, 0x30) + 8);
     static int last = -1;
-    if (getenv("LARECOMP_LOG_TITLE") && on != last) {
+    if (diag_getenv("LARECOMP_LOG_TITLE") && on != last) {
         last = on;
         LOG("[framepace] title screen %d (screens %u, menu %d)\n", on, mgr ? VF(uint32_t, mgr, 0x28) : 0, in_menu());
     }

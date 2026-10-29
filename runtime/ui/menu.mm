@@ -17,6 +17,7 @@
 #include "option_rows.h"
 #include "imgui_internal.h"  // (NavCursorVisible)
 #include "osk.h"
+#include "../diagnostics_build.h"
 #ifdef __ANDROID__
 #include "../nvn/vulkan/flicker.h"
 #endif
@@ -81,13 +82,13 @@ bool menu_test_session_event(const SDL_Event *e) {
     test_session_manual(hit == 1);
     return true;
 }
-#ifdef __ANDROID__
+#if defined(__ANDROID__) && TOTK_DIAGNOSTICS
 static std::atomic<unsigned> g_capture_requests{0};
 static float capture_rect[2][4]; // normalised, guarded by q_lock
 #endif
 
 bool menu_capture_event(const SDL_Event *e) {
-#ifdef __ANDROID__
+#if defined(__ANDROID__) && TOTK_DIAGNOSTICS
     static SDL_FingerID finger;
     static bool finger_down, mouse_down;
     const bool down = e->type == SDL_EVENT_FINGER_DOWN;
@@ -142,7 +143,7 @@ extern "C" void touch_controls_draw(ImVec2 display, ImFont *font);
 static void set_open(bool open);
 extern "C" void menu_test_open(void) {
     set_open(true);
-    if (getenv("LARECOMP_MENU_TAB")) { extern int g_tab_request_ext; g_tab_request_ext = atoi(getenv("LARECOMP_MENU_TAB")); }
+    if (diag_getenv("LARECOMP_MENU_TAB")) { extern int g_tab_request_ext; g_tab_request_ext = atoi(diag_getenv("LARECOMP_MENU_TAB")); }
 }
 
 void menu_tabs_focus(bool first_tab);
@@ -231,7 +232,7 @@ bool menu_handle_event(const SDL_Event *e) {
     static bool back_down, start_down;
     {   // LARECOMP_LOG_POINTER=1 (debugging touch in the menu): the pointer events the menu gets
         static int logp = -1;
-        if (logp < 0) logp = getenv("LARECOMP_LOG_POINTER") != NULL;
+        if (logp < 0) logp = diag_getenv("LARECOMP_LOG_POINTER") != NULL;
         if (logp && (e->type == SDL_EVENT_MOUSE_MOTION || e->type == SDL_EVENT_MOUSE_BUTTON_DOWN || e->type == SDL_EVENT_MOUSE_BUTTON_UP ||
                      e->type == SDL_EVENT_FINGER_DOWN || e->type == SDL_EVENT_FINGER_UP))
             LOG("[menu] event %#x which %u button %d at %.0f %.0f (open %d)\n", e->type, (unsigned)e->button.which, e->button.button,
@@ -478,8 +479,8 @@ static void init(void) {
     // the menu window itself: Baloo 2 SemiBold, as on the start screen (shipped, OFL), at its Settings window's sizes; the
     // FPS counter, overlays and on-screen keyboard keep the fonts above
     char baloo[1024];
-    if (const char *f = getenv("LARECOMP_MENU_FONT")) strlcpy(baloo, f, sizeof baloo);  // (test) another weight / face
-    if (getenv("LARECOMP_MENU_FONT") || rt_resource("Baloo2-SemiBold.ttf", "third_party/fonts/Baloo2/Baloo2-SemiBold.ttf", baloo, sizeof baloo)) {
+    if (const char *f = diag_getenv("LARECOMP_MENU_FONT")) strlcpy(baloo, f, sizeof baloo);  // (test) another weight / face
+    if (diag_getenv("LARECOMP_MENU_FONT") || rt_resource("Baloo2-SemiBold.ttf", "third_party/fonts/Baloo2/Baloo2-SemiBold.ttf", baloo, sizeof baloo)) {
         g_menu_font = io.Fonts->AddFontFromFileTTF(baloo, 39, &cfg);
         i18n_merge_fonts(io.Fonts, 39);  // (the menu language's other letters: ui/i18n.mm)
         g_menu_font_big = io.Fonts->AddFontFromFileTTF(baloo, 72, &cfg);
@@ -592,7 +593,7 @@ extern "C" double output_scale_dynamic_factor(void);
 static void tab_display(void) {
     float scale = ImGui::GetFontSize() / 34;
     opt_begin("##video", scale);
-#ifdef __ANDROID__
+#if defined(__ANDROID__) && TOTK_DIAGNOSTICS
     opt_section("Flicker capture");
     FlickerStatus capture = flicker_status();
     ImGui::TextUnformatted(tr(capture.full ? "Full GPU replay capture" : "Lightweight diagnostics"));
@@ -935,7 +936,7 @@ extern "C" int menu_keyboard_run(const char *initial, int max_len, char *out, in
     input_reset();
     g_kbd = 1;
     // (test) LARECOMP_KBD_AUTO=<text>: answer at once
-    if (getenv("LARECOMP_KBD_AUTO")) { snprintf(g_kbd_text, sizeof g_kbd_text, "%s", getenv("LARECOMP_KBD_AUTO")); g_kbd = 2; }
+    if (diag_getenv("LARECOMP_KBD_AUTO")) { snprintf(g_kbd_text, sizeof g_kbd_text, "%s", diag_getenv("LARECOMP_KBD_AUTO")); g_kbd = 2; }
     while (g_kbd.load() == 1 && !g_rt_unwind) {  // ~60 Hz (a reboot cancels)
         uint64_t t0 = SDL_GetTicks();
         backend_represent();
@@ -1192,7 +1193,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
     ImGui::PushID(g_tab);
     settings_page(g_tab, scale, in_game, prelaunch);
     ImGui::PopID();
-    if (const char *t = getenv("LARECOMP_PAGE_SCROLL")) ImGui::SetScrollY(ImGui::GetScrollMaxY() * (float)atof(t));  // (test)
+    if (const char *t = diag_getenv("LARECOMP_PAGE_SCROLL")) ImGui::SetScrollY(ImGui::GetScrollMaxY() * (float)atof(t));  // (test)
     ImGui::EndChild();
     {   // BACK on the left; RESTORE DEFAULTS on the right on Video and Audio (asks first)
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 8 * scale);
@@ -1320,7 +1321,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
                     }
                     if (drag_scroll) ImGui::SetScrollY(ImGui::GetScrollY() - tio.MouseDelta.y);
                 }
-                static const char *scroll_test = getenv("LARECOMP_MENU_SCROLL");  // test hook: page scroll, 0..1
+                static const char *scroll_test = diag_getenv("LARECOMP_MENU_SCROLL");  // test hook: page scroll, 0..1
                 if (scroll_test) ImGui::SetScrollY(ImGui::GetScrollMaxY() * (float)atof(scroll_test));
                 ImGui::EndChild();
                 ImGui::EndTabItem();
@@ -1352,15 +1353,18 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
 #endif
     bool open = g_open.load();
     bool kbd = g_kbd.load() == 1;
-#ifdef __ANDROID__
+#if defined(__ANDROID__) && TOTK_DIAGNOSTICS
     unsigned request = g_capture_requests.exchange(0);
     if (request & 1) { if (flicker_status().active) flicker_stop(); else flicker_start(); }
     if (request & 2) flicker_single();
     FlickerStatus capture_badge = flicker_status();
+#endif
+#if !defined(__ANDROID__) || !TOTK_DIAGNOSTICS
+#ifdef __ANDROID__
+    bool touch = touch_controls_visible();
 #else
     bool touch = false;
 #endif
-#ifndef __ANDROID__ // Android always draws the two capture buttons during gameplay.
     if (!open && !kbd && !g_settings.show_fps && !touch) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         return;
@@ -1425,6 +1429,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     }
 
 #ifdef __ANDROID__
+#if TOTK_DIAGNOSTICS
     pthread_mutex_lock(&q_lock);
     memset(capture_rect, 0, sizeof capture_rect);
     if (!open && !kbd&&!test_session_timed()) {
@@ -1451,6 +1456,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         ImVec2 size = ImGui::CalcTextSize(label);
         ImGui::GetForegroundDrawList()->AddText(ImVec2((tw-size.x)*0.5f, 100*scale), IM_COL32(255,190,60,255), label);
     }
+#endif
     if (g_settings.show_fps) {  // (the full performance overlay: ui/perf_overlay.mm)
         extern void perf_overlay_draw(ImVec2 display, float scale);
         perf_overlay_draw(io.DisplaySize, scale);

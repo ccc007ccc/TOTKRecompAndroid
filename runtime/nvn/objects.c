@@ -1,4 +1,5 @@
 // NVN objects, builders, and state objects (everything except command recording).
+#include "../diagnostics_build.h"
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -124,7 +125,7 @@ NVN(nvnDeviceGetCurrentTimestampInNanoseconds) {
     RET(plat_now_ns());
 }
 NVN(nvnDeviceGetTimestampInNanoseconds) {  // counter.timestamp: Switch GPU ticks (614.4 MHz, as the counters are written)
-    if (getenv("LARECOMP_LOG_TS_CALLERS")) {  // (diagnosis) each caller once: who times the GPU (dynamic resolution, 30/60)
+    if (diag_getenv("LARECOMP_LOG_TS_CALLERS")) {  // (diagnosis) each caller once: who times the GPU (dynamic resolution, 30/60)
         static uint64_t seen[32];
         static int nseen;
         bool found = false;
@@ -139,7 +140,7 @@ NVN(nvnDeviceGetTimestampInNanoseconds) {  // counter.timestamp: Switch GPU tick
 NVN(nvnDeviceSetIntermediateShaderCache) { (void)c; }
 int nvn_watch_texid(void) {  // LARECOMP_WATCH_HANDLE_TEX=<hex texture id>: handles made / bound with it (diagnosis)
     static int w = -2;
-    if (w == -2) w = getenv("LARECOMP_WATCH_HANDLE_TEX") ? (int)strtol(getenv("LARECOMP_WATCH_HANDLE_TEX"), NULL, 16) : -1;
+    if (w == -2) w = diag_getenv("LARECOMP_WATCH_HANDLE_TEX") ? (int)strtol(diag_getenv("LARECOMP_WATCH_HANDLE_TEX"), NULL, 16) : -1;
     return w;
 }
 NVN(nvnDeviceGetTextureHandle) {
@@ -284,7 +285,7 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     static int flush = -1;
     static uint64_t n;
     if (flush < 0) flush = getenv("LARECOMP_SYNC_FLUSH") ? 1 : 0;
-    if (getenv("LARECOMP_LOG_SYNC") && n++ % 60 == 0) LOG("[nvn] SyncWait #%llu (lr %llx)\n", (unsigned long long)n, c->x[30]);
+    if (diag_getenv("LARECOMP_LOG_SYNC") && n++ % 60 == 0) LOG("[nvn] SyncWait #%llu (lr %llx)\n", (unsigned long long)n, c->x[30]);
     static int whole = -1;  // LARECOMP_SYNC_ALL=1: old behaviour, wait for all submitted work
     if (whole < 0) whole = getenv("LARECOMP_SYNC_ALL") ? 1 : 0;
 #ifdef __ANDROID__
@@ -304,7 +305,7 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     // LARECOMP_LOG_SYNC: waits over a millisecond in the world (frame 1500 on, 40 of them) - how old the fence was,
     // the waits for its translation and its GPU work
     static int log = -1, logged;
-    if (log < 0) log = getenv("LARECOMP_LOG_SYNC") != NULL;
+    if (log < 0) log = diag_getenv("LARECOMP_LOG_SYNC") != NULL;
     extern uint64_t renderer_present_count(void);
     if (log && plat_now_ns() - t0 > 1000000 && renderer_present_count() > 1500 && logged++ < 40) {
         LOG("[nvn] SyncWait (lr %llx): fence from %lld frames ago, waited %.2f ms for the render thread, %.2f ms for the GPU\n",
@@ -400,7 +401,7 @@ NVN(nvnMemoryPoolInitialize) {
 #ifdef __ANDROID__
     submit_pool_update(p);
 #endif
-    if (ENV("LARECOMP_LOG_POOLS"))
+    if (DIAG_ENV("LARECOMP_LOG_POOLS"))
         LOG("[nvn] pool %llx storage=%llx size=%llx flags=%x\n", A(0), p->storage, p->size, p->flags);
     SET_HOST(A(0), p);
     RET(1);
@@ -453,7 +454,7 @@ NVN(nvnMemoryPoolMapVirtual) {
 #ifdef __ANDROID__
     submit_pool_update(dst);
 #endif
-    if (ENV("LARECOMP_LOG_POOLS"))
+    if (DIAG_ENV("LARECOMP_LOG_POOLS"))
         LOG("[nvn] MapVirtual %llx: %llx bytes aliased at %llx\n", A(0), covered, base);
     RET(1);
 }
@@ -576,7 +577,7 @@ static void builder_layout(uint64_t b, TexLayout *t) {
     if (!t->layers) t->layers = 1;
     t->levels = G(uint32_t, b, 0x1C) ? G(uint32_t, b, 0x1C) : 1;
     tegra_layout_init(t);
-    if (getenv("LARECOMP_LOG_BHDIFF") && t->depth <= 1) {  // (diagnosis) where the old block height rule differed
+    if (diag_getenv("LARECOMP_LOG_BHDIFF") && t->depth <= 1) {  // (diagnosis) where the old block height rule differed
         uint32_t hb = (t->height + t->fmt->bh - 1) / t->fmt->bh, gobs = (hb + 7) / 8, o = 0;
         while ((1u << o) < gobs && o < 4) o++;
         if (o != t->block_height_log2) {
@@ -593,7 +594,7 @@ static void builder_layout(uint64_t b, TexLayout *t) {
         t->block_height_log2 = layout & 15;
         t->block_depth_log2 = (layout >> 4) & 15;
     }
-    if (pl && getenv("LARECOMP_LOG_PACKAGED")) {
+    if (pl && diag_getenv("LARECOMP_LOG_PACKAGED")) {
         static int n;
         if (n++ < 4000) LOG("[nvn] packaged layout %#x fmt %#x %ux%ux%u lv %u -> bh %u bd %u\n", (uint32_t)pl - 1,
                            G(uint32_t, b, 0x20), t->width, t->height, t->depth, t->levels, t->block_height_log2, t->block_depth_log2);
@@ -831,7 +832,7 @@ void nvn_texture_cpu_written(uint64_t addr, uint64_t size) {
 // a copy's ends (vulkan/exec.c) - who writes memory that a texture object reads (aliasing between descriptions)
 uint64_t nvn_watch_texaddr(void) {
     static uint64_t a = ~0ull;
-    if (a == ~0ull) a = getenv("LARECOMP_WATCH_TEXADDR") ? strtoull(getenv("LARECOMP_WATCH_TEXADDR"), NULL, 16) : 0;
+    if (a == ~0ull) a = diag_getenv("LARECOMP_WATCH_TEXADDR") ? strtoull(diag_getenv("LARECOMP_WATCH_TEXADDR"), NULL, 16) : 0;
     return a;
 }
 
@@ -851,7 +852,7 @@ NVN(nvnTextureInitialize) {
         static int ww = -1, wh, wd, wf = -1;
         if (ww < 0) {
             ww = 0;
-            const char *e = getenv("LARECOMP_WATCH_READ_TEX");
+            const char *e = diag_getenv("LARECOMP_WATCH_READ_TEX");
             if (e) sscanf(e, "%dx%dx%d:%x", &ww, &wh, &wd, &wf);  // (each texture of that shape [and format], up to 16: dispatch.c)
         }
         if (ww >= 0 && (ww || wh || wd) && (!ww || (int)t->width == ww) && (!wh || (int)t->height == wh) &&
@@ -870,7 +871,7 @@ NVN(nvnTextureInitialize) {
     memcpy(swizzle, t->swizzle, 4);
     uint64_t debug_id = t->debug_id;
     if (same) {
-        if (ENV("LARECOMP_LOG_TEXALIAS") && memcmp(same->swizzle, swizzle, 4)) {  // shared with an object of another swizzle
+        if (DIAG_ENV("LARECOMP_LOG_TEXALIAS") && memcmp(same->swizzle, swizzle, 4)) {  // shared with an object of another swizzle
             static int n;
             if (n++ < 60)
                 LOG("[alias] %llx shares %ux%u fmt %#x at %llx: swizzle %u%u%u%u, the image's %u%u%u%u (refs %u, lr %llx)\n",
@@ -882,7 +883,7 @@ NVN(nvnTextureInitialize) {
         t = same;
         g_tex_stat_reused++;
     } else {
-        if (ENV("LARECOMP_LOG_TEXALIAS"))  // the same memory and size as a live texture, yet another image: why
+        if (DIAG_ENV("LARECOMP_LOG_TEXALIAS"))  // the same memory and size as a live texture, yet another image: why
             for (NvnTexture *e = g_desc_hash[desc_hash(t->addr)]; e; e = e->hnext)
                 if (e->addr == t->addr && e->width == t->width && e->height == t->height) {
                     static int n;
@@ -906,7 +907,7 @@ NVN(nvnTextureInitialize) {
     if (old) {
         g_tex_stat_reinit++;
         static uint64_t n;
-        if (ENV("LARECOMP_LOG_TEXINIT") && n++ < 20) LOG("[nvn] TextureInitialize %llx again: previous texture retired\n", (unsigned long long)A(0));
+        if (DIAG_ENV("LARECOMP_LOG_TEXINIT") && n++ < 20) LOG("[nvn] TextureInitialize %llx again: previous texture retired\n", (unsigned long long)A(0));
         texture_drop_owner(old);
     }
     if ((t->flags & 2) && !same)
@@ -929,7 +930,7 @@ NVN(nvnTextureFinalize) {
     } else if (HOST(NvnTexture, A(0))) {
         g_tex_stat_fin_copy++;  // a copy of an object, or an object finalized again
         static int n;
-        if (ENV("LARECOMP_LOG_TEXINIT") && n++ < 20)
+        if (DIAG_ENV("LARECOMP_LOG_TEXINIT") && n++ < 20)
             LOG("[nvn] TextureFinalize %llx: not an initialized object (%p), ignored (lr %llx)\n", (unsigned long long)A(0),
                 HOST(void, A(0)), (unsigned long long)c->x[30]);
     }
@@ -967,7 +968,7 @@ NVN(nvnTextureGetViewOffset) {
     if (level >= t->layout.levels || layer >= t->layout.layers)
         FATAL("texture view offset outside storage: mip %u layer %u\n", level, layer);
     uint64_t offset = tegra_layer_size(&t->layout) * layer + tegra_level(&t->layout, level).offset;
-    if (getenv("LARECOMP_LOG_TEXOFFSET")) {
+    if (diag_getenv("LARECOMP_LOG_TEXOFFSET")) {
         static int n;
         if (n++ < 80) LOG("[nvn] texture view offset %ux%u f%#x mip %u layer %u -> %#llx\n",
                          t->width, t->height, t->format, level, layer, (unsigned long long)offset);
@@ -1033,7 +1034,7 @@ static void texture_transfer(Cpu *c, uint64_t row_stride, uint64_t image_stride,
     if (!ok) FATAL("invalid %sTexels region at mip %u layer %u\n", write ? "Write" : "Read", level, layer);
     if (write) backend_pool_written(t->addr, tegra_total_size(&t->layout));
     static unsigned counts[2];
-    if (__atomic_fetch_add(&counts[write], 1, __ATOMIC_RELAXED) < 16 || getenv("LARECOMP_TRACE_TEXELS"))
+    if (__atomic_fetch_add(&counts[write], 1, __ATOMIC_RELAXED) < 16 || diag_getenv("LARECOMP_TRACE_TEXELS"))
         LOG("[nvn] %sTexels %ux%u f%#x flags %#x @%llx mip %u layer %u region %d,%d,%d %dx%dx%d linear %llx strides %llu/%llu\n",
             write ? "Write" : "Read", t->width, t->height, t->format, t->flags, (unsigned long long)t->addr,
             level, layer, r[0], r[1], r[2], r[3], r[4], r[5], (unsigned long long)A(3),
@@ -1069,7 +1070,7 @@ NVN(nvnSamplerBuilderSetDefaults) {
 NVN(nvnSamplerBuilderSetMinMagFilter) { SD->min_filter = (uint32_t)A(1); SD->mag_filter = (uint32_t)A(2); }
 NVN(nvnSamplerBuilderSetWrapMode) {
     SD->wrap[0] = (uint32_t)A(1); SD->wrap[1] = (uint32_t)A(2); SD->wrap[2] = (uint32_t)A(3);
-    if (getenv("LARECOMP_LOG_WRAP")) {  // each distinct (modes, caller) once (diagnosis)
+    if (diag_getenv("LARECOMP_LOG_WRAP")) {  // each distinct (modes, caller) once (diagnosis)
         static uint64_t seen[256]; static int ns;
         uint64_t k = (A(1) & 0xF) | (A(2) & 0xF) << 4 | (A(3) & 0xF) << 8 | (uint64_t)c->x[30] << 12;
         int i = 0;
@@ -1143,7 +1144,7 @@ static NvnSamplerDesc *sampler_intern(const NvnSamplerDesc *want) {
 NVN(nvnSamplerInitialize) {
     NvnSamplerDesc want = sampler_desc_from_builder(AP(1));
     NvnSamplerDesc *d = sampler_intern(&want);
-    if (getenv("LARECOMP_LOG_SMPREG"))
+    if (diag_getenv("LARECOMP_LOG_SMPREG"))
         LOG("[nvn] SamplerInitialize object %llx wrap %u %u %u min %u (old host %p, lr %llx, thread %d)\n", (unsigned long long)A(0), d->wrap[0], d->wrap[1],
             d->wrap[2], d->min_filter, (void *)HOST(NvnSamplerDesc, A(0)), (unsigned long long)c->x[30], (int)gettid());
     SET_HOST(A(0), d);
@@ -1356,7 +1357,7 @@ static void register_texture(Cpu *c) {
     if (next.has_view) e->view = next.view;
 recorded:;
     static int watch_id = -2;  // LARECOMP_WATCH_TEXID=<hex id>: its registrations (texture, view)
-    if (watch_id == -2) watch_id = getenv("LARECOMP_WATCH_TEXID") ? (int)strtol(getenv("LARECOMP_WATCH_TEXID"), NULL, 16) : -1;
+    if (watch_id == -2) watch_id = diag_getenv("LARECOMP_WATCH_TEXID") ? (int)strtol(diag_getenv("LARECOMP_WATCH_TEXID"), NULL, 16) : -1;
     if (id == watch_id || (watch_id == 0x7fffffff && t && t->width == 320 && t->height == 180 && t->levels == 5))  // (7fffffff: the bloom chain)
         LOG("[watch] texture id %#x <- %p %ux%u levels %u view %d setmask %#x levels %u+%u (lr %llx)\n", id, (void *)t,
             t ? t->width : 0, t ? t->height : 0, t ? t->levels : 0, next.has_view, next.has_view ? next.view.setmask : 0,
@@ -1398,13 +1399,13 @@ NVN(nvnSamplerPoolRegisterSampler) {
     NvnDescPool *d = HOST(NvnDescPool, A(0));
     int id = (int)A(1);
     if (id >= 0 && id < d->count) register_sampler(&((NvnSamplerDesc *)d->entries)[id], HOST(NvnSamplerDesc, A(2)));
-    if (getenv("LARECOMP_LOG_SMPREG") && id >= 0 && id < d->count) {  // every registration (diagnosis)
+    if (diag_getenv("LARECOMP_LOG_SMPREG") && id >= 0 && id < d->count) {  // every registration (diagnosis)
         const NvnSamplerDesc *sd = &((NvnSamplerDesc *)d->entries)[id];
         LOG("[nvn] RegisterSampler %d <- object %llx wrap %u %u %u min %u lod %.1f..%.1f (lr %llx, thread %d)\n", id, (unsigned long long)A(2), sd->wrap[0], sd->wrap[1],
             sd->wrap[2], sd->min_filter, sd->lod_min, sd->lod_max, (unsigned long long)c->x[30], (int)gettid());
     }
     static int watch_id = -2;  // LARECOMP_WATCH_SMPID=<dec id>
-    if (watch_id == -2) watch_id = getenv("LARECOMP_WATCH_SMPID") ? atoi(getenv("LARECOMP_WATCH_SMPID")) : -1;
+    if (watch_id == -2) watch_id = diag_getenv("LARECOMP_WATCH_SMPID") ? atoi(diag_getenv("LARECOMP_WATCH_SMPID")) : -1;
     if (id == watch_id && id < d->count) {
         const NvnSamplerDesc *sd = &((NvnSamplerDesc *)d->entries)[id];
         LOG("[watch] sampler %d <- lod %.2f..%.2f min %u (lr %llx)\n", id, sd->lod_min, sd->lod_max, sd->min_filter, (unsigned long long)c->x[30]);
@@ -1417,7 +1418,7 @@ NVN(nvnSamplerPoolRegisterSamplerBuilder) {
         NvnSamplerDesc from = sampler_desc_from_builder(AP(2));  // (the packed builder state)
         register_sampler(&((NvnSamplerDesc *)d->entries)[id], &from);
     }
-    if (getenv("LARECOMP_LOG_SMPREG") && id >= 0 && id < d->count)
+    if (diag_getenv("LARECOMP_LOG_SMPREG") && id >= 0 && id < d->count)
         LOG("[nvn] RegisterSamplerBuilder %d (lr %llx)\n", id, (unsigned long long)c->x[30]);
 }
 

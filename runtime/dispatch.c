@@ -1,4 +1,5 @@
 // Guest address -> recompiled function lookup, and host (HLE) function registry.
+#include "diagnostics_build.h"
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
@@ -324,7 +325,7 @@ void rt_fatal_trace(void) {
     if (c) {
         // LARECOMP_CRASH_MEM=<reg>:<hex offset>:<hex length>[:<hex deref offset>]: guest memory at x<reg> + offset at
         // the crash (with a 4th field: first follow the pointer at x<reg> + that offset), 8 bytes a line
-        const char *e = getenv("LARECOMP_CRASH_MEM");
+        const char *e = diag_getenv("LARECOMP_CRASH_MEM");
         unsigned reg = 0;
         unsigned long long off = 0, len = 0, deref = ~0ull;
         if (e && sscanf(e, "%u:%llx:%llx:%llx", &reg, &off, &len, &deref) >= 3 && reg < 31) {
@@ -369,9 +370,10 @@ static void *watch_thread(void *a) {
 }
 void rt_range_watch(uint64_t lo, uint64_t hi);
 void watch_arm(void) {
+    if (!TOTK_DIAGNOSTICS) return;
     {   // LARECOMP_WATCH_READ_ADDR=<hex>:<len>[+<hex>:<len>...]: read watch over those guest bytes (rt_range_watch)
         static int done;
-        const char *e = getenv("LARECOMP_WATCH_READ_ADDR");
+        const char *e = diag_getenv("LARECOMP_WATCH_READ_ADDR");
         if (e && !done) {
             done = 1;
             while (*e) {
@@ -386,7 +388,7 @@ void watch_arm(void) {
     static int env_done;
     if (!env_done) {  // LARECOMP_WATCH=<offset in main, hex>[,<length>]: watch those bytes of main's image
         env_done = 1;
-        const char *e = getenv("LARECOMP_WATCH");
+        const char *e = diag_getenv("LARECOMP_WATCH");
         if (e && !g_watch_lo) {
             char *q;
             uint64_t off = strtoull(e, &q, 16), len = *q == ',' ? strtoull(q + 1, NULL, 0) : 8;
@@ -413,11 +415,11 @@ static void *range_watch_thread(void *a) {
     plat_thread_unpin();
 #endif
     (void)a;  // (armed late: the loader fills it through the kernel too, which would just fail - LARECOMP_WATCH_READ_DELAY s)
-    const char *d = getenv("LARECOMP_WATCH_READ_DELAY");
+    const char *d = diag_getenv("LARECOMP_WATCH_READ_DELAY");
     sleep(d ? atoi(d) : 60);
     LOG("[rwatch] armed (%d ranges)\n", rw_n);
     rw_armed = 1;
-    const char *pe = getenv("LARECOMP_WATCH_READ_PERIOD_US");  // (a busy page reopens at once: re-close it more often)
+    const char *pe = diag_getenv("LARECOMP_WATCH_READ_PERIOD_US");  // (a busy page reopens at once: re-close it more often)
     long period = pe ? atol(pe) : 50000;
     for (;;) {
         for (int i = 0; i < rw_n; i++) plat_protect(rw_lo[i], rw_hi[i] - rw_lo[i], PLAT_PROT_NONE);
@@ -426,6 +428,7 @@ static void *range_watch_thread(void *a) {
     return NULL;
 }
 void rt_range_watch(uint64_t lo, uint64_t hi) {
+    if (!TOTK_DIAGNOSTICS) return;
     uint64_t elo = lo, ehi = hi;
     lo &= ~(uint64_t)(PLAT_PAGE - 1), hi = (hi + PLAT_PAGE - 1) & ~(uint64_t)(PLAT_PAGE - 1);
     for (int i = 0; i < rw_n; i++)
@@ -467,7 +470,7 @@ static bool range_watch_fault(uint64_t fa, uint64_t pc) {
 #endif
         LOG("[rwatch] range %d +%#llx %s by %s (host pc %llx, library +%llx) thread t%llu hit %d\n", r, (unsigned long long)(fa - rw_exact_lo[r]),
             g_fault_wnr == 1 ? "write" : g_fault_wnr == 0 ? "read" : "access", nm, (unsigned long long)pc, (unsigned long long)lib, (unsigned long long)(kt ? kt->id : 0), nhits);
-        if (getenv("LARECOMP_WATCH_REGS")) {  // (the guest registers at that access: x0-x30)
+        if (diag_getenv("LARECOMP_WATCH_REGS")) {  // (the guest registers at that access: x0-x30)
             Cpu *gc = kernel_current_cpu();
             for (int i = 0; gc && i < 31; i += 4)
                 LOG("[rwatch]   x%-2d %016llx x%-2d %016llx x%-2d %016llx x%-2d %016llx\n", i, (unsigned long long)gc->x[i], i + 1,
@@ -480,6 +483,7 @@ static bool range_watch_fault(uint64_t fa, uint64_t pc) {
 }
 
 bool rt_fault_watch(uint64_t fa, uint64_t pc) {
+    if (!TOTK_DIAGNOSTICS) return false;
     if (range_watch_fault(fa, pc)) return true;
     if (!watch_page || fa < watch_page || fa >= watch_page + PLAT_PAGE) return false;
     if (fa >= g_watch_lo && fa < g_watch_hi) {

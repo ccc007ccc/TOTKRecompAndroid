@@ -1,4 +1,5 @@
 // audren:u (audio renderer) and audout:u.
+#include "../diagnostics_build.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -642,7 +643,7 @@ static void effect_update(Effect *fx, const uint8_t *e) {
     if (e[1] || !fx->rv.ready) {
         memcpy(fx->rv.raw, d, sizeof fx->rv.raw);
         memcpy(&fx->rv.p, d, sizeof fx->rv.p);
-        if (getenv("LARECOMP_AUDIO_LOG"))
+        if (diag_getenv("LARECOMP_AUDIO_LOG"))
             LOG("[audren] reverb init: ch %u rate %d early %d/%d pre %d late %d/%d decay %d hf %d col %d gains %d/%d/%d\n",
                 ch, fx->rv.p.sample_rate, fx->rv.p.early_mode, fx->rv.p.early_gain, fx->rv.p.pre_delay,
                 fx->rv.p.late_mode, fx->rv.p.late_gain, fx->rv.p.decay_time, fx->rv.p.hf_decay_ratio,
@@ -681,7 +682,7 @@ static void apply_effects(Renderer *r, int32_t mix_id, Mix *m) {
             static int no_reverb = -1;
             if (no_reverb < 0) no_reverb = getenv("LARECOMP_NO_REVERB") ? 1 : 0;
             static int toggle = -1;
-            if (toggle < 0) toggle = getenv("LARECOMP_REVERB_TOGGLE") ? atoi(getenv("LARECOMP_REVERB_TOGGLE")) : 0;
+            if (toggle < 0) toggle = diag_getenv("LARECOMP_REVERB_TOGGLE") ? atoi(diag_getenv("LARECOMP_REVERB_TOGGLE")) : 0;
             int off = no_reverb || !g_settings.reverb || (toggle && (r->elapsed_frames / toggle) % 2);
             if (fx->enabled && !off) reverb_process(&fx->rv, in, out, N);
             else
@@ -694,7 +695,7 @@ static int hf_log = -1;
 static double hf[1024];
 
 static void render_frame(Renderer *r, float *stereo) {
-    if (hf_log < 0) hf_log = getenv("LARECOMP_AUDIO_HF") ? 1 : 0;
+    if (hf_log < 0) hf_log = diag_getenv("LARECOMP_AUDIO_HF") ? 1 : 0;
     uint32_t N = r->sample_count;
     for (uint32_t m = 0; m < r->nmix; m++)
         if (r->mix[m].buf) memset(r->mix[m].buf, 0, sizeof(float) * MIXBUF_MAX * N);
@@ -753,7 +754,7 @@ static void render_frame(Renderer *r, float *stereo) {
                 hf[vi] += e;
             }
             static int solo = -2;
-            if (solo == -2) solo = getenv("LARECOMP_AUDIO_SOLO") ? atoi(getenv("LARECOMP_AUDIO_SOLO")) : -1;
+            if (solo == -2) solo = diag_getenv("LARECOMP_AUDIO_SOLO") ? atoi(diag_getenv("LARECOMP_AUDIO_SOLO")) : -1;
             if (solo >= 0 && (int)vi != solo) continue;
             float volume_delta = (v->volume - v->prev_volume) / N;
             for (uint32_t i = 0; i < N; i++) smp[i] *= v->prev_volume + volume_delta * i;
@@ -828,7 +829,7 @@ static void render_frame(Renderer *r, float *stereo) {
         if (d->touched) memcpy(d->previous, d->volume, sizeof d->previous);
         d->touched = 0;
     }
-    if (getenv("LARECOMP_AUDIO_STATS") && r->elapsed_frames % 200 == 199) {
+    if (diag_getenv("LARECOMP_AUDIO_STATS") && r->elapsed_frames % 200 == 199) {
         LOG("[audren] routing f%llu: direct %llu split %llu unconnected %llu channel-frames, decoded %llu samples, split rms %.1f\n",
             (unsigned long long)r->elapsed_frames, (unsigned long long)r->direct_channels,
             (unsigned long long)r->split_channels, (unsigned long long)r->unrouted_channels,
@@ -975,7 +976,7 @@ static void update_voice(Renderer *r, Voice *v, const uint8_t *p, uint8_t *out, 
         }
         if (b[0] && !v->bq_on[f]) {
             v->bq_reset[f] = 1;
-            if (getenv("LARECOMP_AUDIO_LOG"))
+            if (diag_getenv("LARECOMP_AUDIO_LOG"))
                 LOG("[audren] v%ld biquad%d on: %.4f %.4f %.4f / %.4f %.4f\n", (long)(v - r->voice), f, k[0], k[1], k[2], k[3], k[4]);
         }
         v->bq_on[f] = b[0];
@@ -1005,7 +1006,7 @@ static void update_voice(Renderer *r, Voice *v, const uint8_t *p, uint8_t *out, 
             }
             wb->sent = 0;
             static int dumped;
-            if (getenv("LARECOMP_AUDIO_DUMPWB") && !dumped && wb->size > 0x100000 && v->fmt == 6 && v->ds_addr) {
+            if (diag_getenv("LARECOMP_AUDIO_DUMPWB") && !dumped && wb->size > 0x100000 && v->fmt == 6 && v->ds_addr) {
                 dumped = 1;
                 FILE *f = fopen("build/wb_dump.bin", "wb");
                 if (f) {
@@ -1022,7 +1023,7 @@ static void update_voice(Renderer *r, Voice *v, const uint8_t *p, uint8_t *out, 
                 }
             }
             static int vlog = -1;
-            if (vlog < 0) vlog = getenv("LARECOMP_AUDIO_LOG") ? 1 : 0;
+            if (vlog < 0) vlog = diag_getenv("LARECOMP_AUDIO_LOG") ? 1 : 0;
             if (vlog)
                 LOG("[audren] f%llu v%ld wb%d fmt %u rate %u ch %u pitch %.3f vol %.3f mix %d splitter %u res %u addr %llx size %llx "
                     "[%u,%u) loop %u/%d eos %u ctx %llx ds %llx\n", (unsigned long long)r->elapsed_frames,
@@ -1062,7 +1063,7 @@ static void update_mix(Renderer *r, const uint8_t *p, int id) {
     if (!m->buf) m->buf = calloc(MIXBUF_MAX * r->sample_count, sizeof(float));
     // (once per mix; LARECOMP_AUDIO_LOG: every update - before REV7 every update carries every mix)
     static uint64_t logged;
-    if (id < 64 && (logged >> id & 1) && !ENV("LARECOMP_AUDIO_LOG")) return;
+    if (id < 64 && (logged >> id & 1) && !DIAG_ENV("LARECOMP_AUDIO_LOG")) return;
     if (id < 64) logged |= 1ull << id;
     LOG("[audren] mix %d used %u vol %.3f bufs %u dest %d:", id, m->used, m->volume, m->bufs, m->dest);
     for (int i = 0; i < MIXBUF_MAX * MIXBUF_MAX; i++)
@@ -1085,7 +1086,7 @@ static void request_update(Renderer *r, IpcReq *req, IpcResp *resp) {
     {
         static int dump_n = -1;
         static long count;
-        if (dump_n < 0) dump_n = getenv("LARECOMP_AUDIO_DUMP") ? 1 : 0;
+        if (dump_n < 0) dump_n = diag_getenv("LARECOMP_AUDIO_DUMP") ? 1 : 0;
         count++;
         if (dump_n && (count == 1 || count == 300 || count == 2000 || count == 6000 || count == 12000)) {
             char path[64];
@@ -1151,7 +1152,7 @@ static void request_update(Renderer *r, IpcReq *req, IpcResp *resp) {
             LOG("[audren] effect type %u used%s: slot %u mix %d enabled %u\n", e[0], effect_supported(e[0]) ? "" : " (not implemented)", i,
                 *(const int32_t *)(e + 4), e[2]);
         }
-        if (e[0] && getenv("LARECOMP_AUDIO_LOG")) {
+        if (e[0] && diag_getenv("LARECOMP_AUDIO_LOG")) {
             static uint8_t last[16][0xC0];
             if (i < 16 && memcmp(last[i], e, 0xC0)) {
                 memcpy(last[i], e, 0xC0);
@@ -1213,8 +1214,8 @@ static void request_update(Renderer *r, IpcReq *req, IpcResp *resp) {
 }
 
 static void renderer_open_output(Renderer *r) {
-    if (getenv("LARECOMP_AUDIO_WAV")) {
-        r->wav = fopen(getenv("LARECOMP_AUDIO_WAV"), "wb");
+    if (diag_getenv("LARECOMP_AUDIO_WAV")) {
+        r->wav = fopen(diag_getenv("LARECOMP_AUDIO_WAV"), "wb");
         if (r->wav) wav_header(r->wav, 0);
     }
     if (getenv("LARECOMP_NO_AUDIO") && strcmp(getenv("LARECOMP_NO_AUDIO"), "0")) return;
@@ -1513,7 +1514,7 @@ static void *audout_thread(void *arg) {
 
 static void audio_out(Service *s, IpcReq *req, IpcResp *resp) {
     AudioOut *a = s->state;
-    if (getenv("LARECOMP_AUDIO_LOG") && req->cmd != 3 && req->cmd != 7) {
+    if (diag_getenv("LARECOMP_AUDIO_LOG") && req->cmd != 3 && req->cmd != 7) {
         IpcBuf *ob = out_buf(req, 0);
         LOG("[audout] cmd %u out %llx/%llx\n", req->cmd, ob ? (unsigned long long)ob->addr : 0ull,
             ob ? (unsigned long long)ob->size : 0ull);
@@ -1526,7 +1527,7 @@ static void audio_out(Service *s, IpcReq *req, IpcResp *resp) {
         IpcBuf *b = in_buf(req, 0);
         uint64_t tag = IN(uint64_t, 0);
         uint64_t size = b && b->size >= 0x28 ? ((uint64_t *)(uintptr_t)b->addr)[3] : 0;
-        if (getenv("LARECOMP_AUDIO_LOG") && b)
+        if (diag_getenv("LARECOMP_AUDIO_LOG") && b)
             LOG("[audout] append tag %llx buf %llx size %llx: %llx %llx %llx %llx %llx\n", (unsigned long long)tag,
                 (unsigned long long)b->addr, (unsigned long long)b->size, ((unsigned long long *)(uintptr_t)b->addr)[0],
                 ((unsigned long long *)(uintptr_t)b->addr)[1], ((unsigned long long *)(uintptr_t)b->addr)[2],
@@ -1552,7 +1553,7 @@ static void audio_out(Service *s, IpcReq *req, IpcResp *resp) {
         if (n > max) n = max;
         if (b && b->size) memset((void *)(uintptr_t)b->addr, 0, b->size);  // SDK reads entry 0 even when n == 0
         for (int i = 0; i < n; i++) ((uint64_t *)(uintptr_t)b->addr)[i] = a->released[i];
-        if (getenv("LARECOMP_AUDIO_LOG") && n) LOG("[audout] released %d (first %llx)\n", n, (unsigned long long)a->released[0]);
+        if (diag_getenv("LARECOMP_AUDIO_LOG") && n) LOG("[audout] released %d (first %llx)\n", n, (unsigned long long)a->released[0]);
         memmove(a->released, a->released + n, (a->released_n - n) * 8);
         a->released_n -= n;
         pthread_mutex_unlock(&a->lock);
@@ -1588,7 +1589,7 @@ SERVICE("audout:u", audout_u) {
         a->state = 1;
         pthread_mutex_init(&a->lock, NULL);
         a->event = kernel_create_event_pair(&a->ev_w, &a->ev_r);
-        if (getenv("LARECOMP_AUDOUT_WAV")) a->wav = fopen(getenv("LARECOMP_AUDOUT_WAV"), "wb");
+        if (diag_getenv("LARECOMP_AUDOUT_WAV")) a->wav = fopen(diag_getenv("LARECOMP_AUDOUT_WAV"), "wb");
         if (!(getenv("LARECOMP_NO_AUDIO") && strcmp(getenv("LARECOMP_NO_AUDIO"), "0")) && SDL_InitSubSystem(SDL_INIT_AUDIO)) {
             SDL_AudioSpec spec = {SDL_AUDIO_S16, (int)a->channels, (int)a->rate};
             a->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);

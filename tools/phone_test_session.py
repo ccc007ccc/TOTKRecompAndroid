@@ -21,7 +21,7 @@ PACKAGE='com.totkrecomp.android'
 def main():
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--serial',required=True)
-    ap.add_argument('--package',default=PACKAGE+'.perftest',choices=[PACKAGE,PACKAGE+'.debug',PACKAGE+'.perftest'])
+    ap.add_argument('--package',default=PACKAGE+'.perftest',choices=[PACKAGE+'.debug',PACKAGE+'.perftest'])
     ap.add_argument('--session',help='Private runtime control directory')
     ap.add_argument('--output',type=Path,default=Path('.work/totk-port/performance-phone/session'))
     commands=ap.add_subparsers(dest='command',required=True)
@@ -40,12 +40,14 @@ def main():
         launch.add_argument('--async-buffer-copy',choices=['on','off'],help='Enable/disable deferred GPU buffer copies for a controlled comparison')
         launch.add_argument('--texture-reuse',choices=['on','off'],help='Skip identical registrations in sync mode (default on); with --texture-updates sync, off restores their old queue drain')
         launch.add_argument('--texture-updates',choices=['queued','sync'],help='Queue captured texture descriptor updates, or wait for the renderer before publishing them')
-        launch.add_argument('--game-dynres',choices=['on','off'],default='on',help='Game dynamic resolution (default on); off holds its highest resolution for controlled workload comparisons')
+        launch.add_argument('--game-dynres',choices=['default','on','off'],default='default',help='Use the normal runtime policy unless explicitly overridden')
+        launch.add_argument('--texture-scaling',choices=['settings','native'],default='settings',help='Respect the selected resolution (default); native bypasses all target scaling for diagnostic comparisons only')
         launch.add_argument('--render-split-us',type=int,help='Long-pass submission interval, 0..20000 microseconds; 0 disables splitting')
     benchmark.add_argument('--save-slot',type=int,choices=range(6),default=0)
     benchmark.add_argument('--seconds',type=float,default=15,help='Measurement duration after loading, 1..60 seconds (default 15)')
     benchmark.add_argument('--timeout',type=float,help='Overall startup and measurement timeout')
     benchmark.add_argument('--profile',action='store_true',help='Record CPU/GPU timing and constant-buffer copy counters during the automatic run')
+    benchmark.add_argument('--camera-turn',action='store_true',help='Turn right at half stick during the measured interval; use a runtime supporting this route')
     benchmark.add_argument('--gpu-profile-frame',type=int,help='Diagnostic only: timestamp each GPU pass in this absolute frame; enables profiling')
     benchmark.add_argument('--timing-trace',action='store_true',help='Diagnostic only: trace GPU counters and queue waits; enables profiling')
     benchmark.add_argument('--compare-ubo',type=int,metavar='FRAMES',help='Diagnostic only: alternate copied/shared uniform buffers every 30..600 frames; enables profiling')
@@ -154,9 +156,12 @@ def main():
         private('mkdir','-p',remote)
         if not timed:private('rm','-f',remote+'/command',remote+'/status.json')
         env=['LARECOMP_NO_LAUNCHER=1','LARECOMP_TEST_SESSION='+remote,
-             'LARECOMP_LOG_FILE='+remote+'/runtime.log','LARECOMP_DISABLE_GPU_CAPTURE=1',
-             'LARECOMP_NO_SCALE=1','LARECOMP_GAME_DYNRES='+('1' if args.game_dynres=='on' else '0')]
-        if timed:env+=['LARECOMP_TEST_DURATION_SECONDS='+str(args.seconds),'LARECOMP_FPS=60','LARECOMP_NO_USER_INPUT=1']
+             'LARECOMP_LOG_FILE='+remote+'/runtime.log','LARECOMP_DISABLE_GPU_CAPTURE=1']
+        if args.texture_scaling=='native':env+=['LARECOMP_NO_SCALE=1']
+        if args.game_dynres!='default':env+=['LARECOMP_GAME_DYNRES='+('1' if args.game_dynres=='on' else '0')]
+        if timed:
+            env+=['LARECOMP_TEST_DURATION_SECONDS='+str(args.seconds),'LARECOMP_FPS=60','LARECOMP_NO_USER_INPUT=1']
+            if args.camera_turn:env+=['LARECOMP_TEST_CAMERA_TURN=1']
         else:env+=['LARECOMP_VK_PROF=1','LARECOMP_LOG_CBUF_BYTES=1','LARECOMP_TEXTURE_TRACE=1','LARECOMP_LOG_FRAMEPACE=120']
         if timed and args.profile:
             env+=['LARECOMP_VK_PROF=1','LARECOMP_LOG_CBUF_BYTES=1','LARECOMP_LOG_PACE=1']
@@ -207,6 +212,8 @@ def main():
                   'texture_reuse':args.texture_reuse,
                   'texture_updates':args.texture_updates,
                   'game_dynres':args.game_dynres,
+                  'texture_scaling':args.texture_scaling,
+                  'camera_turn':args.camera_turn if timed else False,
                   'render_split_us':args.render_split_us,
                   'profiling':args.profile if timed else True,
                   'gpu_profile_frame':args.gpu_profile_frame if timed else None,
@@ -236,6 +243,8 @@ def main():
                         continue
                     if not state.get('timed') or state.get('target_fps')!=60 or state.get('save_slot')!=args.save_slot:
                         raise RuntimeError('Installed APK does not support this timed 60 FPS benchmark; rebuild/install it')
+                    if args.camera_turn and state.get('camera_turn') is not True:
+                        raise RuntimeError('Installed APK does not support the requested camera turn; rebuild/install it')
                     if state.get('error'):raise RuntimeError(state['error'])
                     if state['phase']=='ended':
                         if not state.get('ready') or state.get('sample_id')!=1:

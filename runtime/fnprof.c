@@ -9,9 +9,12 @@
 #include "hle.h"
 #include "platform.h"
 #include "rt.h"
+#include "diagnostics_build.h"
 
 volatile int g_fnprof;
+uint64_t g_bt_first_x0;
 
+#if TOTK_DIAGNOSTICS
 #define NSLOT (1 << 18)
 static struct { _Atomic uint64_t addr; _Atomic uint64_t count; } slots[NSLOT];
 
@@ -21,12 +24,11 @@ static uint64_t bt_addrs[256];
 static int bt_n = -1;
 static _Atomic uint8_t bt_done[256];
 
-uint64_t g_bt_first_x0;
 
 static void bt_check(uint64_t a, uint64_t lr, uint64_t x0) {
     if (bt_n < 0) {
         bt_n = 0;
-        const char *e = getenv("LARECOMP_FNPROF_BT");
+        const char *e = diag_getenv("LARECOMP_FNPROF_BT");
         for (const char *p = e; p && *p && bt_n < 256;) {
             bt_addrs[bt_n++] = strtoull(p, (char **)&p, 16);
             while (*p == ',' || *p == ' ') p++;
@@ -45,11 +47,13 @@ static void bt_check(uint64_t a, uint64_t lr, uint64_t x0) {
         }
 }
 
+#endif
 // (g_fnprof bit 0: profiling; bit 1: a thread of core 0 was preempted - runtime/kernel.c)
 void fnprof_hit(uint64_t a, uint64_t lr, uint64_t x0) {
 #ifdef __ANDROID__
     if (g_fnprof & 2) { extern void kernel_preempt_point(void); kernel_preempt_point(); }
 #endif
+#if TOTK_DIAGNOSTICS
     if (!(g_fnprof & 1)) return;
     if (bt_n) bt_check(a, lr, x0);
     uint32_t h = (uint32_t)((a >> 2) * 0x9E3779B1u) & (NSLOT - 1);
@@ -60,8 +64,10 @@ void fnprof_hit(uint64_t a, uint64_t lr, uint64_t x0) {
             return;
         }
     }
+#endif
 }
 
+#if TOTK_DIAGNOSTICS
 static int cmp(const void *x, const void *y) {
     uint64_t a = ((const uint64_t *)x)[1], b = ((const uint64_t *)y)[1];
     return a < b ? 1 : a > b ? -1 : 0;
@@ -73,7 +79,7 @@ static void fnprof_write(long from, long to) {
     for (int i = 0; i < NSLOT; i++)
         if (slots[i].addr) { rows[n][0] = slots[i].addr; rows[n][1] = slots[i].count; n++; }
     qsort(rows, n, sizeof rows[0], cmp);
-    const char *out = getenv("LARECOMP_FNPROF_OUT") ? getenv("LARECOMP_FNPROF_OUT") : "build/fnprof.txt";  // (parallel runs)
+    const char *out = diag_getenv("LARECOMP_FNPROF_OUT") ? diag_getenv("LARECOMP_FNPROF_OUT") : "build/fnprof.txt";  // (parallel runs)
     char tmp[1100];
     snprintf(tmp, sizeof tmp, "%s.tmp", out);  // (then renamed: a session stopped mid-write keeps the last whole file)
     FILE *f = fopen(tmp, "w");
@@ -93,11 +99,11 @@ void fnprof_frame(uint64_t frame) {
     static long from = -2, to, every;
     if (from == -2) {
         from = -1;
-        const char *e = getenv("LARECOMP_FNPROF");
+        const char *e = diag_getenv("LARECOMP_FNPROF");
         if (e && sscanf(e, "%ld:%ld", &from, &to) != 2) from = -1;
         // LARECOMP_FNPROF_EVERY=<frames>: also rewrite the file that often while counting - a long play session
         // (the hot functions list, tools/hot_functions.py) has its counts on disk whenever it stops
-        e = getenv("LARECOMP_FNPROF_EVERY");
+        e = diag_getenv("LARECOMP_FNPROF_EVERY");
         every = e ? atol(e) : 0;
     }
     if (from < 0) return;
@@ -111,6 +117,9 @@ void fnprof_frame(uint64_t frame) {
 
 // LARECOMP_FNPROF=0:<to>: profile from process start (threads the game starts before the first frame)
 __attribute__((constructor)) static void fnprof_early(void) {
-    const char *e = getenv("LARECOMP_FNPROF");
+    const char *e = diag_getenv("LARECOMP_FNPROF");
     if (e && e[0] == '0' && e[1] == ':') __atomic_fetch_or(&g_fnprof, 1, __ATOMIC_SEQ_CST);
 }
+#else
+void fnprof_frame(uint64_t frame) { (void)frame; }
+#endif

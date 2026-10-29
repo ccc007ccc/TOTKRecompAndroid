@@ -3,6 +3,7 @@
 // Both go through the player's bindings (runtime/hle/bindings.c, defaults there: keyboard WASD left stick, arrows
 // d-pad, K/J/L/I = A/B/X/Y, Q/E = L/R, 1/3 = ZL/ZR, Enter / Backspace = Plus / Minus, numpad 8/4/5/6 right stick;
 // controller by position, Switch A = east).
+#include "../diagnostics_build.h"
 #include <SDL3/SDL.h>
 #include <ctype.h>
 #include <math.h>
@@ -69,7 +70,7 @@ static void recompute_pad(void) {
     {   // LARECOMP_LOG_PAD=1 (debugging a controller): the host buttons (SDL_GamepadButton bits) and what they become
         static int log_pad = -1;
         static uint32_t last_host;
-        if (log_pad < 0) log_pad = getenv("LARECOMP_LOG_PAD") != NULL;
+        if (log_pad < 0) log_pad = diag_getenv("LARECOMP_LOG_PAD") != NULL;
         if (log_pad && host != last_host) LOG("[input] pad host %#x -> switch %#llx\n", host, (unsigned long long)b);
         last_host = host;
     }
@@ -85,7 +86,7 @@ static void recompute_pad(void) {
     {   // LARECOMP_LOG_PAD=1: the left stick too, when it moves by more than ~1/8
         static int log_axes = -1;
         static int32_t llx, lly;
-        if (log_axes < 0) log_axes = getenv("LARECOMP_LOG_PAD") != NULL;
+        if (log_axes < 0) log_axes = diag_getenv("LARECOMP_LOG_PAD") != NULL;
         if (log_axes && (abs(pad_lx - llx) > 4096 || abs(pad_ly - lly) > 4096)) {
             LOG("[input] pad left stick %d %d\n", (int)pad_lx, (int)pad_ly);
             llx = pad_lx, lly = pad_ly;
@@ -118,8 +119,8 @@ static bool test_event(const SDL_Event *e) {
 bool input_user_blocked(const SDL_Event *e) {
     static int on = -1;
     if (on < 0) {
-        const char *v = getenv("LARECOMP_NO_USER_INPUT");
-        on = v ? atoi(v) != 0 : (getenv("LARECOMP_INPUT") || getenv("LARECOMP_HOST_INPUT") || getenv("LARECOMP_BIND_TEST"));
+        const char *v = diag_getenv("LARECOMP_NO_USER_INPUT");
+        on = v ? atoi(v) != 0 : (diag_getenv("LARECOMP_INPUT") || diag_getenv("LARECOMP_HOST_INPUT") || diag_getenv("LARECOMP_BIND_TEST"));
         if (on) LOG("[input] scripted run: keyboard, mouse and controllers ignored\n");
     }
     if (!on) return false;
@@ -153,7 +154,7 @@ static void note_family(void) {
 int input_pad_family(void) {
     static int env = -2;
     if (env == -2) {
-        const char *e = getenv("LARECOMP_PAD_TYPE");
+        const char *e = diag_getenv("LARECOMP_PAD_TYPE");
         env = !e ? -1 : !strcmp(e, "xbox") ? 1 : !strcmp(e, "playstation") || !strcmp(e, "ps") ? 2 : 0;
     }
     return env >= 0 ? env : pad_family;
@@ -193,7 +194,7 @@ void input_handle_event(const SDL_Event *e) {
         motion_event(e);
         break;
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP:
-        if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode == SDL_SCANCODE_F9 && !e->key.repeat) g_debug_frame_request = 1;
+        if (TOTK_DIAGNOSTICS && e->type == SDL_EVENT_KEY_DOWN && e->key.scancode == SDL_SCANCODE_F9 && !e->key.repeat) g_debug_frame_request = 1;
         if (e->key.scancode < SDL_SCANCODE_COUNT) keys_down[e->key.scancode] = e->type == SDL_EVENT_KEY_DOWN;
         recompute_keyboard();
         break;
@@ -287,7 +288,7 @@ static void test_push(uint64_t frame, unsigned long start, unsigned long len, co
 static void host_test_frame(uint64_t frame) {
     static const char *hspec, *bspec;
     static int init;
-    if (!init) { init = 1; hspec = getenv("LARECOMP_HOST_INPUT"); bspec = getenv("LARECOMP_BIND_TEST"); host_test = hspec; }
+    if (!init) { init = 1; hspec = diag_getenv("LARECOMP_HOST_INPUT"); bspec = diag_getenv("LARECOMP_BIND_TEST"); host_test = hspec; }
     char buf[2048];
     if (hspec) {
         uint8_t keys[SDL_SCANCODE_COUNT] = {0};
@@ -356,7 +357,7 @@ volatile int g_inject_plus;  // frames to hold Plus for the game (movie.c: A/B s
 RT_ON_RESET(input_reboot_reset) { g_pad_obj = 0; g_inject_plus = 0; }  // (reboot: the controller object was guest memory)
 void input_frame(uint64_t frame) {
     session_buttons=test_session_buttons(frame);
-    if (g_pad_obj && getenv("LARECOMP_DUMP_PAD") && frame % 600 == 0) {
+    if (g_pad_obj && diag_getenv("LARECOMP_DUMP_PAD") && frame % 600 == 0) {
         const uint8_t *m = (const uint8_t *)(uintptr_t)(g_pad_obj - 0x98);
         LOG("[pad] mgr %llx 4e0=%u 4e4=%u 4e8=%u 548=%#x 54c..=%02x %02x %02x 56c=%02x\n", g_pad_obj - 0x98,
             *(uint32_t *)(m + 0x4e0), *(uint32_t *)(m + 0x4e4), *(uint32_t *)(m + 0x4e8), *(uint32_t *)(m + 0x548),
@@ -372,7 +373,7 @@ void input_frame(uint64_t frame) {
     extern void watch_arm(void);
     watch_arm();
     host_test_frame(frame);
-    const char *spec = getenv("LARECOMP_INPUT");
+    const char *spec = diag_getenv("LARECOMP_INPUT");
     if (!spec) return;
     static const char *const names[] = {"A", "B", "X", "Y", "LSTICK", "RSTICK", "L", "R", "ZL", "ZR", "PLUS",
                                         "MINUS", "LEFT", "UP", "RIGHT", "DOWN"};
@@ -440,9 +441,9 @@ static void fill_state(Cpu *c) {
     if (id != 0) return;  // docked: only player 1 (FullKey); Handheld stays disconnected
     extern uint64_t g_watch_lo, g_watch_hi;
     if (id == 0 && !g_pad_obj) g_pad_obj = c->x[1] - 8;
-    if (id == 0 && !g_watch_lo && getenv("LARECOMP_WATCH_PAD")) {
+    if (id == 0 && !g_watch_lo && diag_getenv("LARECOMP_WATCH_PAD")) {
         unsigned lo = 0x98 + 0x10, hi = 0x98 + 0x48;  // offsets from the controller manager
-        sscanf(getenv("LARECOMP_WATCH_PAD"), "%x,%x", &lo, &hi);
+        sscanf(diag_getenv("LARECOMP_WATCH_PAD"), "%x,%x", &lo, &hi);
         g_watch_lo = c->x[1] - 8 - 0x98 + lo;
         g_watch_hi = c->x[1] - 8 - 0x98 + hi;
         LOG("[input] watching controller object %llx\n", c->x[1] - 8);
@@ -456,7 +457,7 @@ static void fill_state(Cpu *c) {
         if (renderer_present_count() < until) b |= 1ull << BTN_PLUS;
     }
     int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx + TOUCH_LX) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly + TOUCH_LY) + script_ly);
-    int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx + TOUCH_RX) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry + TOUCH_RY) + script_ry);
+    int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx + TOUCH_RX + test_session_camera_x()) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry + TOUCH_RY) + script_ry);
     // stick directions also appear as buttons (bits 16-23)
     if (lx < -16000) b |= 1ull << 16;
     if (ly > 16000) b |= 1ull << 17;
@@ -468,7 +469,7 @@ static void fill_state(Cpu *c) {
     if (ry < -16000) b |= 1ull << 23;
     *(uint64_t *)(s + 8) = b;
     static uint64_t last_b;
-    if (b != last_b && getenv("LARECOMP_INPUT")) LOG("[input] id %#x buttons %#llx (sampling %lld, lr %llx)\n", id, (unsigned long long)b, (long long)sampling, c->x[30]);
+    if (b != last_b && diag_getenv("LARECOMP_INPUT")) LOG("[input] id %#x buttons %#llx (sampling %lld, lr %llx)\n", id, (unsigned long long)b, (long long)sampling, c->x[30]);
     last_b = b;
     *(int32_t *)(s + 16) = lx;
     *(int32_t *)(s + 20) = ly;

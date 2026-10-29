@@ -28,7 +28,7 @@ def status():
     ended = s['polls'] >= 3 and mode != 'timeout'
     return {'pid':4242,'phase':'ended' if ended else 'sampling' if s['polls']>=2 else 'loading',
         'ready':s['polls']>=2,'sample_id':1 if ended else 0,'save_slot':s['slot'],'target_fps':60,
-        'timed':mode!='legacy','requested_seconds':s['seconds'],'error':''}
+        'timed':mode!='legacy','camera_turn':s.get('camera_turn',False) and mode!='old-camera','requested_seconds':s['seconds'],'error':''}
 def result():
     return {'pid':4242,'frames':int(s['seconds']*60),'fps':60,'mean_ms':1000/60,'p95_ms':1000/60,
         'target_fps':60,'mode':'timed-benchmark','elapsed_seconds':s['seconds'],'requested_seconds':s['seconds']}
@@ -51,6 +51,7 @@ elif c[:2] == ['am','force-stop']:
 elif c[:2] == ['am','start']:
     assert c[3] == package+'/com.botwrecompandroid.BOTWRecompAndroidActivity'
     env=dict(v.split('=',1) for v in c[-1].split(','));s['seconds']=float(env['LARECOMP_TEST_DURATION_SECONDS'])
+    s['camera_turn']=env.get('LARECOMP_TEST_CAMERA_TURN')=='1'
     s['slot']=int(env['LARECOMP_TEST_SAVE_SLOT']);s['running']=True;s['polls']=0
 elif c[0] == 'pidof':
     if s['running']: print('4242')
@@ -153,6 +154,30 @@ class PhoneBenchmarkTests(unittest.TestCase):
         self.assertIn('LARECOMP_SETTINGS='+manifest['settings_copy'],manifest['env'])
         self.assertIn('LARECOMP_SHADER_WARM=1',manifest['env'])
         self.assertIn('LARECOMP_PIPELINE_WARM=0',manifest['env'])
+        self.assertEqual(manifest['texture_scaling'],'settings')
+        self.assertEqual(manifest['game_dynres'],'default')
+        self.assertFalse(any(e.startswith(('LARECOMP_NO_SCALE=','LARECOMP_GAME_DYNRES=')) for e in manifest['env']))
+
+    def test_native_resolution_comparison_is_explicit(self):
+        proc=self.run_cli('success','--texture-scaling','native','--game-dynres','on')
+        self.assertEqual(proc.returncode,0,proc.stderr)
+        manifest=json.loads(next((self.path/'reports').glob('benchmark-*/launch.json')).read_text())
+        self.assertEqual(manifest['texture_scaling'],'native')
+        self.assertIn('LARECOMP_NO_SCALE=1',manifest['env'])
+        self.assertIn('LARECOMP_GAME_DYNRES=1',manifest['env'])
+
+    def test_camera_turn_is_explicit_and_keeps_resolution_settings(self):
+        proc=self.run_cli('success','--camera-turn')
+        self.assertEqual(proc.returncode,0,proc.stderr)
+        manifest=json.loads(next((self.path/'reports').glob('benchmark-*/launch.json')).read_text())
+        self.assertTrue(manifest['camera_turn'])
+        self.assertIn('LARECOMP_TEST_CAMERA_TURN=1',manifest['env'])
+        self.assertNotIn('LARECOMP_NO_SCALE=1',manifest['env'])
+
+    def test_runtime_without_camera_route_is_refused(self):
+        proc=self.run_cli('old-camera','--camera-turn')
+        self.assertNotEqual(proc.returncode,0)
+        self.assertIn('does not support the requested camera turn',proc.stderr)
 
     def test_profiling_remains_a_single_automatic_run(self):
         proc=self.run_cli('success','--profile')

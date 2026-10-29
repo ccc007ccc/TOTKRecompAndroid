@@ -1,5 +1,6 @@
 // CPU-only timing and hook regression. Generated instructions are checked separately by test_totk_framepace.py.
 #define __ANDROID__ 1
+#define TOTK_DIAGNOSTICS 1 // fixture exercises the explicit test-session FPS override
 #include <assert.h>
 #include "../runtime/hle/framepace.c"
 

@@ -10,6 +10,7 @@
 //   11 SendInputBufferForDecode(int, int off, int size, int64 time, uint32 flags),
 //   12 AcquireOutputBufferIndex(int*, int64*, uint32*, int*), 13 GetOutputBuffer(int, Buffer*),
 //   15 ReleaseOutputBufferIndex(int), 18 GetOutputBufferFormat(int, MediaData*).
+#include "../diagnostics_build.h"
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/time.h>
@@ -581,7 +582,7 @@ static void movie_stats(void) {
 #ifdef __ANDROID__
     // (LARECOMP_LOG_MOVIE=1 only: the title movie loops, and these lines pushed everything else out of logcat's buffer)
     static int on = -1;
-    if (on < 0) on = getenv("LARECOMP_LOG_MOVIE") != NULL;
+    if (on < 0) on = diag_getenv("LARECOMP_LOG_MOVIE") != NULL;
     if (!on) return;
 #endif
     static uint64_t last;
@@ -779,7 +780,7 @@ static void dec_get_output_buffer(Cpu *c) {
             memcpy(dst, d->out_mem[i], n);
         }
         static int nlog;
-        if (getenv("LARECOMP_LOG_MOVIE") && nlog++ < 4) {
+        if (diag_getenv("LARECOMP_LOG_MOVIE") && nlog++ < 4) {
             LOG("[movie] frame into the game's buffer %llx (capacity %llu, offset %d, size %d): %u bytes, stride %d\n",
                 (unsigned long long)b->base, (unsigned long long)b->capacity, b->offset, b->size, n, d->stride);
             extern void nvn_log_textures_over(uint64_t lo, uint64_t hi);
@@ -859,7 +860,7 @@ HLE_FUNC("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11Dec
         vt = g_dec_vt = make_vtable(f, 19, "Decoder");
     }
     uint64_t *self = (uint64_t *)(uintptr_t)c->x[0];
-    if (getenv("LARECOMP_LOG_MOVIE"))  // (BOTW 1.8.2's player: format 4, mode 1)
+    if (diag_getenv("LARECOMP_LOG_MOVIE"))  // (BOTW 1.8.2's player: format 4, mode 1)
         LOG("[movie] decoder type %u, output format %u, mode %u\n", (unsigned)c->x[1], (unsigned)c->x[2], (unsigned)c->x[3]);
     Decoder *d = calloc(1, sizeof *d);
     movie_track(1, d, true);

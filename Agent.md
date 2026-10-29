@@ -76,7 +76,13 @@ source android/dev_env.sh
 ## 4. Debug、Release 与编译档位
 
 **variant 决定应用包装/调试属性；profile 决定原生代码优化和游戏库身份；`--perftest` 决定独立测试包。**
-三者不是按开发任务隔离源码的开关。着色器和内存路径都会编入 APK，功能默认值另见第 7 节。
+普通 Release 必须设置原生 `TOTK_DIAGNOSTICS=0` 和 Java `BuildConfig.DIAGNOSTICS=false`；
+Debug 与独立测试包设置为 1 / true。诊断开关与 O1/O3 档位分开，不能靠 `NDEBUG`、签名或图标判断。
+普通 Release 不打包 RenderDoc，不编入抓帧/测试会话后端，关闭 F8/F9/F10 抓帧入口、脚本输入、内存探针和详细 profiling，
+也不接受 Intent 的 `env` 测试参数。诊断环境读取使用 `diagnostics_build.h` 的 helper；新增探针必须受同一构建策略控制。
+保留正常触控/按键绑定、FPS 显示、故障报告、着色器准备及渲染优化。特别是 `fnprof_hit` 的调度抢占位仍属正式功能。
+普通包保留 Android `profileable android:shell="true"` 的外部 CPU 采样能力；没有自动采样，且不因此开启内置诊断或 debuggable。
+功能默认值另见第 7 节。
 
 | 用途 | 推荐参数 | 原生运行时、hooks、编译插件 | 生成游戏单元 |
 | --- | --- | --- | --- |
@@ -190,6 +196,7 @@ TOTK_STAGE=.work/totk-port/packages/debug-dev
 | --- | --- |
 | 输入/生成器 | `"$PYTHON" tools/test_totk.py`、`"$PYTHON" tools/test_romfs_build.py`、`"$PYTHON" tools/test_exclusive_pair.py`、`"$PYTHON" tools/test_local_branches.py` |
 | APK/库身份、端侧参数 | `"$PYTHON" tools/test_android_packages.py`；`"$PYTHON" tools/test_gamebuild_flags.py`；实际构建相关 variant/profile |
+| 诊断构建隔离 | `"$PYTHON" tools/check_android_diagnostics.py <实际 APK> --expect off\|on`；Release 的 off 和 Debug/测试包的 on 都须验收；编译运行 `tools/test_release_diagnostics.c` 验证调度抢占未被裁掉 |
 | 着色器缓存/编译 | `bash tools/test_shader_runtime.sh`；`bash tools/test_shader_cache_compat.sh`；`bash tools/test_shader_dictionaries.sh` |
 | 驱动常量 | `"$PYTHON" tools/test_shader_driver_constants.py`（点尺寸上限、阶段隔离、存储表和派发尺寸） |
 | 整数着色器语义 | `"$PYTHON" tools/test_shader_int32.py --out .work/totk-port/shader-int32-tests`（含 IADD3 移位/半字选择） |
@@ -239,6 +246,8 @@ TOTK_STAGE=.work/totk-port/packages/release-snapdragon-8elite-perftest
 
 每次报告保留：源码提交及脏树范围、APK/库 SHA-256、profile/GAMELIB_ID、设备/驱动、设置/开关、
 存档场景、冷热缓存、温度、电源状态、有效区间及退出原因。
+常规测试必须尊重分辨率设置，禁止暗中传 `LARECOMP_NO_SCALE=1`。`--texture-scaling native` 仅用于明确标注的原始尺寸对照。
+静止短测不代表正常游玩；转视角问题至少另跑 `--camera-turn` 并记录首次/重复路线，不能用平均 FPS 掩盖长帧。
 分别报告构建、合成测试、真实 GPU 数值、手机启动、画面/路线验收；不能互相代替。
 CPU 渲染墙钟含等待，GPU 时间可能与它重叠；复制字节占比不是耗时占比；60 档不是实测 60 FPS。
 超时、身份不匹配、被另一个任务停止或装包的运行不计为通过。
@@ -269,8 +278,10 @@ CPU 渲染墙钟含等待，GPU 时间可能与它重叠；复制字节占比不
 `--async-buffer-copy on|off` 可分别覆盖。本轮同步对照须同时指定 `--texture-updates sync --async-buffer-copy off`；
 若还要恢复重复注册的旧排空行为，再加 `--texture-reuse off`，该开关不改变队列模式。
 保留新纹理预留引用、CPU 读写保护、快照及不支持映射的正确回退，不能只启用 GPU 复制而删除它的同步。
-`--game-dynres off` 只用于固定最高游戏分辨率的独立对照，
-常规测试仍默认 `on`；不同负载、诊断模式和开关的结果分别记录，见 [第四轮性能记录](docs/PERFORMANCE-DESCRIPTORS-20261029.md)。
+`--game-dynres default` 不覆盖普通启动策略；当前运行时默认冻结游戏 GPU 计数器驱动的分辨率变化，
+与菜单的内部 Dynamic 分辨率是两条不同路径。`on|off` 仅用于明确的对照。
+2026-10-29 发现旧控制器强制 `NO_SCALE=1` 且 `GAME_DYNRES=1`，绕过玩家分辨率并与普通启动不同。
+旧结果只能说明原始尺寸负载下的相对表现，不能当作 2× 或正常游玩帧率，见 [诊断与性能口径修正](docs/RELEASE-DIAGNOSTICS-20261029.md)。
 
 运行时编译关闭后使用严格完整准备门禁；部分预热清单不能满足该门禁。
 后台顺序是最近使用状态、当前版本 257 个计算输入的默认状态、共享清单；不恢复旧百万级全变体任务。

@@ -1,4 +1,5 @@
 // fsp-srv: RomFS as a raw storage image, save data and SD card backed by host directories.
+#include "../diagnostics_build.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -401,7 +402,7 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
             static const char *last;
             if (path && path != last) {
                 last = path;
-                if (getenv("LARECOMP_LOG_FILES")) LOG("[fs] read %s\n", path);
+                if (diag_getenv("LARECOMP_LOG_FILES")) LOG("[fs] read %s\n", path);
             }
         }
         static uint64_t reads, bytes;

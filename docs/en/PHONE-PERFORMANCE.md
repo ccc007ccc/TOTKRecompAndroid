@@ -1,5 +1,11 @@
 # Phone performance sessions
 
+The benchmark now respects the selected resolution (`--texture-scaling settings`) and normal runtime dynamic-resolution policy
+(`--game-dynres default`). Earlier runs forced `LARECOMP_NO_SCALE=1` and `LARECOMP_GAME_DYNRES=1`; their FPS numbers
+do not represent normal 2× gameplay. Use `--texture-scaling native` only for an explicitly labelled unscaled comparison.
+`benchmark --camera-turn` turns the camera right at half stick only during measurement; an older APK without this route is refused.
+Report first and repeated routes separately, including long frames and compilation waits.
+
 Use `benchmark` for routine measurements: automatically load an isolated save, measure continuously with a **60 FPS target**, then close the game. The default measurement lasts 15 seconds after loading. It requires no pause, screenshot or step-by-step confirmation. The older paused, fixed-frame-count session remains available for explicit diagnostics.
 
 Direct loading is verified on OnePlus 13 / Adreno 830: TotK 1.4.3 slot_00 loads the sky-island cliff without button input. Historical cached startup times were about 45–49 seconds for O0, 30–38 seconds for O1 and 31 seconds for full O3/8 Elite. These are loading times, not FPS gains.

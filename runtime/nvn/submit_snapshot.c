@@ -2,6 +2,7 @@
 // Payloads are immutable until their request finishes. GPU writes invalidate overlapping captures from that point,
 // and a later capture is rejected at replay if an older GPU write was not retired before the capture began.
 #ifdef __ANDROID__
+#include "../diagnostics_build.h"
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -166,7 +167,7 @@ SubmitSnapshot *submit_snapshot_capture(const void *list, size_t bytes, uint64_t
     atomic_fetch_add_explicit(&copied, s->size, memory_order_relaxed);
     uint64_t count = atomic_fetch_add_explicit(&captures, 1, memory_order_relaxed) + 1;
     static int log = -1;  // producer lock covers initialization
-    if (log < 0) log = getenv("LARECOMP_LOG_SUBMIT_SNAPSHOT") != NULL;
+    if (log < 0) log = diag_getenv("LARECOMP_LOG_SUBMIT_SNAPSHOT") != NULL;
     if (log && count % 120 == 0)
         LOG("[submit-snapshot] captures %llu, bytes %llu, sync fallbacks %llu, dropped ranges %llu\n",
             (unsigned long long)count, (unsigned long long)atomic_load(&copied),

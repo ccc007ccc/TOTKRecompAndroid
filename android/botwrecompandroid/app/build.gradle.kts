@@ -34,6 +34,7 @@ val dialogTestJni = layout.buildDirectory.dir("generated/dialog-test-jni")
 val releaseKey: File = File(System.getProperty("user.home"), ".totkrecompandroid/keystore.properties")
 
 android {
+    buildFeatures { buildConfig = true }
     namespace = "com.botwrecompandroid"
     compileSdk = 36
     ndkVersion = "30.0.16248370"
@@ -107,17 +108,19 @@ android {
 
     buildTypes {
         getByName("debug") {
+            buildConfigField("boolean", "DIAGNOSTICS", "true")
             applicationIdSuffix = if (performanceTest) "" else ".debug"
             versionNameSuffix = "-debug"
             resValue("string", "app_name", if (performanceTest) "TOTK Performance Test" else "TOTKRecompAndroid Debug")
             resValue("string", "application_package", if (performanceTest) "com.totkrecomp.android.perftest" else "com.totkrecomp.android.debug")
             externalNativeBuild {
                 cmake {
-                    arguments += listOf("-DTOTK_BUILD_PROFILE=$debugProfile", "-DTOTK_LTO_JOBS=$ltoJobs")
+                    arguments += listOf("-DTOTK_BUILD_PROFILE=$debugProfile", "-DTOTK_LTO_JOBS=$ltoJobs", "-DTOTK_DIAGNOSTICS=ON")
                 }
             }
         }
         getByName("release") {
+            buildConfigField("boolean", "DIAGNOSTICS", performanceTest.toString())
             // Private ADB test sessions need run-as; native profile flags still select O3/ThinLTO.
             isDebuggable = performanceTest
             isMinifyEnabled = false
@@ -127,7 +130,7 @@ android {
             externalNativeBuild {
                 cmake {
                     arguments += listOf("-DTOTK_BUILD_PROFILE=$releaseProfile", "-DTOTK_LTO_JOBS=$ltoJobs",
-                                        "-DCMAKE_BUILD_TYPE=Release")
+                                        "-DCMAKE_BUILD_TYPE=Release", "-DTOTK_DIAGNOSTICS=${if (performanceTest) "ON" else "OFF"}")
                 }
             }
         }
@@ -137,6 +140,10 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+}
+
+androidComponents.onVariants(androidComponents.selector().withBuildType("release")) { variant ->
+    if (!performanceTest) variant.packaging.jniLibs.excludes.add("**/libtotk_renderdoc.so")
 }
 
 // A test-only JNI caller triggers the real native error path. The helper is

@@ -1,4 +1,5 @@
 // Production NVN registration with a pending reader observing the old entry.
+#define TOTK_DIAGNOSTICS 1 // fixture supplies diagnostic hooks explicitly
 #include <assert.h>
 #include "../runtime/nvn/objects.c"
 

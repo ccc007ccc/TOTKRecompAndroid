@@ -1,3 +1,4 @@
+#include "../../diagnostics_build.h"
 // Opt-in attachment snapshots at the end of passes into one guest texture.
 // Unlike sampled depth inputs, these include the depth image used by hardware
 // depth testing. Readback waits change timing; no work is added unless requested.
@@ -15,7 +16,7 @@ static void debug_target_begin(const VkRenderingAttachmentInfo *colors) {
     static uint32_t number;
     target_debug.color = target_debug.depth = NULL;
     if (!initialized) {
-        const char *s = getenv("LARECOMP_DUMP_TARGET");
+        const char *s = diag_getenv("LARECOMP_DUMP_TARGET");
         wanted = s ? strtoull(s, NULL, 16) : 0;
         initialized = true;
     }

@@ -11,6 +11,7 @@
 // are defined in the GLSL prelude, and the structurally different constructs (texture lookups, global memory,
 // half-float packing, subgroup shuffles, barriers, discard, declarations and entry point) are emitted per dialect.
 // The MSL text is byte-identical to the MSL-only translator (tools/test_translate.c checks it).
+#include "../../diagnostics_build.h"
 #if defined(_WIN32)
 #include <malloc.h>  // alloca
 #endif
@@ -3330,7 +3331,7 @@ ShaderInfo *maxwell_translate_bounded(const uint8_t *blob, size_t max_size, size
     // translate
     bool dbg = maxwell_dbg_code && blob == maxwell_dbg_code && stage == STAGE_FRAGMENT;
     static int annotate = -1;
-    if (annotate < 0) annotate = getenv("LARECOMP_SAVE_MSL") != NULL;
+    if (annotate < 0) annotate = diag_getenv("LARECOMP_SAVE_MSL") != NULL;
     c->branchy = any_branch;
     if (c->glsl && any_branch && maxwell_static_stacks) {
         c->flow_to = malloc(end * sizeof *c->flow_to + 4);

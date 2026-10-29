@@ -7,6 +7,7 @@
 // forward, z up (yuzu's mapping of SDL controllers): angular velocity (x, -z, y) in turns per second, acceleration
 // -(x, -z, y) in G (at rest it points down). The direction matrix follows the angular velocity, kept level by the
 // acceleration (a Mahony filter): its world is z up, with the yaw the sensor started at.
+#include "../diagnostics_build.h"
 #include <SDL3/SDL.h>
 #include <math.h>
 #include <pthread.h>
@@ -158,7 +159,7 @@ void motion_pad_opened(SDL_Gamepad *g) {
 }
 
 void motion_event(const SDL_Event *e) {
-    if (!g_settings.motion || ENV("LARECOMP_MOTION_TEST")) return;
+    if (!g_settings.motion || DIAG_ENV("LARECOMP_MOTION_TEST")) return;
     if (e->type == SDL_EVENT_SENSOR_UPDATE) {
         if (SDL_GetTicksNS() < pad_until_ns) return;
         float s[3];
@@ -174,7 +175,7 @@ void motion_event(const SDL_Event *e) {
 // LARECOMP_MOTION_TEST=gx,gy,gz[:from:frames]: that angular velocity (turns per second, the Switch's frame) in place
 // of the sensors', from that presented frame on for that many (all along without them)
 static bool test_motion(float w[3]) {
-    const char *e = ENV("LARECOMP_MOTION_TEST");
+    const char *e = DIAG_ENV("LARECOMP_MOTION_TEST");
     if (!e) return false;
     float g[3] = {0};
     unsigned long from = 0, len = ~0ul;
@@ -228,12 +229,12 @@ HLE_FUNC("_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_19
     int n = (int)(int32_t)c->x[1];
     uint64_t now = SDL_GetTicksNS();
     pthread_mutex_lock(&m_lock);
-    if (!g_settings.motion || ENV("LARECOMP_MOTION_TEST") || now - m_live_ns > 250000000) own_sample(now);
+    if (!g_settings.motion || DIAG_ENV("LARECOMP_MOTION_TEST") || now - m_live_ns > 250000000) own_sample(now);
     if (n > ring_n) n = ring_n;
     if (n < 0) n = 0;
     for (int i = 0; i < n; i++) out[i] = ring[(ring_head - i + RING) % RING];
     static uint64_t logged;
-    if (ENV("LARECOMP_LOG_MOTION") && now - logged > 1000000000) {  // (once a second: the newest sample)
+    if (DIAG_ENV("LARECOMP_LOG_MOTION") && now - logged > 1000000000) {  // (once a second: the newest sample)
         logged = now;
         const SixAxisState *s = &ring[ring_head];
         LOG("[motion] #%lld dt %.1f ms accel %.2f %.2f %.2f gyro %.3f %.3f %.3f angle %.3f %.3f %.3f y-axis %.2f %.2f %.2f "

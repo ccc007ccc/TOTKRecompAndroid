@@ -14,6 +14,7 @@
 // matrix alone, trees came out dark with black specks). 1.8.2's one 16:9 constant (main 0x158afc8, read at
 // 0x7001381c34: rt_aspect_bits) is some other cameras', not the main one's.
 // The title and loading screens keep 16:9 with bars (widescreen_present_crop).
+#include "../diagnostics_build.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -61,7 +62,7 @@ static bool in_world(void) {
 // A camera aspect at a patched site: 16:9 times the output's shape (g_wide: 1 unless widened)
 uint32_t rt_aspect_bits(int site) {
     float a = 16.0f / 9.0f * (widescreen_allowed() ? g_wide : 1.0f);
-    if (ENV("LARECOMP_LOG_ASPECT")) LOG("[widescreen] camera aspect %.4f (site %d)\n", a, site);
+    if (DIAG_ENV("LARECOMP_LOG_ASPECT")) LOG("[widescreen] camera aspect %.4f (site %d)\n", a, site);
     uint32_t u;
     memcpy(&u, &a, 4);
     return u;
@@ -77,7 +78,7 @@ void rt_persp_update(uint64_t proj) {
     g_hooked = true;
     if (!proj || !widescreen_allowed() || g_shape <= 1.001f) return;
     float *aspect = (float *)(uintptr_t)(proj + 0xB0);
-    if (ENV("LARECOMP_LOG_ASPECT")) {  // (each projection rebuilt, once: near, far, fovy, aspect)
+    if (DIAG_ENV("LARECOMP_LOG_ASPECT")) {  // (each projection rebuilt, once: near, far, fovy, aspect)
         static uint64_t seen[256];
         static int nseen;
         bool found = false;
@@ -94,7 +95,7 @@ void rt_persp_update(uint64_t proj) {
     *aspect = 16.0f / 9.0f * g_shape;
     g_widened = true;
     static int n;
-    if (ENV("LARECOMP_LOG_ASPECT") && n++ < 20) LOG("[widescreen] projection %llx: aspect %.4f\n", (unsigned long long)proj, *aspect);
+    if (DIAG_ENV("LARECOMP_LOG_ASPECT") && n++ < 20) LOG("[widescreen] projection %llx: aspect %.4f\n", (unsigned long long)proj, *aspect);
 }
 
 // sead::PerspectiveProjection::getAspect (1.8.2: 0x7000da13d8, tools/patches.py): the widened aspect for a 16:9 one,

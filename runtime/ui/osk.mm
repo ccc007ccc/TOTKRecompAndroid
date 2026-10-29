@@ -3,6 +3,7 @@
 //
 // One keyboard at a time (only one ImGui UI runs: start screen or in-game overlay, one thread each). It is a modal
 // popup at the root of the UI, so the menu behind sees "a popup is open" and B / Esc / L / R don't act on it.
+#include "../diagnostics_build.h"
 #include <ctype.h>
 #include <math.h>
 #include <stdio.h>
@@ -42,7 +43,7 @@ bool ui_input_text_cancelled(void) { return s_cancelled_now; }
 // (test) LARECOMP_FIELD_FOCUS=<label>:<n>[:edit]: the n-th time field <label> is drawn it gets the nav cursor (a
 // controller's A - LARECOMP_HOST_INPUT sdlpad:east - then opens the keyboard); :edit starts typing in it instead.
 static int test_focus(const char *label) {
-    static const char *spec = getenv("LARECOMP_FIELD_FOCUS");
+    static const char *spec = diag_getenv("LARECOMP_FIELD_FOCUS");
     static int count;
     if (!spec) return 0;
     const char *c = strchr(spec, ':');
@@ -65,7 +66,7 @@ bool ui_input_text(const char *label, char *buf, size_t size, ImGuiInputTextFlag
     if (in_view_id == id && in_view > 0 && in_view--) ImGui::SetScrollHereY(0.5f);
     if (test) fprintf(stderr, "[osk] test: %s field %s\n", test == 2 ? "typing in" : "cursor on", label);
     static std::string last;  // (test runs: what the field holds, as it changes)
-    const char *tf = getenv("LARECOMP_FIELD_FOCUS");
+    const char *tf = diag_getenv("LARECOMP_FIELD_FOCUS");
     if (tf && !strncmp(tf, label, strlen(label)) && tf[strlen(label)] == ':' && last != buf) { last = buf; fprintf(stderr, "[osk] test: %s = \"%s\"%s\n", label, buf, g.ActiveId == id ? " (typing)" : ""); }
     s_cancelled_now = false;
     if (s.done && s.done_field == id && ImGui::GetFrameCount() - s.done_frame <= 1) {

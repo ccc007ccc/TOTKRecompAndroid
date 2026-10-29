@@ -8,6 +8,11 @@
 
 ## 常用检查
 
+普通 Release 的 `TOTK_DIAGNOSTICS=0`；本页抓帧、Intent `env`、自动输入、内存/着色器探针只适用于 Debug 或独立测试包。
+诊断代码不应依赖玩家手动关闭。实际 APK 可用 `tools/check_android_diagnostics.py <apk> --expect off|on` 核验，
+并在 dev 编译运行 `clang -O2 -D__ANDROID__ -DTOTK_DIAGNOSTICS=0 tools/test_release_diagnostics.c runtime/fnprof.c -o <测试输出>`，
+确认 Release 拒绝诊断环境且保留调度抢占。测试输出留在 `.work/`。
+
 ```bash
 "$PYTHON" tools/test_totk.py
 "$PYTHON" tools/test_romfs_build.py

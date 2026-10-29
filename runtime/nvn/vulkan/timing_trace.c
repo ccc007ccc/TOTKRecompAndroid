@@ -1,5 +1,6 @@
 // Opt-in CPU-side diagnostics using the GPU queries already issued for the game's counters.
 #ifdef __ANDROID__
+#include "../../diagnostics_build.h"
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -11,7 +12,7 @@ bool vk_timing_trace_on(void) {
     static _Atomic int enabled = -1;
     int on = atomic_load_explicit(&enabled, memory_order_relaxed);
     if (on < 0) {
-        const char *e = getenv("LARECOMP_TIMING_TRACE");
+        const char *e = diag_getenv("LARECOMP_TIMING_TRACE");
         on = e && atoi(e) != 0;
         atomic_store_explicit(&enabled, on, memory_order_relaxed);
     }

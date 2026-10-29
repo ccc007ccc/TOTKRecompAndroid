@@ -42,8 +42,14 @@ Release 测试包仍允许 `run-as`；不能因需要调试权限改用不匹配
 `--texture-updates queued|sync`（捕获后排队发布）。TotK 1.4.3 + Turnip/Adreno 8xx 默认排队发布并启用异步 buffer-copy，
 其他游戏/GPU/驱动保留同步默认值；本轮同步对照同时指定 `--texture-updates sync --async-buffer-copy off`。
 恢复相同注册仍排空的旧行为时再加 `--texture-reuse off`；这个开关不改变队列模式。这些开关不自动开启 profiling。
-`--game-dynres on|off` 默认 `on`；`off` 保持游戏最高分辨率，用于比较相同渲染负载，
-不与动态分辨率结果混算。三个开关均保存在 `launch.json`。
+`--game-dynres default|on|off` 默认 `default`，不覆盖正常运行时策略（当前默认冻结游戏计数器驱动的动态分辨率）。
+`--texture-scaling settings|native` 默认 `settings`，尊重玩家内部/输出分辨率；`native` 才显式传 `LARECOMP_NO_SCALE=1`，
+用于原始尺寸的诊断对照。两个开关均记录于 `launch.json`，不同负载不混算。
+旧脚本隐含关闭纹理缩放，2× 设置没有真正参与测量；历史 30 多帧不是 2× 游玩成绩，见 [口径修正](RELEASE-DIAGNOSTICS-20261029.md)。
+
+`benchmark --camera-turn` 在场景就绪后的计时区间，以半幅右摇杆连续向右转镜头；普通测试默认不转。
+运行时通过状态文件确认支持该路线，旧 APK 会被拒绝，不能静默测成原地等待。
+首次与重复转视角分别记录，结合长帧和编译等待；此路线仍不代表移动、战斗或全区域游玩。
 
 `--timing-trace` 还统计 `frame-limit`、`translation`、`drain`、`queue` 与纹理/采样器更新。
 `texture-drain` / `sampler-drain` 是 `drain` 的子类，不相加；`texture-queued` / `texture-unchanged`

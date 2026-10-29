@@ -1,5 +1,6 @@
 // Exercise actual FSP handlers and on-disk cache state; no game binaries needed.
 #define _GNU_SOURCE
+#define TOTK_DIAGNOSTICS 1 // fixture supplies the test-session file notification
 #include <assert.h>
 #include "../runtime/services/fs.c"
 

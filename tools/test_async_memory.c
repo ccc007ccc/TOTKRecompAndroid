@@ -1,6 +1,7 @@
 // Run the actual Android request queue on the host. Vulkan/guest execution are
 // doubles; verify CPU flush ordering, a 64-bit range, and render-thread reentry.
 #define VK_NO_PROTOTYPES
+#define TOTK_DIAGNOSTICS 1 // fixture supplies diagnostic hooks explicitly
 #include <assert.h>
 #include <stdarg.h>
 #include <sys/wait.h>

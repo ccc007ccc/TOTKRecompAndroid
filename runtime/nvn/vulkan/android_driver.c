@@ -10,6 +10,7 @@
 
 #include "vk.h"
 #include "renderdoc_bridge.h"
+#include "../../diagnostics_build.h"
 
 // Does this driver offer a Vulkan GPU at all? (Turnip v26.0.0 R8, built for the A7xx: none on an Adreno 830 - the app
 // stopped at "no Vulkan device" on every start, its settings out of reach.) 1.1 and up: below 1.3 device.c checks the
@@ -77,13 +78,15 @@ void vk_android_load(void) {
     if (!gipa) FATAL("the Vulkan driver has no vkGetInstanceProcAddr\n");
     // Full replay is opt-in at startup. Lightweight diagnostics need no layer
     // and leave normal gameplay free of RenderDoc resource tracking.
-    const char *full_capture=getenv("LARECOMP_FULL_GPU_CAPTURE");
-    if (full_capture && atoi(full_capture) && !getenv("LARECOMP_DISABLE_GPU_CAPTURE")) {
+#if TOTK_DIAGNOSTICS
+    const char *full_capture=diag_getenv("LARECOMP_FULL_GPU_CAPTURE");
+    if (full_capture && atoi(full_capture) && !diag_getenv("LARECOMP_DISABLE_GPU_CAPTURE")) {
         char library[1024], error[512];
         snprintf(library, sizeof library, "%s/libtotk_renderdoc.so", hooks ? hooks : "");
         PFN_vkGetInstanceProcAddr capture = rd_layer_load(gipa, library, error, sizeof error);
         if (capture) { gipa = capture; LOG("[capture] RenderDoc memory capture ready\n"); }
         else LOG("[capture] unavailable: %s\n", error);
     }
+#endif
     volkInitializeCustom(gipa);
 }

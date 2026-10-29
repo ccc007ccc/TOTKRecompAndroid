@@ -1,4 +1,5 @@
 // Delayed mock GPU: recorded copies become CPU visible only on completion.
+#define TOTK_DIAGNOSTICS 1 // fixture supplies diagnostic hooks explicitly
 #include <assert.h>
 #include <setjmp.h>
 #include <stdarg.h>

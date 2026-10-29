@@ -1,6 +1,7 @@
 // Command shadow pages are allocated once and never removed, including across game resets. Publish each
 // pointer with its page key: readers that acquire that key may use the immutable pointer without a mutex.
 #pragma once
+#include "../diagnostics_build.h"
 #include <stdatomic.h>
 
 enum { SHADOW_SLOTS = 1 << 16 };
@@ -16,7 +17,7 @@ static void shadow_configure(void) {
     const char *locked = getenv("LARECOMP_SHADOW_LOCKED");
     g_shadow_fast = !locked || atoi(locked) == 0;
 #ifdef __ANDROID__
-    const char *ab = getenv("LARECOMP_AB"), *colon = ab ? strchr(ab, ':') : NULL;
+    const char *ab = diag_getenv("LARECOMP_AB"), *colon = ab ? strchr(ab, ':') : NULL;
     long frames = ab ? atol(ab) : 0;
     if (frames > 0 && colon && !strcmp(colon + 1, "shadow")) g_shadow_ab = (uint64_t)frames;
 #endif

@@ -1,7 +1,9 @@
+#include "../../diagnostics_build.h"
 // LARECOMP_CAPTURE_ATTACHMENTS=1: capture render-target transitions in debug
 // frames, including every MRT slot and the selected mip/layer. Copies are
 // queued at the transition; CPU waiting and file I/O happen once at present.
 // This still changes GPU timing and is unsuitable for performance measurements.
+#if TOTK_DIAGNOSTICS
 #define CAPTURE_BYTES (512ull << 20)
 static struct {
     VkBuffer buffer;
@@ -18,7 +20,7 @@ static struct {
 
 static bool capture_enabled(void) {
     static int enabled = -1;
-    if (enabled < 0) enabled = getenv("LARECOMP_CAPTURE_ATTACHMENTS") != NULL;
+    if (enabled < 0) enabled = diag_getenv("LARECOMP_CAPTURE_ATTACHMENTS") != NULL;
     return enabled && g_debug_frame;
 }
 
@@ -171,3 +173,10 @@ void vk_capture_finish(NvnTexture *presented) {
     }
     memset(&frame_capture, 0, sizeof frame_capture);
 }
+#else
+static struct { bool dirty; } frame_capture;
+static bool capture_enabled(void) { return false; }
+static void diagnostic_targets(const RtState *rt) { (void)rt; }
+static void capture_targets(const RtState *rt) { (void)rt; }
+void vk_capture_finish(NvnTexture *presented) { (void)presented; }
+#endif

@@ -1,5 +1,6 @@
 // Whole-library preparation on the device. No capture/replay or desktop shader bundle.
 #include "shader_archive.hpp"
+#include "../../diagnostics_build.h"
 #include "shader_catalog.hpp"
 #include "shader_variant_plan.hpp"
 #include "shader_prepare_queue.hpp"
@@ -100,7 +101,7 @@ extern "C" bool vk_shader_prepare_game(const char *game, void (*progress)(double
     bool success = false;
     try {
         require(!id.empty(), "game data missing");
-        require(!getenv("LARECOMP_SHADER_SUBST") && !getenv("LARECOMP_DUMP_VERTEX_OUTPUT"), "disable shader substitution/instrumentation before preparation");
+        require(!diag_getenv("LARECOMP_SHADER_SUBST") && !diag_getenv("LARECOMP_DUMP_VERTEX_OUTPUT"), "disable shader substitution/instrumentation before preparation");
         if (progress) progress(0, "Checking all game shaders...");
         fprintf(log, "shader-build %s\ncache-version %u\nprofile %s\n", SHADER_BUILD_ID, SHADER_PREPARE_CACHE_VERSION, id.c_str()); fflush(log);
         shader_archive::Romfs rom((std::string(game) + "/romfs.bin").c_str());

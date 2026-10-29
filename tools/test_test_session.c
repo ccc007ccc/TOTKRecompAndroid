@@ -32,11 +32,13 @@ int main(int argc,char**argv){
  assert(test_session_enabled());
  if(timed) {
   assert(test_session_timed()&&test_session_target_fps()==60&&!test_session_should_exit());
+  assert(test_session_camera_x()==0);
   bool timeout=!strcmp(argv[2],"--timed-timeout"),stall=!strcmp(argv[2],"--timed-stall"),background=!strcmp(argv[2],"--timed-background");
   pthread_t timed_thread;
   if(stall) {
    for(unsigned i=1;i<=90;i++)test_session_frame(i,true,idle);
    wait_status("\"phase\":\"sampling\"");
+   assert(test_session_camera_x()==(getenv("LARECOMP_TEST_CAMERA_TURN")?16384:0));
    atomic_fetch_add(&time_offset,1001000000ull);test_session_poll();
   } else {
    if(timeout)atomic_store(&scene,false);
@@ -46,6 +48,7 @@ int main(int argc,char**argv){
   }
   wait_status("\"phase\":\"ended\"");
   assert(test_session_should_exit()&&atomic_load(&idles)==0);
+  assert(test_session_camera_x()==0);
   if(!stall){atomic_store(&stop,true);pthread_join(timed_thread,NULL);}
   if(timeout){wait_status("Startup exceeded");wait_status("\"ready\":false");}
   else {

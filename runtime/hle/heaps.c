@@ -3,6 +3,7 @@
 // NULL and the game crashes further on (bushsanity: ~450 actors around Link -> null weak_ptr in f_70010d0f00).
 // These wrappers call the SDK's own implementation (loader_find_symbol), log heap creation (LARECOMP_LOG_HEAPS=1)
 // and every allocation that fails (once per caller), and can grow heaps (heap_scale) - a recomp has memory to spare.
+#include "../diagnostics_build.h"
 #include <pthread.h>
 #ifdef _WIN32
 #include <malloc.h>
@@ -92,7 +93,7 @@ HLE_FUNC("_ZN2nn4lmem14CreateUnitHeapEPvmmiiPNS0_6detail8HeapHeadE", heap_create
             if (!g_unit[i].mem) { g_unit[i].head = c->x[0] ? c->x[0] : head; g_unit[i].mem = mem; break; }
         pthread_mutex_unlock(&g_unit_lock);
     }
-    if (ENV("LARECOMP_LOG_HEAPS"))
+    if (DIAG_ENV("LARECOMP_LOG_HEAPS"))
         LOG("[heaps] unit heap %#llx bytes, unit %#llx (%llu units, x%d) from lr %llx -> %llx\n", (unsigned long long)size,
             (unsigned long long)unit, unit ? (unsigned long long)(size / unit) : 0ull, mem ? k : 1, (unsigned long long)lr,
             (unsigned long long)c->x[0]);
@@ -125,7 +126,7 @@ HLE_FUNC("_ZN2nn4lmem20AllocateFromUnitHeapEPNS0_6detail8HeapHeadE", heap_alloc_
 HLE_FUNC("_ZN2nn4lmem15CreateFrameHeapEPvmi", heap_create_frame) {
     uint64_t lr = c->x[30], size = c->x[1];
     CALL("_ZN2nn4lmem15CreateFrameHeapEPvmi");
-    if (ENV("LARECOMP_LOG_HEAPS"))
+    if (DIAG_ENV("LARECOMP_LOG_HEAPS"))
         LOG("[heaps] frame heap %#llx bytes from lr %llx\n", (unsigned long long)size, (unsigned long long)lr);
 }
 
@@ -139,14 +140,14 @@ HLE_FUNC("_ZN2nn4lmem21AllocateFromFrameHeapEPNS0_6detail8HeapHeadEmi", heap_all
 HLE_FUNC("_ZN2nn3mem17StandardAllocator10InitializeEPvm", heap_std_init) {
     uint64_t lr = c->x[30], size = c->x[2];
     CALL("_ZN2nn3mem17StandardAllocator10InitializeEPvm");
-    if (ENV("LARECOMP_LOG_HEAPS"))
+    if (DIAG_ENV("LARECOMP_LOG_HEAPS"))
         LOG("[heaps] standard allocator %#llx bytes from lr %llx\n", (unsigned long long)size, (unsigned long long)lr);
 }
 
 HLE_FUNC("_ZN2nn3mem17StandardAllocator10InitializeEPvmb", heap_std_init_b) {
     uint64_t lr = c->x[30], size = c->x[2];
     CALL("_ZN2nn3mem17StandardAllocator10InitializeEPvmb");
-    if (ENV("LARECOMP_LOG_HEAPS"))
+    if (DIAG_ENV("LARECOMP_LOG_HEAPS"))
         LOG("[heaps] standard allocator %#llx bytes (b) from lr %llx\n", (unsigned long long)size, (unsigned long long)lr);
 }
 

@@ -25,6 +25,9 @@ The default Debug/dev package is `.work/totk-port/packages/debug-dev/TOTKRecompA
 Debug uses `com.totkrecomp.android.debug`, a Debug label and a blue DBG icon badge. Release uses
 `com.totkrecomp.android` and the original icon. Historical Java/JNI directory names are retained.
 The APK contains the runtime, not game code.
+Ordinary Release disables native `TOTK_DIAGNOSTICS` and Java `BuildConfig.DIAGNOSTICS`;
+Debug and the independent test package enable both. Capture backends, RenderDoc, probes and scripted test entry points
+are excluded or disabled in ordinary Release. Rendering optimizations, shader preparation, normal input and the FPS display remain available.
 
 ### Build profiles
 
@@ -39,7 +42,8 @@ Release defaults to `performance`; selecting a performance profile alone selects
 model. Performance profiles retain `-fno-fast-math` to preserve guest floating-point behavior.
 Use `debug --profile dev` for everyday debugging and `release --profile performance` for a general Release.
 The 8 Elite profile is device-specific. Both use NDK Clang; host Clang builds desktop tools/tests.
-Variant, native profile, test package and runtime feature switches are separate choices.
+The native profile selects optimization independently of the diagnostics policy: ordinary Release disables diagnostics;
+Debug and the independent test package enable them. Normal rendering feature defaults are shared.
 
 ```bash
 bash android/build_totk.sh release --profile snapdragon-8elite

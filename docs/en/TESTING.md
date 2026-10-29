@@ -1,5 +1,9 @@
 # Testing and diagnostics
 
+Capture, scripted input, Intent `env` overrides and built-in probes require Debug or the independent performance-test package.
+Ordinary Release disables native `TOTK_DIAGNOSTICS`; verify actual APKs with `tools/check_android_diagnostics.py <apk> --expect off|on`.
+The Release regression `tools/test_release_diagnostics.c` checks that diagnostic environment variables stay inert while scheduler preemption still works.
+
 [简体中文](../TESTING.md) | English
 
 From the project root, enter `distrobox enter dev` and run `source android/dev_env.sh`.

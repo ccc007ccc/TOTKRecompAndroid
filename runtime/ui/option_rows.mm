@@ -1,5 +1,6 @@
 // Two-pane settings pages (see option_rows.h) in the Sheikah look (design/sheikah-settings-v1): rows on the left - the
 // label, the value on the right - and the selected row's description on the right, under its name.
+#include "../diagnostics_build.h"
 #include <ctype.h>
 #include <math.h>
 #include <stdio.h>
@@ -413,7 +414,7 @@ bool opt_text(const char *label, char *buf, size_t cap, const char *hint, const 
 
 void opt_end(void) {
     ImGui::PopStyleVar();
-    if (const char *t = getenv("LARECOMP_OPT_SCROLL")) ImGui::SetScrollY(ImGui::GetScrollMaxY() * (float)atof(t));  // (test)
+    if (const char *t = diag_getenv("LARECOMP_OPT_SCROLL")) ImGui::SetScrollY(ImGui::GetScrollMaxY() * (float)atof(t));  // (test)
     ImGui::EndChild();
     if (!g_two_panes) { ImGui::PopID(); return; }
     // the description: the hovered row (mouse) wins, else the focused one (controller), else the one a finger picked,

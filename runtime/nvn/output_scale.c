@@ -11,6 +11,7 @@
 //   Dynamic        Match display, lowered in steps while the GPU can't hold the frame rate and raised again when it
 //                  can (each change reallocates the render targets: a short hitch, so it changes rarely, with hysteresis)
 // Test overrides: LARECOMP_SCALE=<f> (the scene's height = 900 x f), LARECOMP_WIDE_TEST=<f> (forced shape).
+#include "../diagnostics_build.h"
 #include <math.h>
 #include <stdlib.h>
 
@@ -78,7 +79,7 @@ void output_scale(double dw, double dh, bool reshape_allowed, double now, double
     double fit = fmin(dw / 1920.0, dh / 1080.0);
     static double forced = -1, wide_test = -1;
     if (forced < 0) forced = getenv("LARECOMP_SCALE") ? atof(getenv("LARECOMP_SCALE")) : 0;
-    if (wide_test < 0) wide_test = getenv("LARECOMP_WIDE_TEST") ? atof(getenv("LARECOMP_WIDE_TEST")) : 0;
+    if (wide_test < 0) wide_test = diag_getenv("LARECOMP_WIDE_TEST") ? atof(diag_getenv("LARECOMP_WIDE_TEST")) : 0;
     double shape = wide_test > 0 ? wide_test : (dw / dh) / (16.0 / 9.0);
     bool reshape = reshape_allowed && fabs(shape - 1.0) > 0.005;
     if (!reshape) shape = 1.0;

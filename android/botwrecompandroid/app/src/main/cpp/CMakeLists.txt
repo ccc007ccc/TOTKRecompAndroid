@@ -3,6 +3,7 @@
 # from the player's own game files, is loaded at run time (docs/las/ANDROID-PORT.md).
 cmake_minimum_required(VERSION 3.22)
 project(botwrecompandroid C CXX)
+option(TOTK_DIAGNOSTICS "Developer capture, probes and scripted test sessions" OFF)
 
 set(R ${CMAKE_CURRENT_SOURCE_DIR}/../../../../../..)   # the repository
 get_filename_component(R ${R} ABSOLUTE)
@@ -54,6 +55,11 @@ else()
 endif()
 file(GLOB VK_SRC CONFIGURE_DEPENDS ${R}/runtime/nvn/vulkan/*.c ${R}/runtime/nvn/vulkan/*.cpp)
 list(REMOVE_ITEM VK_SRC ${R}/runtime/nvn/vulkan/shader_compiler.c ${R}/runtime/nvn/vulkan/shader_interface.cpp)
+if(NOT TOTK_DIAGNOSTICS)
+    list(REMOVE_ITEM RT_SRC ${R}/runtime/test_session.c ${R}/runtime/test_boot.c)
+    list(REMOVE_ITEM VK_SRC ${R}/runtime/nvn/vulkan/flicker.c ${R}/runtime/nvn/vulkan/diagnostic.c
+        ${R}/runtime/nvn/vulkan/renderdoc_bridge.c ${R}/runtime/nvn/vulkan/timing_trace.c)
+endif()
 set(SHADER_ID_INPUT "")
 foreach(source runtime/nvn/maxwell/translate.c runtime/nvn/maxwell/shader.h runtime/nvn/maxwell/soft64.inc
         runtime/nvn/vulkan/shaders.c runtime/nvn/vulkan/shader_cache.h
@@ -128,6 +134,7 @@ target_include_directories(main PRIVATE ${R}/runtime ${R}/runtime/nvn ${IMGUI} $
                            ${DEPS}/volk ${BOTW_GEN_DIR} ${R}/third_party/smaa/Textures ${R}/android/common
                            ${R}/third_party/d2r-digest/include ${CMAKE_CURRENT_BINARY_DIR})
 target_compile_definitions(main PRIVATE
+    TOTK_DIAGNOSTICS=$<BOOL:${TOTK_DIAGNOSTICS}>
     SHADER_BUILD_ID="${SHADER_BUILD_ID}"
     VK_NO_PROTOTYPES VK_USE_PLATFORM_ANDROID_KHR IMGUI_IMPL_VULKAN_USE_VOLK   # Vulkan from the loaded driver (volk)
     VMA_STATIC_VULKAN_FUNCTIONS=0 VMA_DYNAMIC_VULKAN_FUNCTIONS=1)

@@ -1,3 +1,4 @@
+#include "diagnostics_build.h"
 #include "test_session.h"
 #include "platform.h"
 #include <dirent.h>
@@ -15,7 +16,7 @@ enum { LOADING, RUNNING, PAUSED, WARMUP, SAMPLING, DIAGNOSTIC, ENDED };
 static struct {
     pthread_mutex_t lock;
     pthread_cond_t wake;
-    bool enabled, auto_load, pause_when_ready, want_pause, gpu_request, shot_request, ready;
+    bool enabled, auto_load, pause_when_ready, want_pause, gpu_request, shot_request, ready, camera_turn;
     unsigned phase, ready_frames, warm_left, sample_count, sample_goal, sample_id, diagnostic_left;
     uint64_t frame, request, last_ns, button_until, buttons, started_ns, duration_ns, sample_started_ns;
     double intervals[6000];
@@ -75,11 +76,11 @@ static bool have_slot(const char *root, int slot) {
 }
 
 static void initialize(void) {
-    const char *root=getenv("LARECOMP_TEST_SESSION");
+    const char *root=diag_getenv("LARECOMP_TEST_SESSION");
     if(!root||!*root)return;
     if(strlen(root)>=sizeof ts.directory){fprintf(stderr,"[test-session] path too long\n");exit(1);}
     ts.enabled=true;ts.pause_when_ready=true;
-    const char *duration=getenv("LARECOMP_TEST_DURATION_SECONDS");
+    const char *duration=diag_getenv("LARECOMP_TEST_DURATION_SECONDS");
     if(duration) {
         char *end;double seconds=strtod(duration,&end);
         if(!*duration||*end||!isfinite(seconds)||seconds<1||seconds>60) {
@@ -90,8 +91,9 @@ static void initialize(void) {
         atomic_store_explicit(&target_fps,60,memory_order_relaxed);
     }
     ts.save_slot=-1;
-    const char *slot=getenv("LARECOMP_TEST_SAVE_SLOT");
-    const char *seed=getenv("LARECOMP_TEST_SAVE_SEED");
+    ts.camera_turn=diag_getenv("LARECOMP_TEST_CAMERA_TURN")!=NULL;
+    const char *slot=diag_getenv("LARECOMP_TEST_SAVE_SLOT");
+    const char *seed=diag_getenv("LARECOMP_TEST_SAVE_SEED");
     if(slot) {
         char *end;long value=strtol(slot,&end,10);
         if(!*slot||*end||value<0||value>5||!seed||!*seed) {
@@ -101,7 +103,7 @@ static void initialize(void) {
     }
     // Keep the normal title/list/confirmation flow: it initializes the game's
     // loading background. The save-load resource fixes the requested slot.
-    ts.auto_load=ts.save_slot>=0 || getenv("LARECOMP_TEST_AUTOLOAD")!=NULL;
+    ts.auto_load=ts.save_slot>=0 || diag_getenv("LARECOMP_TEST_AUTOLOAD")!=NULL;
     snprintf(ts.directory,sizeof ts.directory,"%s",root);
     if(mkdir(root,0755)&&access(root,W_OK)) {
         fprintf(stderr,"[test-session] directory is not writable: %s\n",root);exit(1);
@@ -127,9 +129,9 @@ const char *test_session_directory(void){return test_session_enabled()?ts.direct
 static void status(void) { // lock held; only transitions write to storage
     char path[1200],done[1200];snprintf(path,sizeof path,"%s/status.partial",ts.directory);
     snprintf(done,sizeof done,"%s/status.json",ts.directory);FILE *f=fopen(path,"w");if(!f)return;
-    fprintf(f,"{\"pid\":%d,\"phase\":\"%s\",\"frame\":%llu,\"request\":%llu,\"sample_id\":%u,\"sample_frames\":%u,\"ready\":%s,\"save_slot\":%d,\"target_fps\":%d,\"timed\":%s,\"requested_seconds\":%.6f,\"error\":\"%s\"}\n",
+    fprintf(f,"{\"pid\":%d,\"phase\":\"%s\",\"frame\":%llu,\"request\":%llu,\"sample_id\":%u,\"sample_frames\":%u,\"ready\":%s,\"save_slot\":%d,\"target_fps\":%d,\"timed\":%s,\"camera_turn\":%s,\"requested_seconds\":%.6f,\"error\":\"%s\"}\n",
         getpid(),phases[ts.phase],(unsigned long long)ts.frame,(unsigned long long)ts.request,ts.sample_id,ts.sample_count,
-        ts.ready?"true":"false",ts.save_slot,test_session_target_fps(),ts.duration_ns?"true":"false",ts.duration_ns/1e9,ts.error);
+        ts.ready?"true":"false",ts.save_slot,test_session_target_fps(),ts.duration_ns?"true":"false",ts.camera_turn?"true":"false",ts.duration_ns/1e9,ts.error);
     if(!fclose(f))rename(path,done);
 }
 static int compare(const void *a,const void *b){double x=*(const double*)a,y=*(const double*)b;return(x>y)-(x<y);}
@@ -219,6 +221,12 @@ uint64_t test_session_buttons(uint64_t frame) {
     pthread_mutex_lock(&ts.lock);uint64_t b=frame<ts.button_until?ts.buttons:0;
     if(ts.auto_load&&ts.phase==LOADING&&frame>=120&&frame%60<2)b|=1;
     pthread_mutex_unlock(&ts.lock);return b;
+}
+int32_t test_session_camera_x(void) {
+    if(!test_session_enabled())return 0;
+    pthread_mutex_lock(&ts.lock);
+    int32_t x=ts.camera_turn&&ts.ready&&ts.duration_ns&&ts.phase==SAMPLING?16384:0;
+    pthread_mutex_unlock(&ts.lock);return x;
 }
 void test_session_file_read(const char* path) {
     if(!path || !test_session_enabled() || ts.save_slot<0)return;

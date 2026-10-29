@@ -7,6 +7,7 @@
 // setjmp still runs and fills the guest jmp_buf. The guest longjmp is HLE (runtime/hle/hle_symbols.txt): it
 // restores the registers musl saved there and jumps to the host jmp_buf, back into that C function with x0 set.
 //   musl aarch64 jmp_buf: x19-x28 at 0x00, x29 0x50, x30 0x58, sp 0x68, d8-d15 0x70
+#include "../diagnostics_build.h"
 #include <setjmp.h>
 #include <stdio.h>
 #include <string.h>
@@ -46,7 +47,7 @@ void hle_longjmp(Cpu *c) {
     if (!s) FATAL("[setjmp] longjmp to %llx: no setjmp of it on this thread (lr=%llx)\n", gbuf, c->x[30]);
     if (LD64(gbuf + 0x68) != s->gsp)
         FATAL("[setjmp] longjmp to %llx: its sp %llx isn't the setjmp's %llx\n", gbuf, LD64(gbuf + 0x68), s->gsp);
-    if (g_longjmps++ < 8 || ENV("LARECOMP_LOG_LONGJMP"))
+    if (g_longjmps++ < 8 || DIAG_ENV("LARECOMP_LOG_LONGJMP"))
         LOG("[setjmp] longjmp to %llx val %u (lr=%llx, back to %llx)\n", gbuf, val, c->x[30], LD64(gbuf + 0x58));
     for (int r = 19; r <= 30; r++) c->x[r] = LD64(gbuf + 8 * (r - 19));
     c->sp = s->gsp;

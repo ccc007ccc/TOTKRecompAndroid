@@ -1,5 +1,6 @@
 // Vulkan textures: NVN formats, images, change-detected uploads from guest memory, views and samplers
 // (counterpart of the texture half of metal.m and the view helpers of renderer.m).
+#include "../../diagnostics_build.h"
 #include <SDL3/SDL_timer.h>
 #include <float.h>
 #include <math.h>
@@ -531,7 +532,7 @@ static int g_nlive, g_cap_live;
 void vk_texture_copy_diagnostic(uint64_t src, uint64_t dst, uint64_t size) {
     static int on = -1;
     static unsigned shown;
-    if (on < 0) on = getenv("LARECOMP_TRACE_GPU_COPIES") != NULL;
+    if (on < 0) on = diag_getenv("LARECOMP_TRACE_GPU_COPIES") != NULL;
     if (!on || shown >= 256 || !size || size > UINT64_MAX - src) return;
     for (int i = 0; i < g_nlive && shown < 256; i++) {
         NvnTexture *t = g_live[i];
@@ -583,7 +584,7 @@ void vk_texture_memory_written(uint64_t addr, uint64_t size) {
 #endif
 int vk_texture_count(void) {
     static int log_diag = -1;
-    if (log_diag < 0) log_diag = getenv("LARECOMP_LOG_TEXDIAG") ? 1 : 0;
+    if (log_diag < 0) log_diag = diag_getenv("LARECOMP_LOG_TEXDIAG") ? 1 : 0;
     if (log_diag) {
         extern uint64_t g_tex_stat_init, g_tex_stat_reinit, g_tex_stat_reused, g_tex_stat_fin_owner, g_tex_stat_fin_copy, g_tex_stat_reg;
         int fin_held = 0, dup_addr = 0, gpu_own = 0, upl = 0;
@@ -788,7 +789,7 @@ uint64_t prof_tex_checks, prof_tex_samples, prof_tex_full, prof_tex_full_bytes, 
 // Opt-in CPU measurements only: no GPU queries, flushes or waits. Called on the texture upload path.
 static bool texture_trace_on(void) {
     static int on = -1;
-    if (on < 0) { const char *e = getenv("LARECOMP_TEXTURE_TRACE"); on = e && atoi(e) != 0; }
+    if (on < 0) { const char *e = diag_getenv("LARECOMP_TEXTURE_TRACE"); on = e && atoi(e) != 0; }
     return on;
 }
 enum { TEX_TRACE_NATIVE, TEX_TRACE_BC, TEX_TRACE_ASTC };
@@ -836,7 +837,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     // hasn't written since the last check is not hashed at all (dynamic textures were fully hashed every frame,
     // ~2.4 MB a frame in the overworld). The periodic full hash stays as a safety net. LARECOMP_VK_TEX_WATCH=0: off.
     static int watch = -1;
-    if (watch < 0) { const char *e = getenv("LARECOMP_VK_TEX_WATCH"); watch = !e || atoi(e) != 0; }
+    if (watch < 0) { const char *e = diag_getenv("LARECOMP_VK_TEX_WATCH"); watch = !e || atoi(e) != 0; }
     if (watch && !always_full && !notified) {
         extern int vk_pages_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now);
         uint32_t now = 0;
@@ -940,7 +941,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                 static char dpre[256];
                 if (dw < 0) {
                     dw = 0;
-                    const char *e = getenv("LARECOMP_DUMP_TEX");
+                    const char *e = diag_getenv("LARECOMP_DUMP_TEX");
                     if (e && sscanf(e, "%dx%dx%d,%255s", &dw, &dh, &dd, dpre) != 4) dw = 0;
                 }
                 if (dw && lv == 0 && layer == 0 && (int)t->width == dw && (int)t->height == dh && (int)t->depth == dd &&
@@ -1375,7 +1376,7 @@ static VkSampler make_sampler(const NvnSamplerDesc *d, bool compare) {
     if (lodmin < 0) lodmin = getenv("LARECOMP_LOD_MIN") ? (float)atof(getenv("LARECOMP_LOD_MIN")) : 0;
     if (lodmin > 0 && mf > 1) si.minLod = fmaxf(si.minLod, lodmin);
     static int stest = -1;
-    if (stest < 0) stest = getenv("LARECOMP_SAMPLER_TEST") != NULL;
+    if (stest < 0) stest = diag_getenv("LARECOMP_SAMPLER_TEST") != NULL;
     if (stest && mf > 1) { si.minLod = 0; si.maxLod = VK_LOD_CLAMP_NONE; si.anisotropyEnable = VK_TRUE; si.maxAnisotropy = 16; }
     if (d->compare_mode && compare) {
         si.compareEnable = VK_TRUE;

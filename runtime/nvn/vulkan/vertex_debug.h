@@ -1,3 +1,4 @@
+#include "../../diagnostics_build.h"
 // Opt-in capture of one actual vertex draw. Included by exec.c only.
 // The transient buffer belongs to that submission; it is read back after the draw
 // and released by the existing ring. Normal rendering allocates nothing here.
@@ -27,14 +28,14 @@ static bool vertex_debug_selected(const char *want, uint64_t code, bool compilin
 
 static void vertex_debug_directory(char *path, size_t size) {
     mkdir("build/vertex-input", 0755);
-    if (getenv("LARECOMP_DUMP_VERTEX_FRAMES")) {
+    if (diag_getenv("LARECOMP_DUMP_VERTEX_FRAMES")) {
         snprintf(path, size, "build/vertex-input/%llu", (unsigned long long)renderer_present_count());
         mkdir(path, 0755);
     } else snprintf(path, size, "build/vertex-input");
 }
 
 static void vertex_debug_instrument(ShaderInfo *si, const ShaderKey *key, uint64_t code) {
-    const char *want = getenv("LARECOMP_DUMP_VERTEX_OUTPUT");
+    const char *want = diag_getenv("LARECOMP_DUMP_VERTEX_OUTPUT");
     if (!vertex_debug_selected(want, code, true)) return;
     VkPhysicalDeviceFeatures caps;
     vkGetPhysicalDeviceFeatures(g_vk.phys, &caps);
@@ -50,7 +51,7 @@ static void vertex_debug_instrument(ShaderInfo *si, const ShaderKey *key, uint64
     // Example: 1:24,9:74 means cb1 byte 0x24 and cb9 byte 0x74. Unlike a later
     // buffer copy, these loads observe the bindings of this vertex invocation.
     char probes[2][64] = {"0u", "0u"};
-    const char *probe = getenv("LARECOMP_VERTEX_PROBE");
+    const char *probe = diag_getenv("LARECOMP_VERTEX_PROBE");
     unsigned bank[2], offset[2];
     if (probe && sscanf(probe, "%u:%x,%u:%x", &bank[0], &offset[0], &bank[1], &offset[1]) == 4) {
         for (int i = 0; i < 2; i++)
@@ -82,9 +83,9 @@ static bool vertex_debug_capturing(void) {
     // Constant-buffer binding calls this for every vertex stage. Ordinary
     // frames need no environment lookup; debug frames retain dynamic settings.
     if (!g_debug_frame) return false;
-    bool multi = getenv("LARECOMP_DUMP_VERTEX_FRAMES") != NULL;
+    bool multi = diag_getenv("LARECOMP_DUMP_VERTEX_FRAMES") != NULL;
     return (multi ? vertex_debug_saved_frame != renderer_present_count() : !vertex_debug_saved) &&
-           vertex_debug_selected(getenv("LARECOMP_DUMP_VERTEX_OUTPUT"), st.program->stages[0].code_addr, false);
+           vertex_debug_selected(diag_getenv("LARECOMP_DUMP_VERTEX_OUTPUT"), st.program->stages[0].code_addr, false);
 }
 
 static VkDescriptorBufferInfo vertex_debug_info(void) {
@@ -139,7 +140,7 @@ static void vertex_debug_finish(void) {
     snprintf(path, sizeof path, "%s/bindings.txt", dir);
     f = fopen(path, "w");
     if (f) {
-        const char *probe = getenv("LARECOMP_VERTEX_PROBE");
+        const char *probe = diag_getenv("LARECOMP_VERTEX_PROBE");
         if (probe) fprintf(f, "record words 2,3: %s (bank:hex-byte-offset)\n", probe);
         for (int k = 0; k < 18; k++) if (offsets[k]) {
             const VkDescriptorBufferInfo *b = &vertex_debug_cbufs[k];

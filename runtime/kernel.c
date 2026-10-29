@@ -1,4 +1,5 @@
 // A small Horizon kernel: handles, threads, synchronization, memory, and the SVC dispatcher.
+#include "diagnostics_build.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -383,7 +384,7 @@ static void *core0_slicer(void *arg) {
         pthread_mutex_lock(&c0_m);
         if (c0_holder && c0_head && !c0_holder->core0_evicted && plat_now_ns() - c0_since > c0_slice_ns) {
             static uint64_t n;
-            if (n++ < 10 || ENV("LARECOMP_LOG_C0"))
+            if (n++ < 10 || DIAG_ENV("LARECOMP_LOG_C0"))
                 LOG("[kernel] core 0: t%llu ran %llums without blocking, handoff requested\n", (unsigned long long)c0_holder->id,
                     (unsigned long long)((plat_now_ns() - c0_since) / 1000000));
             __atomic_store_n(&c0_holder->core0_evicted, true, __ATOMIC_RELEASE);
@@ -863,7 +864,7 @@ static uint32_t svc_wait_synchronization(uint64_t handles_ptr, int32_t count, in
     KThread *t = t_cur;
     uint32_t *hs = (uint32_t *)(uintptr_t)handles_ptr;
     uint32_t r;
-    if (ENV("LARECOMP_VSYNC_BT")) {  // (debug) who waits for the display's vsync event: the game's frame loop
+    if (DIAG_ENV("LARECOMP_VSYNC_BT")) {  // (debug) who waits for the display's vsync event: the game's frame loop
         extern uint32_t vi_vsync_handle(void);
         static int shown;
         for (int i = 0; i < count && shown < 2; i++)
@@ -940,7 +941,7 @@ static void *watchdog_main(void *arg) {
 
 static void watchdog_start(void) {
     static int started;
-    const char *e = getenv("LARECOMP_WATCHDOG");
+    const char *e = diag_getenv("LARECOMP_WATCHDOG");
     if (started || !e || atoi(e) <= 0) return;
     started = 1;
     pthread_t th;
@@ -972,7 +973,7 @@ void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) {
 }
 
 static void svc_entry(Cpu *c, uint32_t imm, uint64_t pc) {
-    if (prof_svc < 0) prof_svc = ENV("LARECOMP_PROF_SVC") != NULL;
+    if (prof_svc < 0) prof_svc = DIAG_ENV("LARECOMP_PROF_SVC") != NULL;
     if (prof_svc && imm < 0x80) {
         uint64_t a0 = c->x[0], a1 = c->x[1], a2 = c->x[2], a3 = c->x[3], lr = c->x[30];
         uint32_t h0 = imm == 0x18 && a2 ? *(uint32_t *)(uintptr_t)a1 : 0;
@@ -1005,7 +1006,7 @@ static void svc_entry(Cpu *c, uint32_t imm, uint64_t pc) {
         }
         return;
     }
-    if (trace_svc < 0) trace_svc = getenv("LARECOMP_TRACE_SVC") != NULL;
+    if (trace_svc < 0) trace_svc = diag_getenv("LARECOMP_TRACE_SVC") != NULL;
     if (!trace_svc) return svc_impl(c, imm, pc);
     uint64_t in[4] = {c->x[0], c->x[1], c->x[2], c->x[3]};
     svc_impl(c, imm, pc);
@@ -1131,7 +1132,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         KThread *t = (KThread *)o;
         int old_core = __atomic_load_n(&t->core, __ATOMIC_ACQUIRE);
         uint32_t result = thread_set_core_mask(t, (int32_t)x[1], x[2]);
-        if (ENV("LARECOMP_LOG_AFFINITY"))
+        if (DIAG_ENV("LARECOMP_LOG_AFFINITY"))
             LOG("[kernel] SetThreadCoreMask handle=%x core=%d mask=%llx by t%llu lr=%llx -> t%llu core %d->%d result=%x\n",
                 (unsigned)x[0], (int)(int32_t)x[1], (unsigned long long)x[2],
                 (unsigned long long)t_cur->id, (unsigned long long)c->x[30], (unsigned long long)t->id,
@@ -1301,7 +1302,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         x[0] = R_OK;
         x[1] = kernel_new_handle(ev);
         x[2] = kernel_new_handle(ev);
-        if (ENV("LARECOMP_PROF_SVC")) LOG("[evt] guest w=%llx r=%llx lr=%llx\n", (unsigned long long)x[1], (unsigned long long)x[2], (unsigned long long)x[30]);
+        if (DIAG_ENV("LARECOMP_PROF_SVC")) LOG("[evt] guest w=%llx r=%llx lr=%llx\n", (unsigned long long)x[1], (unsigned long long)x[2], (unsigned long long)x[30]);
         break;
     }
     default:
@@ -1396,7 +1397,7 @@ KEvent *kernel_create_event_pair(uint32_t *w, uint32_t *r) {
     ev->type = KOBJ_EVENT;
     *w = kernel_new_handle(ev);
     *r = kernel_new_handle(ev);
-    if (ENV("LARECOMP_PROF_SVC")) { const char *s = plat_symbol((uint64_t)(uintptr_t)__builtin_return_address(0), NULL); LOG("[evt] hle w=%x r=%x from %s\n", *w, *r, s ? s : "?"); }
+    if (DIAG_ENV("LARECOMP_PROF_SVC")) { const char *s = plat_symbol((uint64_t)(uintptr_t)__builtin_return_address(0), NULL); LOG("[evt] hle w=%x r=%x from %s\n", *w, *r, s ? s : "?"); }
     return ev;
 }
 

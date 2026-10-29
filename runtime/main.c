@@ -1,4 +1,5 @@
 // TOTKRecompAndroid entry: load modules, set up the kernel, run nn::init::Start on the main thread.
+#include "diagnostics_build.h"
 #include <SDL3/SDL.h>
 #ifdef __ANDROID__
 #include <SDL3/SDL_main.h>  // (main() becomes SDL_main, which SDLActivity runs)
@@ -12,6 +13,7 @@
 #include "settings.h"
 #include "hle.h"
 #include "kernel.h"
+#include "test_session.h"
 
 const char *g_romfs_dir;
 
@@ -126,7 +128,7 @@ int rt_reboot_requested(void) { return g_reboot; }
 void reboot_test_frame(uint64_t frame) {
     static const char *next;
     static int init;
-    if (!init) { init = 1; next = getenv("LARECOMP_REBOOT_AT"); }
+    if (!init) { init = 1; next = diag_getenv("LARECOMP_REBOOT_AT"); }
     long at;
     char what[128];
     if (!next || !*next || sscanf(next, "%ld:%127[^,]", &at, what) != 2 || (long)frame < at) return;
@@ -250,7 +252,7 @@ int main(int argc, char **argv) {
     setvbuf(stderr, NULL, _IOLBF, 0);
 #endif
     const char *root = "extracted";  // (in the data root)
-    bool skip_launcher = getenv("LARECOMP_NO_LAUNCHER") || getenv("LARECOMP_INPUT");  // tests boot straight in
+    bool skip_launcher = diag_getenv("LARECOMP_NO_LAUNCHER") || diag_getenv("LARECOMP_INPUT");  // tests boot straight in
     static char arg_root[4096];  // (>= PATH_MAX: Bionic's fortified realpath checks)
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--play")) skip_launcher = true;
@@ -259,7 +261,6 @@ int main(int argc, char **argv) {
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
     // Initialize isolated test saves before the guest can mount them.
-    extern bool test_session_enabled(void);
     test_session_enabled();
     for (bool title = !skip_launcher;;) {
         if (title) {  // start screen (runtime/ui/launcher.mm): game files setup, settings

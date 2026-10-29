@@ -1,8 +1,9 @@
+#include "../../diagnostics_build.h"
 // Explicit diagnosis of a 2D composition draw, before its inputs are consumed.
 // One submission/readback covers all supported inputs, and files are written before
 // the shared readback buffer is reused. This changes timing; it is never on by default.
 static void debug_fragment_inputs(Prog *pr) {
-    const char *want = getenv("LARECOMP_DUMP_FRAGMENT_INPUT");
+    const char *want = diag_getenv("LARECOMP_DUMP_FRAGMENT_INPUT");
     uint64_t frame = renderer_present_count();
     static uint64_t last_frame = ~0ull;
     if (!want || strtoull(want, NULL, 16) != pr->code[1] || frame == last_frame) return;

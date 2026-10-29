@@ -33,7 +33,9 @@ bash android/build_totk.sh
 `release` 默认选择 `performance`；单独指定性能 profile 默认选择 Release。`snapdragon-8elite` 使用 `-march=armv8.7-a+crypto+fp16 -mtune=oryon-1`；NDK r30 的 Clang 21 没有独立的第二代 Oryon 调度模型。性能档保留 `-fno-fast-math`，维护游戏的浮点语义。
 日常 Debug 选择 `debug --profile dev`，通用 Release 选择 `release --profile performance`；
 8 Elite 为设备专用档。两者均使用 NDK Clang，系统 Clang 仅编译桌面工具/测试。
-variant、profile、测试包与运行时功能开关互相独立，不能用 Debug/Release 判断某条开发线是否编入。
+profile 控制优化档位；普通 Release 关闭 `TOTK_DIAGNOSTICS`，Debug 和独立测试包开启。
+这统一控制抓帧、探针和脚本测试入口，并排除普通包中的 RenderDoc；正常渲染优化、着色器准备、触控和 FPS 显示保留。
+详见 [Agent.md](../Agent.md#4-debugrelease-与编译档位)。
 
 ```bash
 bash android/build_totk.sh release --profile snapdragon-8elite

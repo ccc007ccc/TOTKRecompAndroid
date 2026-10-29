@@ -11,6 +11,7 @@
 // command buffer reports its use in the game's bytes (ours / SHADOW_K); when the game reuses a piece of its memory,
 // the shadow of that piece is reused too. A list never crosses a shadow page in one piece: a jump continues it.
 // A command handle is the (host) address of a list's first record.
+#include "../diagnostics_build.h"
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,7 +69,7 @@ static void set_chunk(NvnCmdBuf *cb, uint64_t gmem, uint64_t mem, uint64_t size)
             size = size > skip ? size - skip : 0;
         }
     }
-    if (cb->recording && ENV("LARECOMP_CHECK_HANDLES")) {
+    if (cb->recording && DIAG_ENV("LARECOMP_CHECK_HANDLES")) {
         static int n;
         if (n++ < 40) LOG("[nvn] command buffer %llx: new memory %llx (host %llx) while recording, %llu of %llu used at %llx\n",
                           (unsigned long long)cb->guest, (unsigned long long)gmem, (unsigned long long)mem,
@@ -83,7 +84,7 @@ static void set_chunk(NvnCmdBuf *cb, uint64_t gmem, uint64_t mem, uint64_t size)
 
 NVN(nvnCommandBufferAddCommandMemory) {
     NvnCmdBuf *cb = cb_of(A(0));
-    if (ENV("LARECOMP_CHECK_HANDLES")) {
+    if (DIAG_ENV("LARECOMP_CHECK_HANDLES")) {
         static int n;
         if (n++ < 300) LOG("[nvn] AddCommandMemory %llx: pool %llx +%llx size %llx (lr %llx)\n", (unsigned long long)A(0),
                            (unsigned long long)A(1), (unsigned long long)A(2), (unsigned long long)A(3), (unsigned long long)c->x[30]);
@@ -93,7 +94,7 @@ NVN(nvnCommandBufferAddCommandMemory) {
 }
 NVN(nvnCommandBufferAddControlMemory) {
     NvnCmdBuf *cb = cb_of(A(0));
-    if (ENV("LARECOMP_CHECK_HANDLES")) {
+    if (DIAG_ENV("LARECOMP_CHECK_HANDLES")) {
         static int n;
         if (n++ < 300) LOG("[nvn] AddControlMemory %llx: %llx size %llx (lr %llx)\n", (unsigned long long)A(0), (unsigned long long)A(1),
                            (unsigned long long)A(2), (unsigned long long)c->x[30]);
@@ -126,7 +127,7 @@ static void add_host_memory(NvnCmdBuf *cb, uint32_t need) {
     uint8_t *mem = malloc(size * SHADOW_K);
     if (!mem) FATAL("nvn: out of command memory (host, %llu bytes)\n", (unsigned long long)(size * SHADOW_K));
     total += size * SHADOW_K;
-    if (ENV("LARECOMP_LOG_CMDMEM"))
+    if (DIAG_ENV("LARECOMP_LOG_CMDMEM"))
         LOG("[nvn] command buffer %llx: %llu bytes of host command memory (%llu KB in all)\n",
             (unsigned long long)cb->guest, (unsigned long long)(size * SHADOW_K), (unsigned long long)(total / 1024));
     set_chunk(cb, 0, (uint64_t)(uintptr_t)mem, size);
@@ -204,13 +205,13 @@ NVN(nvnCommandBufferEndRecording) {
     NvnCmdBuf *cb = cb_of(A(0));
     rec(c, cb, CMD_END, 0);
     cb->recording = false;
-    if (ENV("LARECOMP_CHECK_HANDLES")) {
+    if (DIAG_ENV("LARECOMP_CHECK_HANDLES")) {
         uint64_t k = g_hist_n++;
         ListRec *l = &g_hist[k % HIST];
         l->start = cb->start, l->end = write_at(cb), l->cb = cb->guest, l->gmem = cb->gmem, l->gused = cb->used;
         l->lr = c->x[30], l->seq = k;
     }
-    if (ENV("LARECOMP_CHECK_HANDLES")) {
+    if (DIAG_ENV("LARECOMP_CHECK_HANDLES")) {
         static int n;
         if (n++ < 400) LOG("[nvn] EndRecording %llx -> %llx (lr %llx)\n", (unsigned long long)cb->guest,
                            (unsigned long long)cb->start, (unsigned long long)c->x[30]);
@@ -483,7 +484,7 @@ NVN(nvnCommandBufferDrawArraysInstanced) { Snap s = snap(c); record(c, CMD_DRAW_
 // Debug: LARECOMP_TRACE_COUNT=<n> logs the guest call chain of indexed draws with n indices.
 static void trace_draw(Cpu *c, uint64_t count) {
     static long want = -2;
-    if (want == -2) want = getenv("LARECOMP_TRACE_COUNT") ? atol(getenv("LARECOMP_TRACE_COUNT")) : -1;
+    if (want == -2) want = diag_getenv("LARECOMP_TRACE_COUNT") ? atol(diag_getenv("LARECOMP_TRACE_COUNT")) : -1;
     if (want < 0 || (long)count != want) return;
     static int n;
     if (n++ > 40) return;
@@ -593,7 +594,7 @@ NVN(nvnCommandBufferResolveDepthBuffer) { (void)c; }
 // UpdateUniformBuffer(cmd, buffer, size, offset, dataSize, data)
 NVN(nvnCommandBufferUpdateUniformBuffer) {
     static uint64_t watch = ~0ull;  // LARECOMP_LOG_UBO_UPDATE=<hex address>: the updates that write it (caller, source)
-    if (watch == ~0ull) watch = getenv("LARECOMP_LOG_UBO_UPDATE") ? strtoull(getenv("LARECOMP_LOG_UBO_UPDATE"), NULL, 16) : 0;
+    if (watch == ~0ull) watch = diag_getenv("LARECOMP_LOG_UBO_UPDATE") ? strtoull(diag_getenv("LARECOMP_LOG_UBO_UPDATE"), NULL, 16) : 0;
     if (watch && A(1) + A(3) <= watch && watch < A(1) + A(3) + A(4)) {
         static int n;
         if (n++ % 30 == 0 && n < 600) {
@@ -642,7 +643,7 @@ NVN(nvnCommandBufferResetCounter) { (void)c; }
 // A command handle is the address of a list's first record (a CMD_BARRIER: nvnCommandBufferBeginRecording). Handles
 // that aren't one are logged (LARECOMP_CHECK_HANDLES=1).
 void nvn_check_handles(Cpu *c, const char *what, int n, const uint64_t *h) {
-    if (!ENV("LARECOMP_CHECK_HANDLES")) return;
+    if (!DIAG_ENV("LARECOMP_CHECK_HANDLES")) return;
     for (int i = 0; i < n; i++) {
         bool guest = h[i] >= GUEST_LO && h[i] < GUEST_HI;
         bool host = h[i] >= 0x6000000000ull;  // (malloc'd overflow memory: high host addresses)
@@ -660,7 +661,7 @@ void nvn_check_handles(Cpu *c, const char *what, int n, const uint64_t *h) {
 // records before it.
 static bool plausible(uint64_t a) { return (a >= GUEST_LO && a < GUEST_HI) || a >= 0x6000000000ull; }
 void nvn_check_list(uint64_t h, int depth) {
-    if (!ENV("LARECOMP_CHECK_HANDLES") || depth > 4) return;
+    if (!DIAG_ENV("LARECOMP_CHECK_HANDLES") || depth > 4) return;
     uint64_t p = h, prev[8] = {0};
     int np = 0;
     for (int i = 0; i < 1000000; i++) {

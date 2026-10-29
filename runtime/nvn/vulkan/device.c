@@ -1,4 +1,5 @@
 // Vulkan device, window, swapchain and presentation (counterpart of the window/present half of metal.m).
+#include "../../diagnostics_build.h"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #include <math.h>
@@ -58,7 +59,7 @@ static void create_instance(void) {
     const char *ext[16];
     uint32_t n_ext = 0;
     for (Uint32 i = 0; i < n_sdl && n_ext < 14; i++) ext[n_ext++] = sdl_ext[i];
-    bool validate = getenv("LARECOMP_VK_VALIDATION") != NULL;
+    bool validate = diag_getenv("LARECOMP_VK_VALIDATION") != NULL;
     if (validate) ext[n_ext++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
     VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "LARecomp",
@@ -367,7 +368,7 @@ static void pick_device(void) {
         if ((int)i == want) score = 100;
         if (score > best_score) { best_score = score; best = (int)i; best_queue = present_queue; }
     }
-    if (env_on("LARECOMP_TEST_DRIVER_ERROR")) {  // (test: the driver error and its dialog, platform/android.c)
+    if (TOTK_DIAGNOSTICS && env_on("LARECOMP_TEST_DRIVER_ERROR")) {  // (test: the driver error and its dialog, platform/android.c)
         best = -1, have_api = false;
         snprintf(g_compat_missing, sizeof g_compat_missing, "LARECOMP_TEST_DRIVER_ERROR");
     }
@@ -456,7 +457,7 @@ static void create_device(void) {
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne, sizeof *ep);
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
-    if (getenv("LARECOMP_VK_LIST_EXT"))  // (=1: the driver's device extensions, for comparing drivers)
+    if (diag_getenv("LARECOMP_VK_LIST_EXT"))  // (=1: the driver's device extensions, for comparing drivers)
         for (uint32_t i = 0; i < ne; i++) LOG("[vk] device extension %s %u\n", ep[i].extensionName, ep[i].specVersion);
 #ifdef __ANDROID__
     // An advertised extension does not imply every optional feature bit is supported.
@@ -546,7 +547,7 @@ static void create_device(void) {
 #ifdef __ANDROID__
     // LARECOMP_SHADER_STATS=1: each graphics pipeline's compiled shaders described in the log (registers, waves,
     // spills, instructions: exec.c build_pipeline), for finding what makes a translated shader slow on this GPU
-    g_vk.exec_stats = getenv("LARECOMP_SHADER_STATS") &&
+    g_vk.exec_stats = diag_getenv("LARECOMP_SHADER_STATS") &&
                       has_ext(ep, ne, VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME) && executable_have.pipelineExecutableInfo;
     if (g_vk.exec_stats) ext[n_ext++] = VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME;
     // the guest heap as GPU memory mapped at its own address (exec.c vk_heap_place; Turnip has it)
@@ -1053,7 +1054,7 @@ bool vk_frame_begin(const float clear[4]) {
     if (!g_vk.swapchain || (uint32_t)w != g_vk.sc_extent.width || (uint32_t)h != g_vk.sc_extent.height) recreate_swapchain();
     if (!g_vk.swapchain) return false;
     static int trace = -1;
-    if (trace < 0) trace = getenv("LARECOMP_VK_TRACE") != NULL;
+    if (trace < 0) trace = diag_getenv("LARECOMP_VK_TRACE") != NULL;
     if (trace) LOG("[vk] frame begin %dx%d (swapchain %ux%u)\n", w, h, g_vk.sc_extent.width, g_vk.sc_extent.height);
     slot = (slot + 1) % FRAMES;
     if (!acquire_sem[slot]) acquire_sem[slot] = binary_semaphore();
@@ -1224,9 +1225,9 @@ static void present_game_half(void) {
     extern void input_frame(uint64_t frame);
     input_frame(renderer_present_count());
     static long slow_ms = -1;
-    if (slow_ms < 0) slow_ms = getenv("LARECOMP_SLOW_FRAME_MS") ? atol(getenv("LARECOMP_SLOW_FRAME_MS")) : 0;
+    if (slow_ms < 0) slow_ms = diag_getenv("LARECOMP_SLOW_FRAME_MS") ? atol(diag_getenv("LARECOMP_SLOW_FRAME_MS")) : 0;
     static long slow_until = -1;  // LARECOMP_SLOW_FRAME_UNTIL=<frame>: the stall ends there (frame pacing recovery tests)
-    if (slow_until < 0) slow_until = getenv("LARECOMP_SLOW_FRAME_UNTIL") ? atol(getenv("LARECOMP_SLOW_FRAME_UNTIL")) : 0;
+    if (slow_until < 0) slow_until = diag_getenv("LARECOMP_SLOW_FRAME_UNTIL") ? atol(diag_getenv("LARECOMP_SLOW_FRAME_UNTIL")) : 0;
     if (slow_ms > 0 && renderer_present_count() > 2600 && (!slow_until || (long)renderer_present_count() < slow_until)) SDL_Delay((Uint32)slow_ms);
     extern void fnprof_frame(uint64_t frame);
     fnprof_frame(renderer_present_count());
@@ -1263,7 +1264,9 @@ void backend_present(NvnTexture *t) {
     extern void vk_capture_finish(NvnTexture *presented);
     vk_capture_finish(t);
     extern void vk_flicker_frame(TexBackend *, uint64_t, bool);
+#if TOTK_DIAGNOSTICS
     vk_flicker_frame(b, total_frames, !menu_is_open());
+#endif
     static const float black[4] = {0, 0, 0, 1};
     uint64_t t0 = SDL_GetTicksNS();
     bool have = vk_frame_begin(black);
@@ -1294,7 +1297,7 @@ void backend_present(NvnTexture *t) {
 #ifdef __ANDROID__
         static int matrix_trace = -1;
         static uint64_t matrix_last;
-        if (matrix_trace < 0) matrix_trace = getenv("LARECOMP_BENCHMARK_CONFIG") != NULL;
+        if (matrix_trace < 0) matrix_trace = diag_getenv("LARECOMP_BENCHMARK_CONFIG") != NULL;
         if (matrix_trace) {
             uint64_t now = plat_now_ns();
             if (now - matrix_last >= 2000000000ull) {
@@ -1319,11 +1322,11 @@ void backend_present(NvnTexture *t) {
         memcpy(g_shot_crop, crop, sizeof crop);
         vk_present_draw(cb, b, (float)vx, (float)vy, (float)vw, (float)vh, pv);
         static long menu_at = -1;
-        if (menu_at < 0) menu_at = getenv("LARECOMP_MENU_AT") ? atol(getenv("LARECOMP_MENU_AT")) : 0;
+        if (menu_at < 0) menu_at = diag_getenv("LARECOMP_MENU_AT") ? atol(diag_getenv("LARECOMP_MENU_AT")) : 0;
         if (menu_at && (long)total_frames + 1 == menu_at) { extern void menu_test_open(void); menu_test_open(); }
         menu_render((void *)cb, g_vk.sc_extent.width, g_vk.sc_extent.height);
         static long win_shot = -1;
-        if (win_shot < 0) win_shot = getenv("LARECOMP_WINDOW_SHOT") ? atol(getenv("LARECOMP_WINDOW_SHOT")) : 0;
+        if (win_shot < 0) win_shot = diag_getenv("LARECOMP_WINDOW_SHOT") ? atol(diag_getenv("LARECOMP_WINDOW_SHOT")) : 0;
         bool shot = win_shot && (long)total_frames + 1 == win_shot;
         char test_path[1200];
         const char *shot_path = "build/window.png";
@@ -1333,7 +1336,7 @@ void backend_present(NvnTexture *t) {
             shot = true;
         }
         vk_frame_end(shot ? shot_path : NULL);
-        if (shot && getenv("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
+        if (shot && diag_getenv("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
     } else {
         renderer_submit();
     }
@@ -1351,9 +1354,9 @@ void backend_present(NvnTexture *t) {
     extern void input_frame(uint64_t frame);
     input_frame(total_frames);
     static long slow_ms = -1;
-    if (slow_ms < 0) slow_ms = getenv("LARECOMP_SLOW_FRAME_MS") ? atol(getenv("LARECOMP_SLOW_FRAME_MS")) : 0;
+    if (slow_ms < 0) slow_ms = diag_getenv("LARECOMP_SLOW_FRAME_MS") ? atol(diag_getenv("LARECOMP_SLOW_FRAME_MS")) : 0;
     static long slow_until = -1;  // LARECOMP_SLOW_FRAME_UNTIL=<frame>: the stall ends there (frame pacing recovery tests)
-    if (slow_until < 0) slow_until = getenv("LARECOMP_SLOW_FRAME_UNTIL") ? atol(getenv("LARECOMP_SLOW_FRAME_UNTIL")) : 0;
+    if (slow_until < 0) slow_until = diag_getenv("LARECOMP_SLOW_FRAME_UNTIL") ? atol(diag_getenv("LARECOMP_SLOW_FRAME_UNTIL")) : 0;
     if (slow_ms > 0 && total_frames > 2600 && (!slow_until || (long)total_frames < slow_until)) SDL_Delay((Uint32)slow_ms);
     extern void fnprof_frame(uint64_t frame);
     fnprof_frame(total_frames);
@@ -1363,22 +1366,23 @@ void backend_present(NvnTexture *t) {
     extern void vk_level_change_check(void);
     vk_level_change_check();
     static long shot_every = -1;
-    if (shot_every < 0) { const char *e = getenv("LARECOMP_SCREENSHOT_EVERY"); shot_every = e ? atol(e) : 0; }
+    if (shot_every < 0) { const char *e = diag_getenv("LARECOMP_SCREENSHOT_EVERY"); shot_every = e ? atol(e) : 0; }
+#if TOTK_DIAGNOSTICS
     extern bool g_debug_frame;
     static long debug_at = -1;
-    if (debug_at < 0) { const char *e = getenv("LARECOMP_DEBUG_FRAME"); debug_at = e ? atol(e) : 0; }
+    if (debug_at < 0) { const char *e = diag_getenv("LARECOMP_DEBUG_FRAME"); debug_at = e ? atol(e) : 0; }
     extern volatile int g_debug_frame_request;
     if (g_debug_frame_request) { g_debug_frame_request = 0; debug_at = (long)total_frames + 1; }
     // LARECOMP_DEBUG_FRAMES=<n> (with LARECOMP_DEBUG_FRAME / F9): dump n consecutive frames (build/pass_<frame>_NNN.png)
     static long debug_n = -1;
-    if (debug_n < 0) { const char *e = getenv("LARECOMP_DEBUG_FRAMES"); debug_n = e && atol(e) > 1 ? atol(e) : 1; }
+    if (debug_n < 0) { const char *e = diag_getenv("LARECOMP_DEBUG_FRAMES"); debug_n = e && atol(e) > 1 ? atol(e) : 1; }
     g_debug_frame = debug_at && total_frames >= (uint64_t)debug_at && total_frames < (uint64_t)debug_at + (uint64_t)debug_n;
     {   // LARECOMP_GPUPROF_AT=<frame>[,<frame>...]: GPU time per pass of those frames ("[gpuprof]" in the log)
         extern bool g_gpuprof_frame;
         extern void vk_gpuprof_report(void);
         if (g_gpuprof_frame) { g_gpuprof_frame = false; vk_gpuprof_report(); }
         if(test_session_take_gpu_request())g_gpuprof_frame=true;
-        const char *e = getenv("LARECOMP_GPUPROF_AT");
+        const char *e = diag_getenv("LARECOMP_GPUPROF_AT");
         for (const char *p = e; p && *p;) {
             long at = strtol(p, (char **)&p, 10);
             if (at == (long)total_frames) { g_gpuprof_frame = true; break; }
@@ -1386,10 +1390,11 @@ void backend_present(NvnTexture *t) {
         }
     }
     if (g_debug_frame) LOG("===== debug frame %llu =====\n", (unsigned long long)total_frames);
+#endif
     {   // LARECOMP_CAM_PROJ=<hex address> (a widescreen test): a sead::PerspectiveProjection there (1.8.2's main camera
         // was at 3df0c4598 on the Great Plateau save) gets the output's aspect and its matrices marked dirty, each frame
         static uint64_t cp = ~0ull;
-        if (cp == ~0ull) cp = getenv("LARECOMP_CAM_PROJ") ? strtoull(getenv("LARECOMP_CAM_PROJ"), NULL, 16) : 0;
+        if (cp == ~0ull) cp = diag_getenv("LARECOMP_CAM_PROJ") ? strtoull(diag_getenv("LARECOMP_CAM_PROJ"), NULL, 16) : 0;
         extern bool widescreen_allowed(void);
         extern float widescreen_factor(void);
         if (cp >= HEAP_BASE && cp + 0xC0 <= HEAP_BASE + HEAP_MAX) {
@@ -1407,9 +1412,9 @@ void backend_present(NvnTexture *t) {
         static long pe;
         if (pa == ~0ull) {
             pa = 0;
-            const char *e = getenv("LARECOMP_PEEK");
+            const char *e = diag_getenv("LARECOMP_PEEK");
             if (e && sscanf(e, "%llx:%llx", (unsigned long long *)&pa, (unsigned long long *)&pl) != 2) pa = 0;
-            pe = getenv("LARECOMP_PEEK_EVERY") ? atol(getenv("LARECOMP_PEEK_EVERY")) : 300;
+            pe = diag_getenv("LARECOMP_PEEK_EVERY") ? atol(diag_getenv("LARECOMP_PEEK_EVERY")) : 300;
             if (pe <= 0) pe = 300;
         }
         if (pa && total_frames % (unsigned long long)pe == 0 && pa >= GUEST_LO && pa + pl <= GUEST_HI)
@@ -1423,7 +1428,7 @@ void backend_present(NvnTexture *t) {
         static long at;
         if (plen < 0) {
             plen = 0;
-            const char *e = getenv("LARECOMP_FIND");
+            const char *e = diag_getenv("LARECOMP_FIND");
             for (; e && e[0] && e[1] && e[0] != ':' && plen < 64; e += 2) { unsigned v; sscanf(e, "%2x", &v); pat[plen++] = (uint8_t)v; }
             at = e && *e == ':' ? atol(e + 1) : 1500;
         }
@@ -1431,18 +1436,18 @@ void backend_present(NvnTexture *t) {
             // LARECOMP_FIND_WATCH=<back>[:<below hex>]: also a read / write watch (rt_range_watch, +-16 bytes) on each hit
             // that is 4-aligned once <back> bytes are taken off, below that address (the GPU's copies are higher up)
             extern void rt_range_watch(uint64_t lo, uint64_t hi);
-            const char *fw = getenv("LARECOMP_FIND_WATCH");
-            long back = fw ? atol(fw) : getenv("LARECOMP_FIND_BACK") ? atol(getenv("LARECOMP_FIND_BACK")) : -1;
+            const char *fw = diag_getenv("LARECOMP_FIND_WATCH");
+            long back = fw ? atol(fw) : diag_getenv("LARECOMP_FIND_BACK") ? atol(diag_getenv("LARECOMP_FIND_BACK")) : -1;
             uint64_t below = fw && strchr(fw, ':') ? strtoull(strchr(fw, ':') + 1, NULL, 16) : ~0ull;
             int n = 0;
-            const char *ff = getenv("LARECOMP_FIND_FROM");  // (=<hex address>: where to start, past earlier hits)
+            const char *ff = diag_getenv("LARECOMP_FIND_FROM");  // (=<hex address>: where to start, past earlier hits)
             const uint8_t *from = ff ? (const uint8_t *)(uintptr_t)strtoull(ff, NULL, 16) : (const uint8_t *)(uintptr_t)HEAP_BASE;
             for (const uint8_t *p = from, *end = (const uint8_t *)(uintptr_t)HEAP_BASE + HEAP_MAX - plen; p < end && n < 64;) {
                 const uint8_t *q = (const uint8_t *)rt_memmem(p, (size_t)(end - p), pat, (size_t)plen);
                 if (!q) break;
                 uint64_t a = (uint64_t)(uintptr_t)q - (uint64_t)(back > 0 ? back : 0);
-                if (getenv("LARECOMP_FIND_PEEK")) {  // =<hex back>: 8 qwords from the hit minus that (an object's header)
-                    const uint64_t *w = (const uint64_t *)(uintptr_t)((uint64_t)(uintptr_t)q - strtoull(getenv("LARECOMP_FIND_PEEK"), NULL, 16));
+                if (diag_getenv("LARECOMP_FIND_PEEK")) {  // =<hex back>: 8 qwords from the hit minus that (an object's header)
+                    const uint64_t *w = (const uint64_t *)(uintptr_t)((uint64_t)(uintptr_t)q - strtoull(diag_getenv("LARECOMP_FIND_PEEK"), NULL, 16));
                     LOG("[find] frame %llu: %llx  %llx %llx %llx %llx %llx %llx %llx %llx\n", (unsigned long long)total_frames,
                         (unsigned long long)(uintptr_t)q, (unsigned long long)w[0], (unsigned long long)w[1], (unsigned long long)w[2],
                         (unsigned long long)w[3], (unsigned long long)w[4], (unsigned long long)w[5], (unsigned long long)w[6],
@@ -1469,7 +1474,7 @@ void backend_present(NvnTexture *t) {
         static float mx, my, mz, tol;
         static long at;
         if (on < 0) {
-            const char *e = getenv("LARECOMP_FIND_MTX");
+            const char *e = diag_getenv("LARECOMP_FIND_MTX");
             at = 1500;
             on = e && sscanf(e, "%f,%f,%f,%f,%ld", &mx, &my, &mz, &tol, &at) >= 4;
         }
@@ -1492,7 +1497,7 @@ void backend_present(NvnTexture *t) {
         static long at;
         if (da == ~0ull) {
             da = 0;
-            const char *e = getenv("LARECOMP_DUMP");
+            const char *e = diag_getenv("LARECOMP_DUMP");
             if (e) {
                 char *q;
                 da = strtoull(e, &q, 16);
@@ -1518,25 +1523,25 @@ void backend_present(NvnTexture *t) {
         static float vx, vy, vz, tol;
         static long at;
         if (on < 0) {
-            const char *e = getenv("LARECOMP_FIND_VEC");
+            const char *e = diag_getenv("LARECOMP_FIND_VEC");
             at = 1500;
             on = e && sscanf(e, "%f,%f,%f,%f,%ld", &vx, &vy, &vz, &tol, &at) >= 4;
         }
         if (on && (long)total_frames == at) {
             int n = 0;
             const float *f = (const float *)(uintptr_t)HEAP_BASE + 8, *end = f + HEAP_MAX / 4 - 24;
-            if (getenv("LARECOMP_FIND_FROM")) f = (const float *)(uintptr_t)(strtoull(getenv("LARECOMP_FIND_FROM"), NULL, 16) & ~3ull);
+            if (diag_getenv("LARECOMP_FIND_FROM")) f = (const float *)(uintptr_t)(strtoull(diag_getenv("LARECOMP_FIND_FROM"), NULL, 16) & ~3ull);
             for (; f < end && n < 200; f++) {
                 if (!(fabsf(f[1] - vy) < tol) || !(fabsf(f[0] - vx) < tol) || !(fabsf(f[2] - vz) < tol)) continue;
                 if (f[0] == 0 && f[2] == 0 && vx == 0 && vz == 0 && f[1] == 0) continue;
-                if (getenv("LARECOMP_FIND_VEC_QS")) {  // (=1: only a pose transform: then a unit quaternion and scale 1)
+                if (diag_getenv("LARECOMP_FIND_VEC_QS")) {  // (=1: only a pose transform: then a unit quaternion and scale 1)
                     if ((uintptr_t)f & 15) continue;
                     float q = f[4] * f[4] + f[5] * f[5] + f[6] * f[6] + f[7] * f[7];
                     if (!(fabsf(q - 1) < 0.01f && fabsf(f[8] - 1) < 0.01f && fabsf(f[9] - 1) < 0.01f && fabsf(f[10] - 1) < 0.01f)) continue;
                 }
                 // (=1: exactly (0, y, 0, 0), a vertical offset alone)
-                if (getenv("LARECOMP_FIND_VEC_Y") && !(f[0] == 0 && f[2] == 0 && f[3] == 0 && f[-1] == 0)) continue;
-                if (n < 8 && getenv("LARECOMP_FIND_VEC_WATCH")) {  // (=1: and a read / write watch on the first 8)
+                if (diag_getenv("LARECOMP_FIND_VEC_Y") && !(f[0] == 0 && f[2] == 0 && f[3] == 0 && f[-1] == 0)) continue;
+                if (n < 8 && diag_getenv("LARECOMP_FIND_VEC_WATCH")) {  // (=1: and a read / write watch on the first 8)
                     extern void rt_range_watch(uint64_t lo, uint64_t hi);
                     rt_range_watch((uint64_t)(uintptr_t)f, (uint64_t)(uintptr_t)f + 12);
                 }
@@ -1554,7 +1559,7 @@ void backend_present(NvnTexture *t) {
         static long at;
         if (root == ~0ull) {
             root = 0;
-            const char *e = getenv("LARECOMP_HEAPTREE");
+            const char *e = diag_getenv("LARECOMP_HEAPTREE");
             if (e) { root = strtoull(e, (char **)&e, 16); at = *e == ':' ? atol(e + 1) : 1500; }
         }
         if (root && (long)total_frames == at) {
@@ -1590,10 +1595,10 @@ void backend_present(NvnTexture *t) {
     {   // LARECOMP_SHOT_AT=<frame>,<frame>,... (or +; ascending): the game image at those frames -> build/frames/frame_N.png
         static const char *next;
         static int init;
-        if (!init) { init = 1; next = getenv("LARECOMP_SHOT_AT"); if (next) mkdir("build/frames", 0755); }
+        if (!init) { init = 1; next = diag_getenv("LARECOMP_SHOT_AT"); if (next) mkdir("build/frames", 0755); }
         while (next && *next) {
             long at = strtol(next, (char **)&next, 10);
-            if ((long)total_frames < at) { while (next > getenv("LARECOMP_SHOT_AT") && next[-1] != ',' && next[-1] != '+') next--; break; }
+            if ((long)total_frames < at) { while (next > diag_getenv("LARECOMP_SHOT_AT") && next[-1] != ',' && next[-1] != '+') next--; break; }
             if ((long)total_frames == at) {
                 char path[256];
                 snprintf(path, sizeof path, "build/frames/frame_%05llu.png", (unsigned long long)total_frames);
@@ -1603,7 +1608,7 @@ void backend_present(NvnTexture *t) {
         }
     }
     static long shot_from = -1;
-    if (shot_from < 0) { const char *e = getenv("LARECOMP_SCREENSHOT_FROM"); shot_from = e ? atol(e) : 0; }
+    if (shot_from < 0) { const char *e = diag_getenv("LARECOMP_SCREENSHOT_FROM"); shot_from = e ? atol(e) : 0; }
     if (shot_every && total_frames % shot_every == 0 && (long)total_frames >= shot_from) {
         char path[256];
         if (shot_from) mkdir("build/frames", 0755);
@@ -1611,7 +1616,7 @@ void backend_present(NvnTexture *t) {
                  (unsigned long long)total_frames);
         renderer_save_texture_tex(b, path);
         // a series (SCREENSHOT_FROM) runs on until LARECOMP_WINDOW_SHOT exits
-        if (getenv("LARECOMP_EXIT_AFTER_SHOT") && !shot_from) { fflush(stderr); _exit(0); }
+        if (diag_getenv("LARECOMP_EXIT_AFTER_SHOT") && !shot_from) { fflush(stderr); _exit(0); }
     }
     double now = SDL_GetTicks() / 1000.0;
     static double fps_iv = -1, prev_present, max_gap;
@@ -1638,7 +1643,7 @@ void vk_shaders_init(void);
 // teardown (driver / validation-layer threads can stall it for minutes while the game's threads still run).
 static void quick_exit_handler(void) {
     static int trace = -1;
-    if (trace < 0) trace = getenv("LARECOMP_VK_TRACE") != NULL;
+    if (trace < 0) trace = diag_getenv("LARECOMP_VK_TRACE") != NULL;
     if (trace) LOG("[vk] exit: waiting for the GPU\n");
     if (g_vk.dev) {
         vkDeviceWaitIdle(g_vk.dev);
@@ -1707,17 +1712,17 @@ void ui_window_init(void) {
 #endif
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) FATAL("SDL_Init: %s\n", SDL_GetError());
     int win_w = 1280, win_h = 720;
-    if (getenv("LARECOMP_WINDOW")) sscanf(getenv("LARECOMP_WINDOW"), "%dx%d", &win_w, &win_h);
+    if (diag_getenv("LARECOMP_WINDOW")) sscanf(diag_getenv("LARECOMP_WINDOW"), "%dx%d", &win_w, &win_h);
     SDL_WindowFlags wflags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
 #ifdef __ANDROID__
     wflags |= SDL_WINDOW_FULLSCREEN;  // (immersive: no system bars)
 #endif
-    if (getenv("LARECOMP_HIDDEN")) wflags |= SDL_WINDOW_HIDDEN;
+    if (diag_getenv("LARECOMP_HIDDEN")) wflags |= SDL_WINDOW_HIDDEN;
     {   // scripted test runs (user input ignored: runtime/hle/input.c input_user_blocked) open without taking the
         // keyboard focus from whatever the player is doing
-        const char *v = getenv("LARECOMP_NO_USER_INPUT");
-        bool scripted = v ? atoi(v) != 0 : (getenv("LARECOMP_INPUT") || getenv("LARECOMP_DOORJUMP_TEST") || getenv("LARECOMP_PLACE") ||
-                                            getenv("LARECOMP_HOST_INPUT") || getenv("LARECOMP_BIND_TEST"));
+        const char *v = diag_getenv("LARECOMP_NO_USER_INPUT");
+        bool scripted = v ? atoi(v) != 0 : (diag_getenv("LARECOMP_INPUT") || diag_getenv("LARECOMP_DOORJUMP_TEST") || diag_getenv("LARECOMP_PLACE") ||
+                                            diag_getenv("LARECOMP_HOST_INPUT") || diag_getenv("LARECOMP_BIND_TEST"));
         if (scripted) SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
     }
     window = SDL_CreateWindow("TOTKRecompAndroid", win_w, win_h, wflags);
@@ -1738,7 +1743,7 @@ void ui_window_init(void) {
 #ifdef __ANDROID__
     SDL_SetWindowFullscreen(window, true);  // (always: the whole screen, system bars hidden)
 #else
-    if (g_settings.fullscreen && !getenv("LARECOMP_WINDOW") && !getenv("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(window, true);
+    if (g_settings.fullscreen && !diag_getenv("LARECOMP_WINDOW") && !diag_getenv("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(window, true);
 #endif
     create_instance();
 #ifdef __ANDROID__

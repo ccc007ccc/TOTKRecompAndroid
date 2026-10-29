@@ -1,4 +1,5 @@
 // Android host-side NVN regression tests. Include the implementation, discard unrelated HLE sections at link.
+#define TOTK_DIAGNOSTICS 1 // fixture supplies diagnostic hooks explicitly
 #include <assert.h>
 #include "../runtime/nvn/objects.c"
 
