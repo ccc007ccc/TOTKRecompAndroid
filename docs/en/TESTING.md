@@ -277,3 +277,7 @@ Variant-rule and queue tests cover default input types, unknown formats, dedupli
 736 real shader combinations pass SPIR-V validation, including modules loaded from the production compressed cache.
 Preparation defaults to one worker per logical CPU core, with a retained compiler per worker; the draw path only decompresses and validates cached bytes.
 This is not a completed full-library preparation or gameplay validation.
+
+Closeout checks: `"$PYTHON" tools/test_shader_lifetimes.py`, `bash tools/test_shared_memory.sh`, and
+`bash tools/test_buffer_copy.sh` run in `dev`. Full-receipt validation is covered by `test_shader_dictionaries.sh`.
+See the [closeout record](../PROJECT-CLOSEOUT.md) for scope and device results.

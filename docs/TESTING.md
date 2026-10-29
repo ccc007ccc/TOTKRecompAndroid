@@ -253,3 +253,7 @@ clang -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Wno-format \
 `tools/test_shader_variant_plan.cpp`、`tools/test_shader_prepare_queue.cpp` 检查。
 `tools/test_shader_prepare_workers.cpp` 用正式编译器和压缩缓存验证多线程会话、去重和准备结束后的只读加载。
 当前 736 个真实组合样本通过 SPIR-V 验证；此样本通过不代表 694,772 条目的完整准备已经完成。
+
+本轮收尾另用 `"$PYTHON" tools/test_shader_lifetimes.py` 验证 100 次重启的程序/管线所有权，
+`bash tools/test_shared_memory.sh` 与 `bash tools/test_buffer_copy.sh` 验证默认关闭的实验路径。
+完整收据的坏缓存/只读输入/取消测试已并入 `test_shader_dictionaries.sh`；结果见 [收尾记录](PROJECT-CLOSEOUT.md)。

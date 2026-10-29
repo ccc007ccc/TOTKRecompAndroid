@@ -27,3 +27,5 @@ Legacy BOTW/LAS research pages keep their paths as Chinese historical indexes wi
 Their devices, addresses and performance figures are not support claims for this branch. Vendor documentation and licenses retain their original language.
 
 Inherited touch UI and the Zepp companion are described in [status](STATUS.md); the companion is not adapted to TOTK.
+
+- [Project closeout and remaining work (Chinese)](../PROJECT-CLOSEOUT.md)

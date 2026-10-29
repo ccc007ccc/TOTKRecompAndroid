@@ -16,8 +16,8 @@
   修改 `exec.c`、`device.c`、`vk.h`、Gradle/CMake 和手机控制器等共有文件前核对现状，禁止用旧副本整文件覆盖。
 - 规范整理不自动续跑历史优化、整库编译或实机测量任务。当前要求不包含额外代理并行工作。
 - 两个 2026-10-29 对话的范围、结果和未完成项见 [项目整理基线](docs/PROJECT-BASELINE.md)。
-  本次提交/推送包含着色器链路、共用资源失效通知和项目规范；实验性堆外共享映射、异步 buffer-copy
-  及其专项测试留在原工作区，尚未随本次合入。
+  着色器链路和项目规范已提交；后续收尾接入堆外共享映射、异步 buffer-copy 及专项测试，
+  两个实验开关仍默认关闭。收尾范围与验收见 [收尾记录](docs/PROJECT-CLOSEOUT.md)。
 
 ## 2. 环境与工具链
 
@@ -190,7 +190,8 @@ TOTK_STAGE=.work/totk-port/packages/debug-dev
 | 输入/生成器 | `"$PYTHON" tools/test_totk.py`、`"$PYTHON" tools/test_romfs_build.py`、`"$PYTHON" tools/test_exclusive_pair.py`、`"$PYTHON" tools/test_local_branches.py` |
 | APK/库身份、端侧参数 | `"$PYTHON" tools/test_android_packages.py`；`"$PYTHON" tools/test_gamebuild_flags.py`；实际构建相关 variant/profile |
 | 着色器缓存/编译 | `bash tools/test_shader_runtime.sh`；`bash tools/test_shader_cache_compat.sh`；`bash tools/test_shader_dictionaries.sh` |
-| 程序/管线索引容量、重启 | `"$PYTHON" tools/test_shader_program_cache.py` |
+| 程序/管线索引容量、重启 | `"$PYTHON" tools/test_shader_program_cache.py`；`"$PYTHON" tools/test_shader_lifetimes.py` |
+| 共享映射、异步复制 | `bash tools/test_shared_memory.sh`；`bash tools/test_buffer_copy.sh` |
 | 清单/准备/生命周期 | `bash tools/test_shader_warm_list.sh`；`bash tools/test_shader_warm_prepare.sh`；`bash tools/test_shader_warm_background.sh` |
 | 管线 | `bash tools/test_pipeline_cache.sh`；`bash tools/test_pipeline_warm.sh`；GPU：`bash tools/test_vk_pipeline_warm.sh` |
 | Eden 对应运行时路径 | `bash tools/test_eden_runtime.sh`（含上传缓存、描述符、请求队列与编译回退） |
@@ -249,9 +250,9 @@ CPU 渲染墙钟含等待，GPU 时间可能与它重叠；复制字节占比不
 | 提交时内存快照 | 关 | `LARECOMP_VK_SUBMIT_SNAPSHOT=1`，`submit_snapshot.c` |
 | 顶点采样量化 | 关 | `LARECOMP_VS_SNAP=1`，`exec.c`；不能标成已修复草消失 |
 
-本机实验工作区另有默认关闭的 `LARECOMP_VK_SHARED_ALIAS` 与 `LARECOMP_VK_ASYNC_BUFFER_COPY`，
-分别对应 `shared_memory.c`、`buffer_copy.c`；它们不属于本次提交的功能。专项测试随该工作线后续合入，
-原有共享 guest heap 和本次共用资源失效通知不受此范围划分影响。
+`LARECOMP_VK_SHARED_ALIAS` 与 `LARECOMP_VK_ASYNC_BUFFER_COPY` 默认关闭，
+分别对应 `shared_memory.c`、`buffer_copy.c`，通过手机控制器的 `--shared-alias` / `--async-buffer-copy` 验证。
+共享映射最多保留 512 MiB backing，并保留至少一半驱动分配槽；超出时新范围使用原 CPU 路径。
 
 运行时编译关闭后使用严格完整准备门禁；部分预热清单不能满足该门禁。
 后台顺序是最近使用状态、当前版本 257 个计算输入的默认状态、共享清单；不恢复旧百万级全变体任务。
@@ -267,11 +268,12 @@ CPU 渲染墙钟含等待，GPU 时间可能与它重叠；复制字节占比不
 缓存生成头由 `totk_generate_shader_cache_contract` 统一生成，APK 与独立审计工具共用。
 `shader_cache_compat.json` 是显式审核的旧目录白名单，构建不能自动重写批准新兼容性。
 同格式可读不等于源码键命中；只在准确键匹配时复用。字典和派生模块必须从同一 namespace 验证。
-不伪造 `.shaders-ready`，不把单项映射当完成证明，不为提高命中率对不等价源码建立别名。
+不伪造准备收据，不把单项映射当完成证明，不为提高命中率对不等价源码建立别名。
 准备元数据放应用可写 `cache/shader-warm/<规范化游戏路径摘要>/`，不要求输入游戏目录可写。
 损坏/缺失回退、原子落盘、取消/重启和旧缓存保留是必须维护的行为。
-旧完整路径的 `.shaders-ready` 目前只核对身份，不能作为当前缓存逐项完整的证明；
-已确认的缺口与修复范围见 [着色器链路审查](docs/SHADER-CHAIN-REVIEW.md)。
+完整准备使用同目录的 `full.receipt` 保存准确源码键集合，`full.log` 记录过程；旧 `.shaders-ready` 不再作为门禁。
+UI 只查询收据身份，独立可取消任务逐项检查模块和字典；每次启动在设置加载后重新验证。
+缓存验证只证明所记录模块完整，不证明覆盖全部运行时状态；默认保留运行时编译回退。
 
 ## 8. 代码规范与复用
 
@@ -282,6 +284,8 @@ CPU 渲染墙钟含等待，GPU 时间可能与它重叠；复制字节占比不
 - 新代码先 `rg` 查正式 helper 和测试入口。优先复用：`totk.py`/`game_profile.h` 输入契约、
   `package_android.py` 身份解析、`totk_romfs.py`、`tegra.c`/`formats.c`、`vertex_format.h`、
   正式 `translate.c`、`shader_interface.cpp`、`pipeline_state.c`、现有缓存/队列/复位 API。
+- NVN `SetShaders` 的程序代次与明确写入通知共同参与代码缓存失效；不能用代码地址相同推断内容相同。
+  游戏仍须先等待在途 GPU 工作，再修改或重新绑定代码。未经同步/通知的内存改写不属于该保证。
 - 正常绘制与预热共用管线创建逻辑；运行时与审计共用解析/身份逻辑。合成测试使用独立期望值和错误样本，
   不把生产算法复制一遍再和自己比较。跨平台确需不同实现时写明语义差异，不强行抽象。
 - SHA-256 复用 `third_party/d2r-digest`，上游清单复用 vendored MacNativeGames 工具，
@@ -305,6 +309,7 @@ CPU 渲染墙钟含等待，GPU 时间可能与它重叠；复制字节占比不
   等待可能提交并切换命令缓冲。保留提交快照语义和 overlap/不支持情况的正确回退。
 - 禁止形成“对象锁 → 等渲染队列 → 渲染线程再取对象锁”的环；纹理通知沿用渲染线程登记表和已有通知 API。
 - 停止/重启先停止提交，再排空翻译以及它可能新增的编译任务，最后更换 guest 内存。
+  先提交并完成尚未提交的 command buffer，再销毁管线、预热产物、程序、布局和 ShaderInfo；清空所有快捷缓存。
   单次游戏状态通过 `RT_ON_RESET` 和已有后端重置入口清理；取消后 join 再释放 worker 依赖。
 
 ## 9. 上游、提交和文档
