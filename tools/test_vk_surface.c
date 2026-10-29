@@ -12,7 +12,7 @@
 #include "../runtime/nvn/renderer.h"
 
 VkG g_vk;
-void vk_collect_dead(void);
+uint64_t vk_collect_dead(void);
 static VkCommandBuffer command;
 static VkDebugUtilsMessengerEXT debug_messenger;
 static uint64_t completed;

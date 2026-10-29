@@ -348,7 +348,7 @@ static pthread_mutex_t dead_lock = PTHREAD_MUTEX_INITIALIZER;
 #define DEAD_UNLOCK() ((void)0)
 #endif
 
-void vk_collect_dead(void) {
+uint64_t vk_collect_dead(void) {
     uint64_t done = vk_completed_seq();
     DEAD_LOCK();
     int k = 0;
@@ -360,6 +360,7 @@ void vk_collect_dead(void) {
     ndead = k;
     DEAD_UNLOCK();
     vk_rp_collect(done);
+    return done;
 }
 
 static void create_image(NvnTexture *t, TexBackend *b) {

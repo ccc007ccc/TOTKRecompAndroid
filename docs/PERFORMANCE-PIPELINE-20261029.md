@@ -1,5 +1,7 @@
 # 2026-10-29 第二轮：GPU 提交与复制等待
 
+后续的游戏调用点、直接 UBO 路径和 GPU 读取寿命保护见 [第三轮记录](PERFORMANCE-COPY-UBO-20261029.md)。
+
 本轮从 `f89ebb1` 继续，保留上一轮主堆/堆外上传缓存分离和点尺寸/割草修复。
 设备、驱动、游戏库、设置种子与草地存档沿用 [首轮性能记录](PERFORMANCE-20261029.md)。
 所有手机操作仍限于 PJZ110 的 `com.totkrecomp.android.perftest`；Release/8 Elite，

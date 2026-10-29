@@ -68,7 +68,7 @@ static _Atomic int stat_compiles;
 static uint64_t op_counts[CMD_COUNT];
 bool g_debug_frame;
 static char stats_text[2048];
-void vk_collect_dead(void);
+uint64_t vk_collect_dead(void);
 
 // ================================================================== submissions
 // A submission = optional upload command buffer + the main one, signalling the timeline with its number.
@@ -819,7 +819,13 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     stat_flushes++;
     cum_submits++;
     ring_retire();
+#ifdef __ANDROID__
+    // Image retirement already queried the timeline. Reuse that result so
+    // completed copies stop triggering draw preflight without extra polling.
+    vk_buffer_copy_retire(vk_collect_dead());
+#else
     vk_collect_dead();
+#endif
 }
 
 void renderer_submit(void) { vk_submit_extra(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE); }
@@ -3475,6 +3481,20 @@ void vk_ubo_inline_mark(uint64_t addr, uint64_t size) {
     }
 }
 static bool ubo_direct(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out);  // (below gmem_buf)
+static bool ubo_shared(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out);
+static struct { VkDescriptorBufferInfo info; unsigned ticket; } copy_ubo[6][18];
+static uint32_t copy_ubo_mask[6];
+static bool copy_uniform_info(int stage, int idx, uint64_t size, VkDescriptorBufferInfo *out) {
+    if (idx < 0 || idx >= 18 || !(copy_ubo_mask[stage] & (1u << idx))) return false;
+    // Freeze the preflight decision: the recording thread may have marked an
+    // inline update since then. Its execution waits on this ticket; falling
+    // back to a CPU upload here could read stale data.
+    *out = copy_ubo[stage][idx].info;
+    if (size > out->range) FATAL("[buffer-copy] uniform exceeds preflight range\n");
+    out->range = size;
+    vk_buffer_copy_uniform_use(copy_ubo[stage][idx].ticket);
+    return true;
+}
 #endif
 
 // Constant buffer k of a stage (renderer.m bind_cbufs), copied into transient memory.
@@ -3565,7 +3585,11 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
 #ifdef __ANDROID__
     {
         VkDescriptorBufferInfo d;
-        if (!submit_snapshot_data(r.addr, size) && ubo_direct(r.addr, size, &d)) return d;
+        if (copy_uniform_info(stage, idx, size, &d) || (!submit_snapshot_data(r.addr, size) && ubo_direct(r.addr, size, &d))) {
+            if (trace_copy_bytes) vk_buffer_copy_trace_use(2, stage, idx, st.program->stages[stage].code_addr, r.addr, r.size, size);
+            return d;
+        }
+        if (trace_copy_bytes) vk_buffer_copy_trace_use(1, stage, idx, st.program->stages[stage].code_addr, r.addr, r.size, size);
     }
 #endif
     // snapshot: later CPU writes must not leak in. Shared by the draws of one submission binding the same range:
@@ -3650,11 +3674,8 @@ void vk_buffer_copy_wait(void) {
     renderer_flush();
 }
 
-static bool ubo_direct(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out) {
-    static int on = -1;
-    if (on < 0) on = getenv("LARECOMP_UBO_DIRECT") && atoi(getenv("LARECOMP_UBO_DIRECT"));
-    extern int vk_ab(const char *what);
-    if (!(on || AB("ubo") == 1) || !gmem_placed || addr < HEAP_BASE || addr + size > HEAP_BASE + gmem_size) return false;
+static bool ubo_shared(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out) {
+    if (!gmem_placed || !size || addr < HEAP_BASE || addr - HEAP_BASE > gmem_size || size > gmem_size - (addr - HEAP_BASE)) return false;
     uint64_t off = addr - HEAP_BASE;
     if ((off & (g_vk.props.limits.minUniformBufferOffsetAlignment - 1)) || size > g_vk.props.limits.maxUniformBufferRange)
         return false;
@@ -3662,6 +3683,11 @@ static bool ubo_direct(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out
         if (ubo_inline_has(blk)) return false;
     *out = (VkDescriptorBufferInfo){gmem_buf, off, size};
     return true;
+}
+static bool ubo_direct(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_UBO_DIRECT") && atoi(getenv("LARECOMP_UBO_DIRECT"));
+    return (on || AB("ubo") == 1) && ubo_shared(addr, size, out);
 }
 #endif
 
@@ -4749,6 +4775,7 @@ void vk_exec_reset(void) {
 #ifdef __ANDROID__
     vk_shared_memory_reset();
     vk_buffer_copy_reset();
+    memset(copy_ubo_mask, 0, sizeof copy_ubo_mask);
     submit_snapshot_reset();
     atomic_store_explicit(&submit_retired, 0, memory_order_release);
     memset(ubo_inline, 0, sizeof ubo_inline);  // old guest addresses must not keep a reboot's UBOs on the copy path
@@ -5175,9 +5202,20 @@ static CsProg *compute_program(NvnProgram *np) {
 }
 
 #ifdef __ANDROID__
+static void copy_uniform_begin(void) {
+    memset(copy_ubo_mask, 0, sizeof copy_ubo_mask);
+    vk_buffer_copy_uniform_begin();
+}
+static bool copy_uniform_cpu_diagnostic(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_LOG_CBUF") || getenv("LARECOMP_LOG_RT") || getenv("LARECOMP_LOG_RT3D") ||
+        getenv("LARECOMP_LOG_UI") || getenv("LARECOMP_FIND_PROJ") || getenv("LARECOMP_WATCH_DRAWS");
+    return on || g_debug_frame || vk_diag_active() || ct_on();
+}
 // Preflight CPU inputs before translation/upload records any commands. A wait
 // may submit and replace vk_cmd(), so it must never happen inside stage_set or
-// after begin_pass. These conservative ranges also cover diagnostic CPU reads.
+// after begin_pass. Direct uniforms retain their read lifetime through binding;
+// CPU-only fields and diagnostics still preflight their own reads.
 static void copy_stage_inputs(int stage) {
     if (!vk_buffer_copy_pending() || !st.program) return;
     NvnShaderStage *s = &st.program->stages[stage];
@@ -5187,8 +5225,24 @@ static void copy_stage_inputs(int stage) {
         vk_buffer_copy_cpu_read(s->code_addr, code + constants);
     }
     if (s->control) vk_buffer_copy_cpu_read((uintptr_t)s->control, 0x880);
-    for (int i = 0; i < 18; ++i) if (st.ubuf[stage][i].addr)
-        vk_buffer_copy_cpu_read(st.ubuf[stage][i].addr, st.ubuf[stage][i].size > 16 ? st.ubuf[stage][i].size : 16);
+    bool direct = !submit_snapshot_enabled() && !copy_uniform_cpu_diagnostic();
+    for (int i = 0; i < 18; ++i) if (st.ubuf[stage][i].addr) {
+        Range r = st.ubuf[stage][i];
+        if (trace_copy_bytes) vk_buffer_copy_trace_use(0, stage, i, s->code_addr, r.addr, r.size, r.size);
+        // Vertex slots 0/5 feed CPU widescreen helpers. Fragment slot 0's
+        // fullscreen-fill shortcut only reads its first three floats.
+        if (stage == 1 && i == 0) vk_buffer_copy_cpu_read(r.addr, 12);
+        VkDescriptorBufferInfo d;
+        unsigned ticket = 0;
+        if (direct && !(stage == 0 && (i == 0 || i == 5)) && r.size >= 16 &&
+            vk_buffer_copy_affects(r.addr, r.size) &&
+            ubo_shared(r.addr, r.size, &d)) ticket = vk_buffer_copy_uniform_reserve(r.addr, r.size);
+        if (ticket) {
+            copy_ubo[stage][i].info = d;
+            copy_ubo[stage][i].ticket = ticket;
+            copy_ubo_mask[stage] |= 1u << i;
+        } else vk_buffer_copy_cpu_read(r.addr, r.size > 16 ? r.size : 16);
+    }
     for (int i = 0; i < 16; ++i) if (st.sbuf[stage][i].addr)
         vk_buffer_copy_cpu_read(st.sbuf[stage][i].addr, st.sbuf[stage][i].size);
 }
@@ -5198,6 +5252,12 @@ static void copy_texture_input(NvnTexture *t) {
 static void copy_stage_textures(int stage, ShaderInfo *si) {
     if (!vk_buffer_copy_pending() || !si) return;
     for (int i = 0; i < si->ntex; ++i) {
+        ShaderTexture *texture = &si->tex[i];
+        if (texture->bindless && !texture->is_image && texture->bindless_cbuf >= 3 && texture->bindless_cbuf < 21) {
+            Range r = st.ubuf[stage][texture->bindless_cbuf - 3];
+            if (r.addr && (uint64_t)texture->bindless_offset + 4 <= r.size)
+                vk_buffer_copy_cpu_read(r.addr + texture->bindless_offset, 4);
+        }
         NvnTexture *t = shader_texture_object(stage, &si->tex[i]);
         copy_texture_input(t);
         if (t && naliases) copy_texture_input(alias_read(t));
@@ -5211,6 +5271,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     snap_reason = "compute"; snapshots_invalidate(NULL);
     if (!st.program || !gx || !gy || !gz) return;
 #ifdef __ANDROID__
+    copy_uniform_begin();
     copy_stage_inputs(5);
 #endif
     {   extern uint64_t nvn_watch_texaddr(void);
@@ -5363,6 +5424,7 @@ static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
     if (!st.program) { stat_skipped++; return; }
 #ifdef __ANDROID__
+    copy_uniform_begin();
     copy_stage_inputs(0);
     copy_stage_inputs(1);
     if (vk_buffer_copy_pending()) {
@@ -7103,7 +7165,7 @@ static void split_long_pass(void) {
 
 #ifdef __ANDROID__
 static void copy_command_inputs(const CmdRec *r) {
-    if (!vk_buffer_copy_pending()) return;
+    if (!vk_buffer_copy_cpu_pending()) return;
     switch (r->op) {
     // These records only read their captured payload. Draw/dispatch preflight
     // their resource inputs separately, before opening a Vulkan command buffer.
@@ -7117,6 +7179,10 @@ static void copy_command_inputs(const CmdRec *r) {
     case CMD_SET_VIEWPORTS: case CMD_SET_SCISSORS: case CMD_SET_DEPTH_RANGES:
     case CMD_SET_BLEND_COLOR: case CMD_SET_STENCIL: case CMD_SET_POLYGON_OFFSET:
     case CMD_SET_PRIMITIVE_RESTART: case CMD_SET_DEPTH_CLAMP: case CMD_SET_COPY_STRIDES:
+    // Captured scalar state (currently only logged by the executor): no guest
+    // buffer access. Do not turn an unimplemented state setter into a fence.
+    case CMD_SET_ALPHA_REF: case CMD_SET_DEPTH_BOUNDS: case CMD_SET_LINE_WIDTH:
+    case CMD_SET_POINT_SIZE: case CMD_SET_SAMPLE_MASK:
     case CMD_SET_RENDER_ENABLE: case CMD_DRAW_ARRAYS: case CMD_DRAW_ELEMENTS: case CMD_DISPATCH:
     case CMD_BARRIER: case CMD_FENCE_SYNC: case CMD_COPY_BUFFER_TO_BUFFER:
         return;
@@ -7133,6 +7199,22 @@ static void copy_command_inputs(const CmdRec *r) {
         copy_texture_input(st.rt.depth); return;
     case CMD_CLEAR_TEXTURE:
         copy_texture_input((NvnTexture *)(uintptr_t)*(const uint64_t *)r->extra); return;
+    case CMD_COPY_TEXTURE_TO_TEXTURE: case CMD_DOWNSAMPLE: {
+        // Image copies/blits stay on the GPU. vk_tex may first upload CPU
+        // texels on either side; aliases themselves only copy existing images.
+        const TexRefRec *refs = (const TexRefRec *)r->extra;
+        for (int i = 0; i < 2; ++i) copy_texture_input((NvnTexture *)(uintptr_t)refs[i].tex);
+        return;
+    }
+    case CMD_SIGNAL_EVENT:
+        // Event's first word points to its u32 storage (objects.c). The
+        // executor still only logs this unsupported command; retaining its
+        // possible write protection does not require fencing unrelated UBOs.
+        if (r->x[0]) {
+            vk_buffer_copy_cpu_read(r->x[0], sizeof(uint64_t));
+            vk_buffer_copy_cpu_write(*(const uint64_t *)(uintptr_t)r->x[0], sizeof(uint32_t));
+        }
+        return;
     case CMD_REPORT_COUNTER:
         vk_buffer_copy_cpu_write(r->x[1], 16);
         // pace_end_counter can read the preceding counter's timestamp when
@@ -7489,6 +7571,9 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_COPY_BUFFER_TO_TEXTURE: copy_buffer_to_texture(r->x[0], x); break;
         case CMD_COPY_TEXTURE_TO_BUFFER: copy_texture_to_buffer(x, r->x[3]); break;
         case CMD_COPY_BUFFER_TO_BUFFER:
+#ifdef __ANDROID__
+            vk_buffer_copy_trace(r->x[0], r->x[1], r->x[2]);
+#endif
             vk_texture_copy_diagnostic(r->x[0], r->x[1], r->x[2]);
             if (trace_copy_bytes) {
                 buffer_copy_stats.count++; buffer_copy_stats.bytes += r->x[2];

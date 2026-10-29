@@ -107,6 +107,15 @@ void vk_buffer_copy_cpu_write(uint64_t addr, uint64_t size);
 void vk_buffer_copy_wait(void); // flush with a distinct profiling reason
 void vk_texture_memory_written(uint64_t addr, uint64_t size); // render thread; no NVN object registry lock
 void vk_buffer_copy_reset(void);
+void vk_buffer_copy_retire(uint64_t done); // render thread; reuse known GPU completion
+bool vk_buffer_copy_cpu_pending(void); // includes direct uniform reads after copy retirement
+bool vk_buffer_copy_affects(uint64_t addr, uint64_t size); // pending destinations, no driver query
+void vk_buffer_copy_uniform_begin(void); // release previous draw's preflight reservations
+unsigned vk_buffer_copy_uniform_reserve(uint64_t addr, uint64_t size); // zero: use CPU fallback
+void vk_buffer_copy_uniform_use(unsigned ticket); // binding only; never submits/waits
+void vk_buffer_copy_trace(uint64_t src, uint64_t dst, uint64_t size);
+void vk_buffer_copy_trace_use(unsigned kind, int stage, int slot, uint64_t code,
+                              uint64_t addr, uint64_t bound_size, uint64_t used_size);
 void vk_wait_seq(uint64_t seq);
 void vk_full_barrier(VkCommandBuffer cb);
 void vk_end_pass(void);

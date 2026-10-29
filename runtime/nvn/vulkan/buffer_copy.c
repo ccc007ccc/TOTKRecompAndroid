@@ -10,6 +10,30 @@ typedef struct { uint64_t src, dst, size, seq; } PendingCopy;
 static PendingCopy pending[256];
 static unsigned npending;
 static uint64_t issued;
+typedef struct { uint64_t src, dst, size; unsigned logs[3]; } CopyTrace;
+static CopyTrace trace;
+// A direct uniform can outlive the copy that produced it. Keep its GPU read
+// lifetime separately, so subsequent inline CPU writes protect the whole UBO.
+// Tickets are stable from preflight through binding, even if preflight waits.
+typedef struct { uint64_t addr, size, seq; bool reserved; } UniformRead;
+static UniformRead reads[64];
+static unsigned nreads;
+void vk_buffer_copy_trace(uint64_t src, uint64_t dst, uint64_t size) {
+    if (!vk_timing_trace_on()) return;
+    trace.src = src; trace.dst = dst; trace.size = size;
+}
+void vk_buffer_copy_trace_use(unsigned kind, int stage, int slot, uint64_t code,
+                              uint64_t addr, uint64_t bound_size, uint64_t used_size) {
+    if (!vk_timing_trace_on() || kind >= 3 || trace.logs[kind] >= 64 || !trace.size || !bound_size ||
+        addr > UINT64_MAX - bound_size || trace.dst > UINT64_MAX - trace.size ||
+        addr >= trace.dst + trace.size || trace.dst >= addr + bound_size) return;
+    const char *names[] = {"preflight", "uniform-upload", "uniform-direct"};
+    ++trace.logs[kind];
+    LOG("[buffer-flow-use] %s stage=%d slot=%d code=%llx range=%llx+%llx used=%llx copy=%llx->%llx+%llx\n",
+        names[kind], stage, slot, (unsigned long long)code, (unsigned long long)addr,
+        (unsigned long long)bound_size, (unsigned long long)used_size,
+        (unsigned long long)trace.src, (unsigned long long)trace.dst, (unsigned long long)trace.size);
+}
 static bool enabled(void) {
     static int on = -1;
     if (on < 0) { const char *value = getenv("LARECOMP_VK_ASYNC_BUFFER_COPY"); on = value && atoi(value) != 0; }
@@ -19,18 +43,69 @@ static void retire(uint64_t done) {
     unsigned keep = 0;
     for (unsigned i = 0; i < npending; ++i) if (pending[i].seq > done) pending[keep++] = pending[i];
     npending = keep;
+    for (unsigned i = 0; i < nreads; ++i) if (reads[i].seq <= done) {
+        reads[i].seq = 0;
+        if (!reads[i].reserved) reads[i].size = 0;
+    }
+    while (nreads && !reads[nreads - 1].size) --nreads;
 }
+void vk_buffer_copy_retire(uint64_t done) { retire(done); }
 bool vk_buffer_copy_pending(void) {
-    if (npending) retire(vk_completed_seq());
+    // This is called for every command/draw. Query the driver only for an
+    // actual dependency, a new copy, or tracking-table pressure.
     return npending != 0;
 }
+bool vk_buffer_copy_cpu_pending(void) { return npending || nreads; }
+void vk_buffer_copy_uniform_begin(void) {
+    for (unsigned i = 0; i < nreads; ++i) {
+        reads[i].reserved = false;
+        if (!reads[i].seq) reads[i].size = 0;
+    }
+    while (nreads && !reads[nreads - 1].size) --nreads;
+}
+bool vk_buffer_copy_affects(uint64_t addr, uint64_t size) {
+    if (!size || addr > UINT64_MAX - size) return false;
+    for (unsigned i = 0; i < npending; ++i)
+        if (pending[i].dst < addr + size && addr < pending[i].dst + pending[i].size) return true;
+    return false;
+}
+unsigned vk_buffer_copy_uniform_reserve(uint64_t addr, uint64_t size) {
+    if (!vk_buffer_copy_affects(addr, size)) return 0;
+    for (unsigned attempt = 0; attempt < 2; ++attempt) {
+        unsigned empty = nreads;
+        for (unsigned i = 0; i < nreads; ++i) {
+            if (reads[i].addr == addr && reads[i].size == size) {
+                reads[i].reserved = true;
+                return i + 1;
+            }
+            if (!reads[i].size) empty = i;
+        }
+        if (empty < sizeof reads / sizeof *reads) {
+            reads[empty] = (UniformRead){.addr = addr, .size = size, .reserved = true};
+            if (empty == nreads) ++nreads;
+            return empty + 1;
+        }
+        if (!attempt) retire(vk_completed_seq());
+    }
+    return 0; // capacity pressure: caller keeps its normal CPU-read preflight
+}
+void vk_buffer_copy_uniform_use(unsigned ticket) {
+    if (!ticket || ticket > nreads || !reads[ticket - 1].reserved)
+        FATAL("[buffer-copy] invalid uniform preflight ticket\n");
+    // Binding happens after acquiring the draw's command buffer. Never wait
+    // here, and use its actual seq, not the earlier preflight/copy seq.
+    reads[ticket - 1].seq = vk_pending_seq();
+}
 static void cpu_access(uint64_t addr, uint64_t size, bool write) {
-    if (!npending || !size || addr > UINT64_MAX - size) return;
+    if ((!npending && (!write || !nreads)) || !size || addr > UINT64_MAX - size) return;
     uint64_t needed = 0;
     for (unsigned i = 0; i < npending; ++i)
         if (((pending[i].dst < addr + size && addr < pending[i].dst + pending[i].size) ||
              (write && pending[i].src < addr + size && addr < pending[i].src + pending[i].size)) && pending[i].seq > needed)
             needed = pending[i].seq;
+    if (write) for (unsigned i = 0; i < nreads; ++i)
+        if (reads[i].size && reads[i].addr < addr + size && addr < reads[i].addr + reads[i].size && reads[i].seq > needed)
+            needed = reads[i].seq;
     if (!needed) return;
     uint64_t done = vk_completed_seq();
     if (done < needed) {
@@ -81,5 +156,5 @@ bool vk_buffer_copy_async(uint64_t src, uint64_t dst, uint64_t size) {
     vk_texture_memory_written(dst, size);
     return true;
 }
-void vk_buffer_copy_reset(void) { npending = 0; issued = 0; }
+void vk_buffer_copy_reset(void) { npending = nreads = 0; issued = 0; trace = (CopyTrace){0}; }
 #endif

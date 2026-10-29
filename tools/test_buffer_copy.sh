@@ -10,4 +10,5 @@ ${CC:-clang} -D__ANDROID__ -O1 -g -fsanitize=address,undefined -ffunction-sectio
 "$COPY_TEST_OUT/test-buffer-copy" off
 "$COPY_TEST_OUT/test-buffer-copy"
 ${PYTHON:-python3} tools/test_buffer_copy_commands.py "$COPY_TEST_OUT"
+${PYTHON:-python3} tools/test_buffer_copy_uniforms.py "$COPY_TEST_OUT"
 ${PYTHON:-python3} tools/test_texture_notifications.py "$COPY_TEST_OUT"

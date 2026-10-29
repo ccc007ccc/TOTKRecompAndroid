@@ -16,6 +16,10 @@
 #include <string.h>
 
 #include "nvn.h"
+#ifdef __ANDROID__
+#include <stdatomic.h>
+#include "vulkan/timing_trace.h"
+#endif
 
 #define SHADOW_K 8                                                  // shadow bytes per byte of the game's memory
 #define SHADOW_PAGE 0x10000ull                                      // (game bytes)
@@ -549,7 +553,24 @@ NVN(nvnCommandBufferCopyTextureToTexture) {  // (cmd, src, srcView, srcRegion, d
     CmdRec *r = record(c, CMD_COPY_TEXTURE_TO_TEXTURE, sizeof t, &s);
     memcpy(r->extra, t, sizeof t);
 }
-PLAIN(nvnCommandBufferCopyBufferToBuffer, CMD_COPY_BUFFER_TO_BUFFER)
+NVN(nvnCommandBufferCopyBufferToBuffer) {
+    Snap s = snap(c);
+#ifdef __ANDROID__
+    uint64_t caller = c->x[30];
+#endif
+    CmdRec *r = record(c, CMD_COPY_BUFFER_TO_BUFFER, 0, &s);
+#ifdef __ANDROID__
+    if (vk_timing_trace_on()) {
+        static _Atomic unsigned logged;
+        if (atomic_fetch_add_explicit(&logged, 1, memory_order_relaxed) < 64)
+            LOG("[buffer-flow-record] command=%p caller=%llx src=%llx dst=%llx size=%llx\n", (void *)r,
+                (unsigned long long)(caller - GUEST_LO + GUEST_CANON), (unsigned long long)s.x[1],
+                (unsigned long long)s.x[2], (unsigned long long)s.x[3]);
+    }
+#else
+    (void)r;
+#endif
+}
 NVN(nvnCommandBufferDownsample) {
     Snap s = snap(c);
     TexRef t[2] = {{0}};

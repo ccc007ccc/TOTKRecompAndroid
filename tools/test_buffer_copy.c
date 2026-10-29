@@ -9,7 +9,7 @@
 typedef struct { unsigned src, dst, size; } Copy;
 static uint8_t memory[8192];
 static Copy copies[512];
-static unsigned ncopies, waits, invalidations, texture_writes, barriers;
+static unsigned ncopies, waits, invalidations, texture_writes, barriers, queries;
 static uint64_t done, seq = 1;
 static bool timeout;
 static jmp_buf fatal;
@@ -18,7 +18,7 @@ static void complete(void) {
         memcpy(memory + copies[i].dst, memory + copies[i].src, copies[i].size);
     ncopies = 0; done = seq++;
 }
-uint64_t vk_completed_seq(void) { return done; }
+uint64_t vk_completed_seq(void) { ++queries; return done; }
 bool vk_timing_trace_on(void) { return false; }
 uint64_t vk_pending_seq(void) { return seq; }
 void vk_buffer_copy_wait(void) { ++waits; if (!timeout) complete(); }
@@ -82,6 +82,52 @@ int main(int argc, char **argv) {
     assert(npending == 1);
     timeout = false; vk_buffer_copy_cpu_write(0, UINT64_MAX);
     assert(!vk_buffer_copy_pending());
+    // Uniform reads use a later submission than their producing copy. A CPU
+    // write to even the uncopied prefix must wait for that read, not just copy.
+    assert(vk_buffer_copy_async(0x10000, 0x10110, 16));
+    vk_buffer_copy_uniform_begin();
+    unsigned ticket = vk_buffer_copy_uniform_reserve(0x10100, 32);
+    assert(ticket && vk_buffer_copy_uniform_reserve(0x10100, 32) == ticket);
+    unsigned query_before = queries;
+    for (unsigned i = 0; i < 100; ++i) assert(vk_buffer_copy_pending() && vk_buffer_copy_cpu_pending());
+    assert(queries == query_before); // hot predicates never query the driver
+    complete();
+    vk_buffer_copy_retire(done); // existing submission poll; preserve reserved ticket
+    assert(queries == query_before);
+    assert(!vk_buffer_copy_pending() && vk_buffer_copy_cpu_pending());
+    query_before = queries;
+    vk_buffer_copy_uniform_use(ticket);
+    assert(queries == query_before);
+    VkBufferCopy uniform_read = {0x100, 0x300, 32};
+    record((VkCommandBuffer)1, (VkBuffer)1, (VkBuffer)1, 1, &uniform_read);
+    before = waits;
+    vk_buffer_copy_cpu_read(0x10100, 32); // read/read is safe
+    vk_buffer_copy_cpu_write(0x10120, 4); // adjacency is not overlap
+    assert(waits == before);
+    vk_buffer_copy_uniform_begin(); // previous draw no longer reserves tickets
+    vk_buffer_copy_cpu_write(0x10100, 4);
+    assert(waits == before + 1 && memory[0x310] == 0x31 && !vk_buffer_copy_cpu_pending());
+    memset(memory + 0x100, 0x99, 32);
+    assert(memory[0x310] == 0x31); // the GPU observed the old uniform
+    assert(!vk_buffer_copy_uniform_reserve(UINT64_MAX - 4, 32));
+    assert(!vk_buffer_copy_uniform_reserve(0x10100, 0));
+    // Full table: fail closed, without waiting inside descriptor binding or
+    // evicting reservations. Retired, unreserved entries can then be reused.
+    assert(vk_buffer_copy_async(0x10000, 0x10800, 1024));
+    vk_buffer_copy_uniform_begin();
+    for (unsigned i = 0; i < 64; ++i) {
+        ticket = vk_buffer_copy_uniform_reserve(0x10800 + i * 4, 16);
+        assert(ticket); vk_buffer_copy_uniform_use(ticket);
+    }
+    before = waits;
+    assert(!vk_buffer_copy_uniform_reserve(0x10980, 16) && waits == before);
+    complete();
+    assert(!vk_buffer_copy_uniform_reserve(0x10980, 16)); // reservations survive retirement
+    vk_buffer_copy_uniform_begin();
+    assert(vk_buffer_copy_async(0x10000, 0x10800, 1024));
+    assert(vk_buffer_copy_uniform_reserve(0x10980, 16));
+    vk_buffer_copy_cpu_write(0, UINT64_MAX);
     vk_buffer_copy_reset(); assert(!npending);
-    puts("PASS: chained GPU copies, CPU visibility, source lifetime, overlap/bounds fallback, retirement, queue pressure and wait failure");
+    assert(!vk_buffer_copy_cpu_pending());
+    puts("PASS: chained copies, CPU visibility, source/uniform read lifetime, stable reservations, bounds/capacity fallback, retirement and wait failure");
 }

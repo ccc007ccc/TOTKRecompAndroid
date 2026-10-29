@@ -14,21 +14,28 @@ def helper(name):
     return execution[start:execution.index('\n}', start) + 2]
 
 fixture = (root / 'tools/test_buffer_copy.c').read_text().split('int main(', 1)[0]
+texture_ref = next(line for line in execution.splitlines() if line.startswith('typedef struct') and line.endswith('} TexRefRec;'))
 unit = out / 'buffer-copy-commands.c'
 unit.write_text(fixture + r'''
 static struct { struct { int ncolor; NvnTexture *color[8], *depth; } rt; } st;
 uint64_t tegra_total_size(const TexLayout *layout) { return layout->width; }
-''' + helper('copy_texture_input') + helper('copy_command_inputs') + r'''
+''' + texture_ref + helper('copy_texture_input') + helper('copy_command_inputs') + r'''
 int main(void) {
     setenv("LARECOMP_VK_ASYNC_BUFFER_COPY", "1", 1);
     memset(memory, 0x71, 32);
-    CmdRec *command = calloc(1, sizeof(CmdRec) + sizeof(uint64_t));
+    CmdRec *command = calloc(1, sizeof(CmdRec) + 2 * sizeof(TexRefRec));
     assert(command);
     unsigned before = waits;
     assert(vk_buffer_copy_async(0x10000, 0x10100, 32));
     command->op = CMD_SET_RENDER_TARGETS;
     copy_command_inputs(command);
     assert(waits == before && vk_buffer_copy_pending() && !memory[0x100]);
+    const unsigned setters[] = {CMD_SET_ALPHA_REF, CMD_SET_DEPTH_BOUNDS, CMD_SET_LINE_WIDTH,
+                               CMD_SET_POINT_SIZE, CMD_SET_SAMPLE_MASK};
+    for (unsigned i = 0; i < sizeof setters / sizeof *setters; ++i) {
+        command->op = setters[i]; copy_command_inputs(command);
+        assert(waits == before && vk_buffer_copy_pending());
+    }
     NvnTexture color = {.addr = 0x11000, .layout = {.width = 32}};
     NvnTexture depth = {.addr = 0x11200, .layout = {.width = 32}};
     st.rt.ncolor = 1; st.rt.color[0] = &color; st.rt.depth = &depth;
@@ -66,8 +73,41 @@ int main(void) {
     assert(vk_buffer_copy_async(0x10000, 0x10100, 32));
     command->op = CMD_COUNT;
     copy_command_inputs(command); assert(waits == ++before);
+    // A completed copy must not disable preflight for a later direct GPU read.
+    assert(vk_buffer_copy_async(0x10000, 0x10110, 16));
+    vk_buffer_copy_uniform_begin();
+    unsigned ticket = vk_buffer_copy_uniform_reserve(0x10100, 32);
+    assert(ticket);
+    complete(); vk_buffer_copy_cpu_read(0x10110, 16);
+    assert(!vk_buffer_copy_pending());
+    vk_buffer_copy_uniform_use(ticket);
+    command->op = CMD_UPDATE_UNIFORM_BUFFER;
+    command->x[0] = 0x10100; command->x[2] = 0; command->x[3] = 4;
+    copy_command_inputs(command); assert(waits == ++before);
+    const unsigned image_copies[] = {CMD_COPY_TEXTURE_TO_TEXTURE, CMD_DOWNSAMPLE};
+    TexRefRec *refs = (TexRefRec *)command->extra;
+    refs[0].tex = (uintptr_t)&color; refs[1].tex = (uintptr_t)&depth;
+    for (unsigned i = 0; i < 2; ++i) {
+        color.addr = 0x11000; depth.addr = 0x11200;
+        command->op = image_copies[i];
+        assert(vk_buffer_copy_async(0x10000, 0x10100, 32));
+        copy_command_inputs(command); assert(waits == before && vk_buffer_copy_pending());
+        color.addr = 0x1011c; // source texels may need uploading
+        copy_command_inputs(command); assert(waits == ++before);
+        assert(vk_buffer_copy_async(0x10000, 0x10100, 32));
+        color.addr = 0x11000; depth.addr = 0x1011c; // destination's previous texels too
+        copy_command_inputs(command); assert(waits == ++before);
+    }
+    // Event storage is a single word, not a write to every guest allocation.
+    uint64_t event = 0x11000;
+    command->op = CMD_SIGNAL_EVENT; command->x[0] = (uintptr_t)&event;
+    assert(vk_buffer_copy_async(0x10000, 0x10100, 32));
+    copy_command_inputs(command); assert(waits == before && vk_buffer_copy_pending());
+    event = 0x1011c; copy_command_inputs(command); assert(waits == ++before);
+    assert(vk_buffer_copy_async(0x10000, 0x10100, 32));
+    event = 0x10000; copy_command_inputs(command); assert(waits == ++before);
     free(command);
-    puts("PASS: target changes/unrelated clears stay queued; attachment reads, counter writes/paired reads, source lifetime and unknown commands wait");
+    puts("PASS: scalar state/image copies stay queued; overlapping texels, counters, copy/uniform lifetimes and unknown commands wait");
 }
 ''')
 binary = out / 'test-buffer-copy-commands'
