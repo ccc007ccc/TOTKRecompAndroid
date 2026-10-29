@@ -75,6 +75,14 @@ Android 的 `run-as` 不一定能读取应用在共享存储里的设置。
 它不改变分辨率、帧率目标或同步语义，也不会自动开启 profiling；参数记录在 `launch.json`，
 可用于同一 APK 的普通帧率对照。不传时使用驱动对应的运行时默认值。
 
+`benchmark --shader-stats` 让驱动输出各管线的指令、寄存器和溢出统计，同样启用 profiling 并改变管线创建标志，
+只用于定位。已预热复用的管线不经过统计路径；要覆盖热点着色器，需同时传 `--pipeline-warm off`。
+
+`--diagnostic-env NAME=VALUE`（可重复）把一个现有测量开关交给运行时：名称只能是 `LARECOMP_*`、`TU_DEBUG`
+或 `TU_AUTOTUNE_ALGO` / `TU_AUTOTUNE_FLAGS`，值为不含逗号和空白的单个词；与控制器自身设置的变量同名时拒绝启动。
+它不自动开启 profiling，便于同一 APK 的帧率对照，但结果属于开关诊断，`launch.json` 单独记录 `diagnostic_env`。
+`TU_DEBUG` 需在驱动加载前生效，运行时只在未设置时才写入 `nolrz`；例如 `TU_DEBUG=perf` 的驱动提示写入 logcat（标签 `TU`）。
+
 `benchmark --apk <本地确切 APK>` 会在设备锁内校验包名并安装，再记录实际安装包的 SHA-256。
 同一工作区的自动启动按设备序列号持有进程锁，另一控制器会在执行ADB前退出，避免互相force-stop。
 锁文件存在不表示仍有测试运行，进程结束会自动释放锁。直接执行ADB安装或手动停止不受该锁保护；

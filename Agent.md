@@ -236,7 +236,9 @@ TOTK_STAGE=.work/totk-port/packages/release-snapdragon-8elite-perftest
 指定槽位保留正常菜单确认流程，实际读取目标进度文件后停止自动按键；不要改写标题入口跳过界面初始化。
 默认 15 秒，可选 1–60 秒。就绪条件是连续 90 帧场景 G-buffer/绘制量启发式，不是内部“已可操作”标志。
 `--profile` 是诊断计数开关，和构建脚本的 `--profile <编译档>` 含义不同；诊断/回读结果单独记账。
-`--gpu-profile-frame` / `--timing-trace` 自动启用诊断；`--render-split-us` 只覆盖提交阈值。
+`--gpu-profile-frame` / `--timing-trace` / `--shader-stats` 自动启用诊断；`--render-split-us` 只覆盖提交阈值。
+`--diagnostic-env NAME=VALUE` 只接受 `LARECOMP_*` 测量开关和 Turnip 的 `TU_DEBUG` / `TU_AUTOTUNE_*`，
+不能覆盖控制器自身设置；它不自动启用诊断计数，但结果属于开关对照，不能当作默认配置成绩。
 这些参数记录在 `launch.json`，用法与时间戳回读的影响见 [手机性能测试](docs/PHONE-PERFORMANCE.md)。
 
 控制器对同一工作区的设备序列号加进程锁；`benchmark --apk` 将安装纳入该锁。

@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 import math
+import re
 import shlex
 import subprocess
 import tarfile
@@ -43,10 +44,13 @@ def main():
         launch.add_argument('--game-dynres',choices=['default','on','off'],default='default',help='Use the normal runtime policy unless explicitly overridden')
         launch.add_argument('--texture-scaling',choices=['settings','native'],default='settings',help='Respect the selected resolution (default); native bypasses all target scaling for diagnostic comparisons only')
         launch.add_argument('--render-split-us',type=int,help='Long-pass submission interval, 0..20000 microseconds; 0 disables splitting')
+        launch.add_argument('--diagnostic-env',action='append',default=[],metavar='NAME=VALUE',
+                            help='Diagnostic only: pass one LARECOMP_* measurement switch or Turnip TU_DEBUG/TU_AUTOTUNE_* option; repeatable, recorded in launch.json')
     benchmark.add_argument('--save-slot',type=int,choices=range(6),default=0)
     benchmark.add_argument('--seconds',type=float,default=15,help='Measurement duration after loading, 1..60 seconds (default 15)')
     benchmark.add_argument('--timeout',type=float,help='Overall startup and measurement timeout')
     benchmark.add_argument('--profile',action='store_true',help='Record CPU/GPU timing and constant-buffer copy counters during the automatic run')
+    benchmark.add_argument('--shader-stats',action='store_true',help='Diagnostic only: collect driver instruction/register/spill statistics; enables profiling and changes pipeline creation flags')
     benchmark.add_argument('--camera-turn',action='store_true',help='Turn right at half stick during the measured interval; use a runtime supporting this route')
     benchmark.add_argument('--gpu-profile-frame',type=int,help='Diagnostic only: timestamp each GPU pass in this absolute frame; enables profiling')
     benchmark.add_argument('--timing-trace',action='store_true',help='Diagnostic only: trace GPU counters and queue waits; enables profiling')
@@ -70,12 +74,22 @@ def main():
     timed=args.command=='benchmark'
     if launching and args.render_split_us is not None and not 0<=args.render_split_us<=20000:
         ap.error('render-split-us must be 0..20000')
+    if launching:
+        names=set()
+        for item in args.diagnostic_env:
+            name,_,value=item.partition('=')
+            # Values travel inside the comma-separated Intent env argument.
+            if not re.fullmatch(r'LARECOMP_[A-Z0-9_]+|TU_DEBUG|TU_AUTOTUNE_ALGO|TU_AUTOTUNE_FLAGS',name):
+                ap.error('diagnostic-env name must be LARECOMP_*, TU_DEBUG or TU_AUTOTUNE_ALGO/FLAGS')
+            if not re.fullmatch(r'[A-Za-z0-9_.:+/-]+',value):ap.error('diagnostic-env value must be one word without commas')
+            if name in names:ap.error('diagnostic-env repeats '+name)
+            names.add(name)
     if timed:
         if not math.isfinite(args.seconds) or not 1<=args.seconds<=60:ap.error('seconds must be 1..60')
         if args.gpu_profile_frame is not None:
             if not 1<=args.gpu_profile_frame<=1000000:ap.error('gpu-profile-frame must be 1..1000000')
             args.profile=True
-        if args.timing_trace:args.profile=True
+        if args.timing_trace or args.shader_stats:args.profile=True
         if args.compare_ubo is not None:
             if not 30<=args.compare_ubo<=600:ap.error('compare-ubo must be 30..600 frames')
             args.profile=True
@@ -167,6 +181,7 @@ def main():
             env+=['LARECOMP_VK_PROF=1','LARECOMP_LOG_CBUF_BYTES=1','LARECOMP_LOG_PACE=1']
         if timed and args.gpu_profile_frame is not None:env+=['LARECOMP_GPUPROF_AT='+str(args.gpu_profile_frame)]
         if timed and args.timing_trace:env+=['LARECOMP_TIMING_TRACE=1']
+        if timed and args.shader_stats:env+=['LARECOMP_SHADER_STATS=1']
         if timed and args.compare_ubo is not None:
             env+=['LARECOMP_AB='+str(args.compare_ubo)+':ubo']
         if args.submit_snapshot:env+=['LARECOMP_VK_SUBMIT_SNAPSHOT=1','LARECOMP_LOG_SUBMIT_SNAPSHOT=1']
@@ -198,6 +213,11 @@ def main():
             private('test','-r',args.game_library)
             library_sha=private('sha256sum',args.game_library).stdout.split()[0]
             env+=['LARECOMP_GAME_LIB='+args.game_library]
+        controlled={entry.partition('=')[0] for entry in env}
+        for item in args.diagnostic_env:
+            if item.partition('=')[0] in controlled:
+                raise RuntimeError('diagnostic-env cannot replace a controller option: '+item.partition('=')[0])
+        env+=args.diagnostic_env
         package_paths=shell('pm','path',package).stdout.strip().splitlines()
         apk=next((p.removeprefix('package:') for p in package_paths if p.endswith('/base.apk')),None)
         apk_sha=shell('sha256sum',apk).stdout.split()[0] if apk else None
@@ -215,9 +235,11 @@ def main():
                   'texture_scaling':args.texture_scaling,
                   'camera_turn':args.camera_turn if timed else False,
                   'render_split_us':args.render_split_us,
+                  'diagnostic_env':args.diagnostic_env,
                   'profiling':args.profile if timed else True,
                   'gpu_profile_frame':args.gpu_profile_frame if timed else None,
                   'timing_trace':args.timing_trace if timed else False,
+                  'shader_stats':args.shader_stats if timed else False,
                   'ubo_ab_frames':args.compare_ubo if timed else None,
                   'benchmark_seconds':args.seconds if timed else None,
                   'diagnostic_present_interval':args.diagnostic_present_interval}

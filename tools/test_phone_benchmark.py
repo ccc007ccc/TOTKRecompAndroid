@@ -100,7 +100,7 @@ class PhoneBenchmarkTests(unittest.TestCase):
         launches=[shlex_call[1] for shlex_call in calls if shlex_call[0]=='shell' and shlex_call[1].startswith('am start ')]
         self.assertEqual(len(launches),1)
         self.assertIn('LARECOMP_FPS=60',launches[0])
-        profiling=any(option in extra for option in ('--profile','--compare-ubo','--gpu-profile-frame','--timing-trace'))
+        profiling=any(option in extra for option in ('--profile','--compare-ubo','--gpu-profile-frame','--timing-trace','--shader-stats'))
         self.assertEqual('LARECOMP_VK_PROF=1' in launches[0],profiling)
         self.assertEqual('LARECOMP_LOG_PACE=1' in launches[0],profiling)
         if '--compare-ubo' in extra:
@@ -210,6 +210,44 @@ class PhoneBenchmarkTests(unittest.TestCase):
             self.assertNotEqual(proc.returncode,0)
             self.assertIn('gpu-profile-frame must be',proc.stderr)
         self.assertFalse((self.path/'calls.jsonl').exists())
+
+    def test_shader_statistics_are_explicit_and_marked_as_profiling(self):
+        proc=self.run_cli('success','--shader-stats')
+        self.assertEqual(proc.returncode,0,proc.stderr)
+        manifest=json.loads(next((self.path/'reports').glob('benchmark-*/launch.json')).read_text())
+        self.assertTrue(manifest['profiling'])
+        self.assertTrue(manifest['shader_stats'])
+        self.assertIn('LARECOMP_SHADER_STATS=1',manifest['env'])
+
+    def test_diagnostic_environment_is_forwarded_and_recorded(self):
+        proc=self.run_cli('success','--diagnostic-env','LARECOMP_VK_NO_MUTABLE=1','--diagnostic-env','TU_DEBUG=sysmem')
+        self.assertEqual(proc.returncode,0,proc.stderr)
+        manifest=json.loads(next((self.path/'reports').glob('benchmark-*/launch.json')).read_text())
+        self.assertFalse(manifest['profiling'])
+        self.assertEqual(manifest['diagnostic_env'],['LARECOMP_VK_NO_MUTABLE=1','TU_DEBUG=sysmem'])
+        self.assertIn('LARECOMP_VK_NO_MUTABLE=1',manifest['env'])
+        self.assertIn('TU_DEBUG=sysmem',manifest['env'])
+
+    def test_diagnostic_environment_rejected_before_touching_device(self):
+        for bad in (['PATH=/tmp'],['LD_PRELOAD=x.so'],['LARECOMP_X=a,b'],['TU_DEBUG=a b'],['LARECOMP_X='],
+                    ['LARECOMP_X=1','LARECOMP_X=0']):
+            options=[part for item in bad for part in ('--diagnostic-env',item)]
+            proc=subprocess.run([sys.executable,str(ROOT/'tools/phone_test_session.py'),'--serial','phone-benchmark-test',
+                'benchmark',*options],capture_output=True,text=True,timeout=5)
+            self.assertNotEqual(proc.returncode,0,bad)
+            self.assertIn('diagnostic-env',proc.stderr)
+        self.assertFalse((self.path/'calls.jsonl').exists())
+
+    def test_diagnostic_environment_cannot_replace_controller_options(self):
+        env=dict(os.environ,PHONE_BENCH_MOCK_DIR=str(self.path),PHONE_BENCH_MOCK_MODE='success')
+        env['PATH']=str(self.path)+os.pathsep+env['PATH']
+        proc=subprocess.run([sys.executable,str(ROOT/'tools/phone_test_session.py'),'--serial','phone-benchmark-test',
+            '--output',str(self.path/'reports'),'benchmark','--diagnostic-env','LARECOMP_FPS=30'],
+            env=env,capture_output=True,text=True,timeout=12)
+        self.assertNotEqual(proc.returncode,0)
+        self.assertIn('cannot replace a controller option: LARECOMP_FPS',proc.stderr)
+        calls=[json.loads(line) for line in (self.path/'calls.jsonl').read_text().splitlines()]
+        self.assertFalse(any(c[0]=='shell' and c[1].startswith('am start ') for c in calls))
 
     def test_render_split_zero_is_forwarded_without_enabling_profiling(self):
         proc=self.run_cli('success','--render-split-us','0')
