@@ -1,3 +1,5 @@
 # Keep Android build scripts compatible with Bash on development hosts.
 *.sh text eol=lf
 *.py text eol=lf
+# Preserve this reviewed compiler input byte-for-byte (shader_cache_compat.json).
+runtime/nvn/vulkan/shader_precision.h whitespace=-blank-at-eof

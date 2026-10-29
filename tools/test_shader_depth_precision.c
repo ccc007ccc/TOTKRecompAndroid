@@ -3,9 +3,25 @@
 #include <assert.h>
 #include <unistd.h>
 #include "../runtime/nvn/vulkan/shaders.c"
+#include "../runtime/nvn/vulkan/shader_precision.h"
 
 VkG g_vk;
 void rt_fatal_trace(void) { abort(); }
+#ifdef __ANDROID__
+#include <stdarg.h>
+void rt_fatal_message(const char *format, ...) {
+    va_list ap; va_start(ap, format); vfprintf(stderr, format, ap); va_end(ap); abort();
+}
+#endif
+
+
+static uint32_t *prepare(const char *src, int stage, const char *name, size_t *n) {
+    char why[1024];
+    if (!vk_shader_prepare_source(src, stage, name, why, sizeof why)) {
+        fprintf(stderr, "%s\n", why); abort();
+    }
+    return vk_load_prepared_shader(src, stage, name, n);
+}
 
 static unsigned arithmetic_count(const uint32_t *s, size_t n, bool require_precise) {
     uint8_t *decorated = calloc(s[3], 1);
@@ -42,11 +58,12 @@ static const char *sources[] = {
 int main(int argc, char **argv) {
     assert(argc >= 2 && chdir(argv[1]) == 0);
     unsetenv("LARECOMP_VK_OPT");
-    setenv("LARECOMP_VK_NO_SPIRV_CACHE", "1", 1);
+    char why[1024];
+    assert(vk_shader_prepare_begin(why, sizeof why));
     for (int i = 0; i < 5; i++) {
         size_t n;
         int stage = i ? STAGE_FRAGMENT : STAGE_VERTEX;
-        uint32_t *s = vk_glsl_to_spirv(sources[i], stage, names[i], &n);
+        uint32_t *s = prepare(sources[i], stage, names[i], &n);
         assert(s && vk_shader_cache_framed(s, n));
         assert(writes_fragment_depth(s, n) == (i == 1 || i >= 3));
         unsigned count = arithmetic_count(s, n, i != 2);
@@ -58,7 +75,7 @@ int main(int argc, char **argv) {
             assert(!decorations);
             // The render probe's control outputs white with ordinary raster depth.
             free(s);
-            s = vk_glsl_to_spirv("#version 450\nlayout(location=0) out vec4 c;void main(){c=vec4(1);}", stage, names[i], &n);
+            s = prepare("#version 450\nlayout(location=0) out vec4 c;void main(){c=vec4(1);}", stage, names[i], &n);
             assert(s);
         }
         size_t old_n = n;
@@ -75,14 +92,15 @@ int main(int argc, char **argv) {
         assert(fwrite(s, 4, n, f) == n && fclose(f) == 0);
         free(s);
     }
-    unsetenv("LARECOMP_VK_NO_SPIRV_CACHE");
+    vk_shader_prepare_end();
+    assert(!vk_shader_prepare_source(sources[0], STAGE_VERTEX, "closed", why, sizeof why));
     size_t n1, n2;
-    uint32_t *a = vk_glsl_to_spirv(sources[1], STAGE_FRAGMENT, "cache-depth", &n1);
-    uint32_t *b = vk_glsl_to_spirv(sources[1], STAGE_FRAGMENT, "cache-depth", &n2);
+    uint32_t *a = vk_load_prepared_shader(sources[1], STAGE_FRAGMENT, "cache-depth", &n1);
+    uint32_t *b = vk_load_prepared_shader(sources[1], STAGE_FRAGMENT, "cache-depth", &n2);
     assert(a && b && n1 == n2 && !memcmp(a, b, n1 * 4));
     assert(arithmetic_count(b, n2, true));
     assert(vk_shader_source_hash("", 0, false) == 0xcef29ce484222325ull);
     free(a); free(b);
-    puts("PASS: vertex and explicit fragment depth preserve arithmetic; color, cache and idempotence checks passed");
+    puts("PASS: prepared vertex and fragment depth preserve arithmetic; gameplay cache reads, compiler closure and idempotence passed");
     return 0;
 }

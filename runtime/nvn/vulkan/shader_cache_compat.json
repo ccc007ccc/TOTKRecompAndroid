@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "description": "Reviewed v3 / source-key generation 5 legacy caches; shaderc, precision and specialization unchanged, validator friendly names disabled only. Re-review before updating these hashes.",
+  "compatible_inputs": {
+    "runtime/nvn/vulkan/shader_cache.h": "808e398dcc08dd3d4cd009173a2c8fbe4c89432fe49526ad91c62eaf8c11aec8",
+    "runtime/nvn/vulkan/shader_compiler.c": "61d567448e0fd8447223afb8a2b6f885d710c94c1c32bd727b2e4e88df6592a5",
+    "runtime/nvn/vulkan/shader_precision.h": "d362c03c8d8691abb061b9d0c2bc179a84bccaf33a49e76a7021809dca47c23f",
+    "runtime/nvn/vulkan/shader_interface.hpp": "56da42e86b89b7cd15e48691116d7ec887c5aa1ef9bb6b2f801c339865c5fd61",
+    "runtime/nvn/vulkan/shader_interface.cpp": "d3c63079d30881dc6587fca9787fbac0b5c64eb7a5de4bc54993553c8fcf89d1",
+    "android/deps/out/lib/libshaderc_shared.so": "bb1519c51eaa0264bcbd1fe8a6026deb03cb96f2afdbeb3f594775cf8f7aa954"
+  },
+  "legacy_builds": [
+    "c6b57ee3b56a3b22cdccc3646bb6e980d53cfc00f35511e129efa9c7407b52eb",
+    "a322f2e0d8de9128093af41f17d49f62ccfe6872ef0b82c68879f0ff146f22b8"
+  ]
+}

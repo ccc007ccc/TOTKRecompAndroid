@@ -22,6 +22,8 @@ plan_start = execution.index('typedef struct { uint8_t regular[MAX_BIND]')
 descriptor_helpers = execution[plan_start:execution.index('\n#endif', plan_start)]
 copy_start = execution.index('// Guest memory copied once per submission:')
 copy_helpers = execution[copy_start:execution.index('// ================================================================== worker threads', copy_start)]
+memory_start = execution.index('void vk_memory_written(')
+memory_helper = execution[memory_start:execution.index('\n}\n', memory_start) + 3]
 preamble = r"""
 typedef unsigned long long uint64_t;
 typedef unsigned int size_t;
@@ -35,6 +37,8 @@ typedef _Bool bool;
 #define NULL ((void *)0)
 #define MAX_BIND 96
 #define GMAP_BUFFER_INDEX 20
+#define UINT64_MAX (~0ull)
+#define VC_PAGE 4096ull
 typedef enum {
     VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
     VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -70,6 +74,10 @@ typedef struct { uint64_t data_hash; } TexBackend;
 static uint8_t guest[65536], arena[4096];
 #define HEAP_BASE ((uintptr_t)guest)
 #define HEAP_MAX sizeof guest
+static uint32_t page_gen[16], *vc_page_gen = page_gen, vc_gen = 7;
+typedef struct { uint64_t lo, hi, checked; bool live; uint8_t shadow[256]; } GaRes;
+static GaRes ga_res[3];
+static int ga_nres = 3;
 static bool gcopy_mode, place_result;
 static int tracking_calls;
 static uint64_t tracking_lo, tracking_hi;
@@ -121,8 +129,8 @@ int test(void) {
     };
     DescriptorPlan plan;
     descriptor_plan(binds, sizeof binds / sizeof binds[0], 0, &plan);
-    CHECK(plan.nregular == 4 && plan.ndeferred == 3);
-    CHECK(plan.regular[0] == 0 && plan.regular[1] == 3 && plan.regular[2] == 4 && plan.regular[3] == 7);
+    CHECK(plan.nregular == 5 && plan.ndeferred == 3);
+    CHECK(plan.regular[0] == 0 && plan.regular[1] == 3 && plan.regular[2] == 4 && plan.regular[3] == 7 && plan.regular[4] == 9);
     CHECK(plan.deferred[0] == 2 && plan.deferred[1] == 5 && plan.deferred[2] == 6);
     descriptor_plan(binds, sizeof binds / sizeof binds[0], 1, &plan);
     CHECK(plan.nregular == 1 && plan.regular[0] == 1 && plan.ndeferred == 0);
@@ -166,6 +174,28 @@ int test(void) {
     CHECK(new_submission.ptr != changed.ptr && new_submission.ptr[0] == 77);
     guest_copy_flush();
     CHECK(guest_copy((uintptr_t)(guest + 100), 16).ptr != new_submission.ptr);
+    // A mapped-range flush after first use must refresh this range, retain an
+    // unrelated cached copy, and recheck only overlapping resident entries.
+    ga_res[0] = (GaRes){0, 256, 99, true, {41}};
+    ga_res[1] = (GaRes){256, 512, 99, true, {53}};
+    ga_res[2] = (GaRes){0, 256, 99, false, {67}};
+    VkSpan before_flush = guest_copy((uintptr_t)(guest + 100), 16);
+    VkSpan unrelated = guest_copy((uintptr_t)(guest + 300), 16);
+    guest[100] = 55;
+    vk_memory_written((uintptr_t)(guest + 100), 1);
+    VkSpan after_flush = guest_copy((uintptr_t)(guest + 100), 16);
+    CHECK(after_flush.ptr != before_flush.ptr && after_flush.ptr[0] == 55 && before_flush.ptr[0] == 77);
+    CHECK(guest_copy((uintptr_t)(guest + 300), 16).ptr == unrelated.ptr);
+    CHECK(ga_res[0].checked == 0 && ga_res[1].checked == 99 && ga_res[2].checked == 99);
+    CHECK(ga_res[0].shadow[0] == 41 && ga_res[1].shadow[0] == 53 && ga_res[2].shadow[0] == 67);
+    CHECK(page_gen[0] == 8 && page_gen[1] == 0);
+    vk_memory_written((uintptr_t)(guest + 4095), 2);
+    CHECK(page_gen[0] == 9 && page_gen[1] == 9 && page_gen[2] == 0);
+    vk_memory_written(UINT64_MAX - 1, 4);
+    vk_memory_written((uintptr_t)guest, 0);
+    CHECK(vc_gen == 9);
+    vk_memory_written((uintptr_t)(guest + sizeof guest - 1), 16);
+    CHECK(page_gen[15] == 10 && page_gen[14] == 0);
     // An advertised placement extension can still be disabled or fail. Copy-mode caches must remain available.
     gcopy_mode = true;
     CHECK(!vk_heap_place(1024) && tracking_calls == 1);
@@ -224,7 +254,7 @@ int test(void) {
 }
 """
 source = OUT / 'upload_caches.c'
-source.write_text(preamble + ubo_helper + descriptor_helpers + texture_helpers + arena_helper + heap_fallback + copy_helpers + tests)
+source.write_text(preamble + ubo_helper + descriptor_helpers + texture_helpers + arena_helper + heap_fallback + copy_helpers + memory_helper + tests)
 subprocess.run([str(BIN / ('clang' + EXE)), '-target', 'wasm32', '-D__ANDROID__', '-ffreestanding', '-fno-builtin', '-O2', '-c', str(source), '-o', str(OUT / 'upload_caches.o')], check=True)
 subprocess.run([str(BIN / ('ld.lld' + EXE)), '-flavor', 'wasm', '--no-entry', '--export=test', str(OUT / 'upload_caches.o'), '-o', str(OUT / 'upload_caches.wasm')], check=True)
 runner = OUT / 'upload_caches.cjs'

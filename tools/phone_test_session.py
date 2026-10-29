@@ -5,6 +5,8 @@ Run in dev after sourcing android/dev_env.sh. Always specify the intended phone.
 benchmark loads an isolated save, measures for a fixed duration, then closes the game.
 """
 import argparse
+import fcntl
+import hashlib
 import io
 import json
 import math
@@ -26,13 +28,19 @@ def main():
     start=commands.add_parser('start')
     benchmark=commands.add_parser('benchmark',help='Load a save, measure at 60 FPS, then automatically close the game')
     for launch in (start,benchmark):
+        launch.add_argument('--apk',type=Path,help='Install this APK while holding the device lease, before launching the test')
         launch.add_argument('--save-seed',help='Existing save root on phone; cloned completely before guest boot')
         launch.add_argument('--game-library',help='Existing private game library path on phone')
+        launch.add_argument('--settings-seed',help='Existing settings file on phone; copied into this session before launch')
+        launch.add_argument('--shader-warm',choices=['on','off'],help='Enable/disable automatic shader and pipeline preparation for comparison')
+        launch.add_argument('--pipeline-warm',choices=['on','off'],help='Enable/disable pipeline preparation while retaining the shader preparation setting')
         launch.add_argument('--submit-snapshot',action='store_true',
                             help='Enable experimental submit-time buffer snapshots for a separate comparison')
     benchmark.add_argument('--save-slot',type=int,choices=range(6),default=0)
     benchmark.add_argument('--seconds',type=float,default=15,help='Measurement duration after loading, 1..60 seconds (default 15)')
     benchmark.add_argument('--timeout',type=float,help='Overall startup and measurement timeout')
+    benchmark.add_argument('--profile',action='store_true',help='Record CPU/GPU timing and constant-buffer copy counters during the automatic run')
+    benchmark.add_argument('--compare-ubo',type=int,metavar='FRAMES',help='Diagnostic only: alternate copied/shared uniform buffers every 30..600 frames; enables profiling')
     start.add_argument('--diagnostic-present-interval',type=int,choices=[1,2,3],
                        help='Override the game present interval for diagnosis; may change game speed, not a gameplay FPS result')
     boot=start.add_mutually_exclusive_group()
@@ -52,6 +60,9 @@ def main():
     timed=args.command=='benchmark'
     if timed:
         if not math.isfinite(args.seconds) or not 1<=args.seconds<=60:ap.error('seconds must be 1..60')
+        if args.compare_ubo is not None:
+            if not 30<=args.compare_ubo<=600:ap.error('compare-ubo must be 30..600 frames')
+            args.profile=True
         args.timeout=args.timeout if args.timeout is not None else 135+args.seconds
         if not math.isfinite(args.timeout) or args.timeout<=0:ap.error('timeout must be positive')
         args.auto_load=False;args.diagnostic_present_interval=None
@@ -63,7 +74,22 @@ def main():
         ap.error('save-seed must not contain whitespace or commas (Android environment argument format)')
     if launching and args.game_library and (not args.game_library.startswith('/') or any(c in args.game_library for c in ',\n\r\t ')):
         ap.error('game-library must be an absolute path without whitespace or commas')
+    if launching and args.settings_seed and (not args.settings_seed.startswith('/') or any(c in args.settings_seed for c in ',\n\r\t ')):
+        ap.error('settings-seed must be an absolute path without whitespace or commas')
     package=args.package
+    if launching and args.apk is not None and not args.apk.is_file():ap.error('apk must name an existing APK file')
+    device_lock=None
+    if launching:
+        # All automated launches in this workspace share a device lease. A
+        # second controller must not force-stop a benchmark that is still live.
+        locks=Path(__file__).resolve().parents[1]/'.work/phone-test-locks'
+        locks.mkdir(parents=True,exist_ok=True)
+        device_lock=(locks/(hashlib.sha256(args.serial.encode()).hexdigest()+'.lock')).open('a+')
+        try:fcntl.flock(device_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError('Another automated test is using this device; wait for that controller to finish') from None
+        device_lock.seek(0);device_lock.truncate()
+        device_lock.write(json.dumps({'package':package,'output':str(args.output),'command':args.command})+'\n');device_lock.flush()
     remote=args.session or '/data/user/0/'+package+'/files/performance/session'
     if timed:
         run_name='benchmark-'+str(time.time_ns())
@@ -106,6 +132,11 @@ def main():
     if launching:
         if not timed and shell('pidof',package,check=False).stdout.strip():
             raise RuntimeError('Game is already running; use status/pause/resume, or start this mode on the next launch')
+        if args.apk is not None:
+            from package_android import apk_application_id
+            if apk_application_id(args.apk)!=package:
+                raise RuntimeError('APK manifest does not match the selected test package')
+            adb('install','-r',str(args.apk.resolve()))
         private('mkdir','-p',remote)
         if not timed:private('rm','-f',remote+'/command',remote+'/status.json')
         env=['LARECOMP_NO_LAUNCHER=1','LARECOMP_TEST_SESSION='+remote,
@@ -113,7 +144,20 @@ def main():
              'LARECOMP_NO_SCALE=1','LARECOMP_GAME_DYNRES=1']
         if timed:env+=['LARECOMP_TEST_DURATION_SECONDS='+str(args.seconds),'LARECOMP_FPS=60','LARECOMP_NO_USER_INPUT=1']
         else:env+=['LARECOMP_VK_PROF=1','LARECOMP_LOG_CBUF_BYTES=1','LARECOMP_TEXTURE_TRACE=1','LARECOMP_LOG_FRAMEPACE=120']
+        if timed and args.profile:
+            env+=['LARECOMP_VK_PROF=1','LARECOMP_LOG_CBUF_BYTES=1','LARECOMP_LOG_PACE=1']
+        if timed and args.compare_ubo is not None:
+            env+=['LARECOMP_AB='+str(args.compare_ubo)+':ubo']
         if args.submit_snapshot:env+=['LARECOMP_VK_SUBMIT_SNAPSHOT=1','LARECOMP_LOG_SUBMIT_SNAPSHOT=1']
+        if args.shader_warm is not None:env+=['LARECOMP_SHADER_WARM='+('1' if args.shader_warm=='on' else '0')]
+        if args.pipeline_warm is not None:env+=['LARECOMP_PIPELINE_WARM='+('1' if args.pipeline_warm=='on' else '0')]
+        settings_copy=None;settings_sha=None
+        if args.settings_seed:
+            # The runtime can persist driver choices; give every run its own copy.
+            settings_copy=remote+'/settings-'+str(time.time_ns())+'.ini'
+            private('cp',args.settings_seed,settings_copy)
+            settings_sha=private('sha256sum',settings_copy).stdout.split()[0]
+            env+=['LARECOMP_SETTINGS='+settings_copy]
         if args.save_seed:
             check_seed=private if args.save_seed.startswith('/data/user/0/'+package+'/') else shell
             check_seed('test','-d',args.save_seed)
@@ -132,8 +176,13 @@ def main():
         apk=next((p.removeprefix('package:') for p in package_paths if p.endswith('/base.apk')),None)
         apk_sha=shell('sha256sum',apk).stdout.split()[0] if apk else None
         manifest={'serial':args.serial,'package':package,'started_at':time.time(),'env':env,'apk':apk,'apk_sha256':apk_sha,
+                  'installed_from':str(args.apk.resolve()) if args.apk is not None else None,
                   'game_library':args.game_library,'game_library_sha256':library_sha,
+                  'settings_seed':args.settings_seed,'settings_copy':settings_copy,'settings_sha256':settings_sha,
+                  'shader_warm':args.shader_warm,'pipeline_warm':args.pipeline_warm,
                   'submit_snapshot':args.submit_snapshot,
+                  'profiling':args.profile if timed else True,
+                  'ubo_ab_frames':args.compare_ubo if timed else None,
                   'benchmark_seconds':args.seconds if timed else None,
                   'diagnostic_present_interval':args.diagnostic_present_interval}
         (args.output/'launch.json').write_text(json.dumps(manifest,indent=2)+'\n')

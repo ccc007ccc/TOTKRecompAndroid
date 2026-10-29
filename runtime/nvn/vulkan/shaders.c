@@ -1,193 +1,385 @@
-// GLSL -> SPIR-V (shaderc), descriptor layouts from the SPIR-V itself, translated NVN programs, built-in shaders.
+// SPIR-V cache loading, optional gameplay compilation, reflection, and built-in modules.
 #include <pthread.h>
-#include <shaderc/shaderc.h>
+#ifdef _WIN32
+#include <windows.h>
+#define RTLD_NOW 0
+#define RTLD_LOCAL 0
+static void *dlopen(const char *path, int flags) { (void)flags; return (void *)LoadLibraryA(path); }
+static void *dlsym(void *library, const char *name) { return (void *)GetProcAddress((HMODULE)library, name); }
+static void dlclose(void *library) { FreeLibrary((HMODULE)library); }
+static const char *dlerror(void) { return "cannot load shader preparation plugin/export"; }
+#else
+#include <dlfcn.h>
+#endif
+#ifndef RTLD_NODELETE
+#define RTLD_NODELETE 0
+#endif
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <sys/stat.h>
-
+#include <zstd.h>
 #include "shaders.h"
 #include "shader_cache.h"
+#include "shader_prepare.h"
+#include "shader_runtime.h"
+#ifdef __ANDROID__
+#include "../../settings.h"
+#endif
 
-void vk_shaders_init(void) {  // (compilers are per thread: check shaderc works at all)
-    shaderc_compiler_t c = shaderc_compiler_initialize();
-    if (!c) FATAL("shaderc_compiler_initialize failed\n");
-    shaderc_compiler_release(c);
+#ifndef SHADER_BUILD_ID
+#define SHADER_BUILD_ID "development"
+#endif
+#ifdef HAVE_SHADER_CACHE_CONTRACT
+#include "shader_cache_contract.h"
+#endif
+#ifndef SHADER_CACHE_ID
+#define SHADER_CACHE_ID SHADER_BUILD_ID
+#endif
+#ifndef SHADER_COMPAT_CACHE_IDS
+#define SHADER_COMPAT_CACHE_IDS
+#endif
+static const char* const cache_namespaces[] = {SHADER_CACHE_ID, SHADER_BUILD_ID, SHADER_COMPAT_CACHE_IDS NULL};
+static _Atomic uint64_t cache_current_hits,cache_compatible_hits,cache_misses;
+const char *vk_shader_cache_namespace(void) { return SHADER_CACHE_ID; }
+ShaderCacheStats vk_shader_cache_stats(void) { return (ShaderCacheStats){cache_current_hits,cache_compatible_hits,cache_misses}; }
+static uint32_t shader_api(void) {
+#ifdef __ANDROID__
+    return g_vk.api ? g_vk.api : VK_API_VERSION_1_3;
+#else
+    return VK_API_VERSION_1_3;
+#endif
 }
-
-static shaderc_shader_kind kind_of(int stage) {
-    return stage == STAGE_VERTEX ? shaderc_vertex_shader : stage == STAGE_FRAGMENT ? shaderc_fragment_shader : shaderc_compute_shader;
+static uint64_t source_key(const char *src, int stage) {
+    uint64_t h = vk_shader_source_hash(src, stage, getenv("LARECOMP_VK_OPT") != NULL);
+    return h ^ ((uint64_t)shader_api() << 32);
 }
-
-// SPIR-V disk cache: cache/spirv/<hash of stage + source + compile mode>.spv, so a known shader costs a file read instead of a
-// GLSL compile (the driver's pipeline cache only covers the step after this one).
-#ifndef __ANDROID__  // (Android: shader_cache.h vk_shader_source_hash, which also keys LARECOMP_VK_OPT)
-static uint64_t src_hash(const char *src, int stage) {
-    uint64_t h = (0xcbf29ce484222325ull ^ (uint64_t)stage) + 4;  // + version of the post-processing (no_contraction)
-    for (const char *p = src; *p; p++) { h ^= (uint8_t)*p; h *= 0x100000001B3ull; }
+uint64_t vk_shader_prepare_key(const char *src, int stage) { return source_key(src, stage); }
+static void cache_path(char *path, size_t size, uint64_t h) {
+    snprintf(path, size, "cache/shaders/" SHADER_CACHE_ID "/%016llx.bin", (unsigned long long)h);
+}
+static void base_path(char *path, size_t size, uint64_t h) {
+    snprintf(path, size, "cache/shaders/" SHADER_CACHE_ID "/%016llx.base.bin", (unsigned long long)h);
+}
+// v3: standalone Zstd frames or complete modules compressed against a base.
+// Bases have their own namespace and MUST be standalone: no dependency chains.
+typedef struct { uint64_t magic, key, words, digest, stored_bytes, encoding, base_key, base_digest; } ShaderEnvelope;
+#define SHADER_ENVELOPE_MAGIC 0x335650534b544f54ull
+enum { SHADER_STANDALONE = 0, SHADER_DICTIONARY = 1 };
+struct ShaderPrepareBase {
+    uint64_t key, digest, session;
+    const char *cache_namespace;
+    uint32_t *spv;
+    size_t words;
+    int stage;
+    unsigned api;
+    bool optimized;
+    pthread_t owner;
+    ZSTD_CDict *dictionary;
+    ZSTD_CCtx *compressor;
+};
+static uint64_t payload_hash(const uint32_t *data, size_t words) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    const unsigned char *p = (const unsigned char *)data;
+    for (size_t i = 0; i < words * 4; ++i) h = (h ^ p[i]) * 0x100000001b3ull;
     return h;
 }
-#endif
-
-static uint32_t *cache_load(uint64_t h, size_t *nwords) {
-    char path[64];
-    snprintf(path, sizeof path, "cache/spirv/%016llx.spv", (unsigned long long)h);
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+static uint32_t *cache_load_at(const char* cache_namespace,uint64_t h, size_t *nwords, bool is_base, const ShaderPrepareBase *base) {
+    *nwords = 0;
+    char path[192];
+    snprintf(path,sizeof path,"cache/shaders/%s/%016llx%s.bin",cache_namespace,(unsigned long long)h,is_base?".base":"");
+    FILE *f = fopen(path, "rb"); if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END)) { fclose(f); return NULL; }
     long n = ftell(f);
-    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
-    uint32_t *d = n > 20 && n <= 16 * 1024 * 1024 && n % 4 == 0 ? malloc((size_t)n) : NULL;
-    if (d && fread(d, 1, (size_t)n, f) != (size_t)n) { free(d); d = NULL; }
+    if (fseek(f, 0, SEEK_SET)) { fclose(f); return NULL; }
+    ShaderEnvelope header;
+    if (n <= (long)sizeof header || fread(&header, sizeof header, 1, f) != 1 ||
+        header.magic != SHADER_ENVELOPE_MAGIC || header.key != h || header.words <= 5 ||
+        header.words > 4 * 1024 * 1024 || header.stored_bytes != (size_t)n - sizeof header ||
+        header.stored_bytes > ZSTD_compressBound(header.words * 4) ||
+        header.encoding > SHADER_DICTIONARY || (is_base && header.encoding != SHADER_STANDALONE) ||
+        (header.encoding == SHADER_STANDALONE && (header.base_key || header.base_digest))) { fclose(f); return NULL; }
+    size_t bytes = header.words * 4;
+    uint32_t *d = malloc(bytes);
+    void *packed = malloc(header.stored_bytes);
+    bool read_ok = packed && fread(packed, 1, header.stored_bytes, f) == header.stored_bytes;
     fclose(f);
-    if (d && !vk_shader_cache_framed(d, (size_t)n / 4)) {
-        LOG("[shader-cache] ignoring malformed entry %016llx; recompiling\n", (unsigned long long)h);
-        free(d); d = NULL;
-    }
-    if (d) *nwords = (size_t)n / 4;
+    bool ok = d && read_ok && ZSTD_getFrameContentSize(packed, header.stored_bytes) == bytes &&
+              ZSTD_findFrameCompressedSize(packed, header.stored_bytes) == header.stored_bytes;
+    if (ok && header.encoding == SHADER_DICTIONARY) {
+        // Preparation can reuse the current base in memory. Gameplay reads the
+        // referenced standalone base, verifies its digest, then only decompresses.
+        size_t words = 0; uint32_t *owned = NULL;
+        const uint32_t *dict = NULL;
+        bool digest_ok;
+        if (base && base->cache_namespace && !strcmp(base->cache_namespace,cache_namespace) &&
+            base->key == header.base_key && base->digest == header.base_digest) {
+            dict = base->spv; words = base->words; digest_ok = true;
+        } else {
+            // Resolve a dictionary in the same namespace as its module. A base
+            // in another compatible directory cannot repair an incomplete pair.
+            owned = cache_load_at(cache_namespace,header.base_key, &words, true, NULL); dict = owned;
+            digest_ok = dict && payload_hash(dict, words) == header.base_digest;
+        }
+        ZSTD_DCtx *context = ZSTD_createDCtx();
+        ok = digest_ok && context &&
+             ZSTD_decompress_usingDict(context, d, bytes, packed, header.stored_bytes, dict, words * 4) == bytes;
+        ZSTD_freeDCtx(context); free(owned);
+    } else if (ok) ok = ZSTD_decompress(d, bytes, packed, header.stored_bytes) == bytes;
+    if (!ok) { free(d); d = NULL; }
+    free(packed);
+    if (d && (!vk_shader_cache_framed(d, header.words) || payload_hash(d, header.words) != header.digest)) { free(d); d = NULL; }
+    if (d) *nwords = header.words;
     return d;
 }
-
-static pthread_once_t cache_dirs_once = PTHREAD_ONCE_INIT;
-static void cache_dirs_init(void) { mkdir("cache", 0755); mkdir("cache/spirv", 0755); }
-static void cache_store(uint64_t h, const uint32_t *spv, size_t nwords) {
-    pthread_once(&cache_dirs_once, cache_dirs_init);
-    char path[64], tmp[80];
-    snprintf(path, sizeof path, "cache/spirv/%016llx.spv", (unsigned long long)h);
-    snprintf(tmp, sizeof tmp, "%s.%llx", path, (unsigned long long)(uintptr_t)&cache_dirs_once ^ (unsigned long long)(uintptr_t)spv);
-    FILE *f = fopen(tmp, "wb");
-    if (!f) return;
-    bool ok = fwrite(spv, 4, nwords, f) == nwords;
-    if (fclose(f) != 0) ok = false;
-    if (!ok || rename(tmp, path) != 0) remove(tmp);  // (another thread may have stored it first)
-}
-
-// Position and explicit fragment depth must use the same arithmetic. TOTK also encodes material classes in depth:
-// a fragment shader writes the class, then a lighting vertex shader computes it again for an EQUAL test. Allowing
-// contraction only in the fragment stage changes water's D16 class from 39192 to 39193 on Adreno, rejecting its
-// entire lighting pass. GLSL's precise qualifier cannot trace through the translated integer register/bitcast code.
-static bool writes_fragment_depth(const uint32_t *spv, size_t nwords) {
-    // OpExecutionMode DepthReplacing: inspect the compiled entry point, not source text or a game shader address.
-    for (size_t i = 5; i < nwords;) {
-        uint32_t wc = spv[i] >> 16, op = spv[i] & 0xFFFF;
-        if (!wc || wc > nwords - i) return false;
-        if (op == 16 && wc >= 3 && spv[i + 2] == 12) return true;
-        i += wc;
-    }
-    return false;
-}
-
-static bool float_arith(const uint32_t *w, uint32_t wc, uint32_t op) {
-    switch (op) {
-    case 127: case 129: case 131: case 133: case 136:  // FNegate FAdd FSub FMul FDiv
-    case 142: case 143: case 144: case 145: case 146: case 148:  // vector/matrix products, Dot
-        return true;
-    case 12: return wc >= 5 && w[4] == 50;  // ExtInst GLSL.std.450 Fma
-    default: return false;
-    }
-}
-
-static uint32_t *no_contraction(uint32_t *spv, size_t *nwords) {
-    enum { OP_DECORATE = 71, DEC_NO_CONTRACTION = 42 };
-    size_t n = *nwords, insert = 0, count = 0;
-    uint32_t bound = spv[3];
-    uint8_t *done = calloc(bound, 1);  // already decorated (glslang does it for what it traces from precise)
-    for (size_t i = 5; i < n;) {
-        uint32_t wc = spv[i] >> 16, op = spv[i] & 0xFFFF;
-        if (!wc) break;
-        if (!insert && op >= 19 && op <= 39) insert = i;  // first type declaration: end of the annotations
-        if (op == OP_DECORATE && wc >= 3 && spv[i + 2] == DEC_NO_CONTRACTION && spv[i + 1] < bound) done[spv[i + 1]] = 1;
-        i += wc;
-    }
-    for (size_t i = 5; i < n;) {
-        uint32_t wc = spv[i] >> 16, op = spv[i] & 0xFFFF;
-        if (!wc) break;
-        if (float_arith(spv + i, wc, op) && spv[i + 2] < bound && !done[spv[i + 2]]) count++;
-        i += wc;
-    }
-    if (!insert || !count) { free(done); return spv; }
-    uint32_t *out = malloc((n + count * 3) * 4);
-    memcpy(out, spv, insert * 4);
-    size_t o = insert;
-    for (size_t i = 5; i < n;) {
-        uint32_t wc = spv[i] >> 16, op = spv[i] & 0xFFFF;
-        if (!wc) break;
-        if (float_arith(spv + i, wc, op) && spv[i + 2] < bound && !done[spv[i + 2]]) {
-            done[spv[i + 2]] = 1;
-            out[o++] = 3u << 16 | OP_DECORATE;
-            out[o++] = spv[i + 2];  // result id
-            out[o++] = DEC_NO_CONTRACTION;
+static uint32_t *cache_load_namespace(uint64_t h,size_t *nwords,bool is_base,
+                                      const ShaderPrepareBase *base,const char **loaded_namespace) {
+    if (loaded_namespace) *loaded_namespace = NULL;
+    for (unsigned i=0; cache_namespaces[i]; ++i) {
+        bool duplicate = false;
+        for (unsigned j=0; j<i; ++j) if (!strcmp(cache_namespaces[i],cache_namespaces[j])) duplicate = true;
+        if (duplicate) continue;
+        uint32_t *words = cache_load_at(cache_namespaces[i],h,nwords,is_base,base);
+        if (words) {
+            if (i) ++cache_compatible_hits; else ++cache_current_hits;
+            if (loaded_namespace) *loaded_namespace = cache_namespaces[i];
+            return words;
         }
-        i += wc;
     }
-    memcpy(out + o, spv + insert, (n - insert) * 4);
-    *nwords = o + (n - insert);
-    free(done);
+    ++cache_misses;
+    return NULL;
+}
+static uint32_t *cache_load_module(uint64_t h,size_t *nwords,bool is_base,const ShaderPrepareBase *base) {
+    return cache_load_namespace(h,nwords,is_base,base,NULL);
+}
+uint32_t *vk_shader_cache_load_key(uint64_t h,bool base,size_t* words){return cache_load_module(h,words,base,NULL);}
+static uint32_t *cache_load(uint64_t h, size_t *nwords) { return cache_load_module(h, nwords, false, NULL); }
+bool vk_shader_cached(uint64_t h) {
+    size_t words=0;uint32_t* spv=cache_load(h,&words);bool valid=spv!=NULL;free(spv);return valid;
+}
+static bool cache_store_module(uint64_t h, const uint32_t *spv, size_t nwords, bool is_base, ShaderPrepareBase *base) {
+    if (!vk_shader_cache_framed(spv, nwords) || (is_base && base)) return false;
+    // A new variant must have its dictionary beside it, even when preparation
+    // reused a legacy base. Existing complete legacy hits stay read-only.
+    if (base && (!base->cache_namespace || strcmp(base->cache_namespace,SHADER_CACHE_ID))) {
+        if (!cache_store_module(base->key,base->spv,base->words,true,NULL)) return false;
+        base->cache_namespace = SHADER_CACHE_ID;
+    }
+    size_t capacity = ZSTD_compressBound(nwords * 4);
+    void *packed = malloc(capacity); if (!packed) return false;
+    size_t stored = base ? ZSTD_compress_usingCDict(base->compressor, packed, capacity, spv, nwords * 4, base->dictionary) :
+                          ZSTD_compress(packed, capacity, spv, nwords * 4, 3);
+    if (ZSTD_isError(stored)) { free(packed); return false; }
+    mkdir("cache", 0755); mkdir("cache/shaders", 0755); mkdir("cache/shaders/" SHADER_CACHE_ID, 0755);
+    char path[192], tmp[224];
+    if (is_base) base_path(path, sizeof path, h); else cache_path(path, sizeof path, h);
+    snprintf(tmp, sizeof tmp, "%s.%llx.part", path, (unsigned long long)(uintptr_t)spv);
+    FILE *f = fopen(tmp, "wb"); if (!f) { free(packed); return false; }
+    ShaderEnvelope header = {SHADER_ENVELOPE_MAGIC, h, nwords, payload_hash(spv, nwords), stored,
+        base ? SHADER_DICTIONARY : SHADER_STANDALONE, base ? base->key : 0, base ? base->digest : 0};
+    bool ok = fwrite(&header, sizeof header, 1, f) == 1 && fwrite(packed, 1, stored, f) == stored;
+    free(packed);
+    if (fclose(f)) ok = false;
+    if (ok && !rename(tmp, path)) return true;
+    remove(tmp); return false;
+}
+static bool cache_store(uint64_t h, const uint32_t *spv, size_t nwords) { return cache_store_module(h, spv, nwords, false, NULL); }
+// A preparation session belongs to its calling thread. Other threads never gain
+// compiler access, even while the launcher is displaying preparation progress.
+static _Thread_local void *prepare_library;
+static _Thread_local void *prepare_context;
+static _Thread_local ShaderPrepareCompileContext prepare_compile;
+static _Thread_local ShaderPrepareDestroy prepare_destroy;
+static _Thread_local ShaderPrepareDerive prepare_derive;
+static _Thread_local uint64_t prepare_session;
+bool vk_shader_prepare_begin(char *why, size_t capacity) {
+    if (prepare_library) { snprintf(why, capacity, "shader preparation already active"); return false; }
+    const char *dir = getenv("LARECOMP_NATIVE_LIB_DIR");
+    char path[1200]; snprintf(path, sizeof path, "%s%slibshaderprepare.so", dir ? dir : "", dir ? "/" : "");
+    // shaderc intentionally retains a process-lifetime initialization mutex.
+    // Unmapping/reloading it loses that mutex on each preparation session.
+    // Keep the library mapping, while closing every compiler context and entry
+    // point below. Gameplay opens a session only for an enabled cache-miss fallback.
+    prepare_library = dlopen(path, RTLD_NOW | RTLD_LOCAL | RTLD_NODELETE);
+    ShaderPrepareCreate create = NULL;
+    if (prepare_library) {
+        prepare_compile = (ShaderPrepareCompileContext)dlsym(prepare_library, "shader_prepare_compile_context");
+        prepare_destroy = (ShaderPrepareDestroy)dlsym(prepare_library, "shader_prepare_destroy");
+        prepare_derive = (ShaderPrepareDerive)dlsym(prepare_library, "shader_prepare_derive");
+        create = (ShaderPrepareCreate)dlsym(prepare_library, "shader_prepare_create");
+    }
+    if (!prepare_compile || !prepare_destroy || !prepare_derive || !create) {
+        const char *error = dlerror(); snprintf(why, capacity, "shader preparation tool unavailable: %s", error ? error : path);
+        vk_shader_prepare_end(); return false;
+    }
+    prepare_context = create();
+    if (!prepare_context) { snprintf(why, capacity, "cannot allocate shader preparation compiler"); vk_shader_prepare_end(); return false; }
+    ++prepare_session;
+    return true;
+}
+void vk_shader_prepare_end(void) {
+    prepare_compile = NULL; prepare_derive = NULL;
+    if (prepare_destroy && prepare_context) prepare_destroy(prepare_context);
+    prepare_context = NULL; prepare_destroy = NULL;
+    if (prepare_library) dlclose(prepare_library);
+    prepare_library = NULL;
+}
+bool vk_shader_prepare_source(const char *src, int stage, const char *name, char *why, size_t capacity) {
+    if (!prepare_compile) { snprintf(why, capacity, "shader compiler is closed outside preparation"); return false; }
+    size_t n = 0; uint64_t h = source_key(src, stage);
+    uint32_t *spv = cache_load(h, &n);
+    if (spv) { free(spv); return true; }
+    spv = prepare_compile(prepare_context, src, stage, shader_api(), getenv("LARECOMP_VK_OPT") != NULL, &n, why, capacity);
+    if (!spv) { LOG("[shader-prepare] %s: %s\n", name, why); return false; }
+    bool ok = vk_shader_cache_framed(spv, n) && cache_store(h, spv, n);
     free(spv);
-    return out;
+    if (!ok) snprintf(why, capacity, "cannot save prepared shader %s (check free storage)", name);
+    return ok;
 }
-
-// SPIR-V words of src, or NULL (error logged with the source). *nwords set on success. Thread-safe: one shaderc
-// compiler per thread (a shared one behind a lock serialised all the pipeline workers).
-// No spirv-opt by default: it rewrote the depth pre-pass and colour-pass vertex shaders differently enough that
-// their depths stopped matching (EQUAL test: black holes in foliage), and it was most of the compile time; the
-// driver optimises anyway. LARECOMP_VK_OPT=1 turns it back on (experiments).
-// Debug names (OpSource, OpSourceExtension, OpName, OpMemberName, OpString, OpLine, OpNoLine, OpModuleProcessed):
-// glslang writes one for every register variable, ~16 % of a translated shader's SPIR-V, read by no driver
-// (SavageWindRecomp's).
-static void strip_names(uint32_t *spv, size_t *nwords) {
-    size_t o = 5;
-    for (size_t i = 5; i < *nwords;) {
-        uint32_t wc = spv[i] >> 16, op = spv[i] & 0xFFFF;
-        if (!wc || i + wc > *nwords) return;  // (malformed: left as it is from here)
-        bool name = op == 3 || op == 4 || op == 5 || op == 6 || op == 7 || op == 8 || op == 317 || op == 330;
-        if (!name) { memmove(spv + o, spv + i, wc * 4); o += wc; }
-        i += wc;
+// Identical canonical sources from different records may reach different workers.
+// Serialize their cache miss/compile/store, without retaining an unbounded set of
+// modules in RAM or serializing all shaderc work behind one lock.
+static pthread_once_t base_locks_once = PTHREAD_ONCE_INIT;
+static pthread_mutex_t base_locks[64];
+static void init_base_locks(void) {
+    for (size_t i = 0; i < sizeof base_locks / sizeof *base_locks; ++i) pthread_mutex_init(&base_locks[i], NULL);
+}
+void vk_shader_prepare_base_free(ShaderPrepareBase *base) {
+    if (!base) return;
+    ZSTD_freeCDict(base->dictionary); ZSTD_freeCCtx(base->compressor); free(base->spv); free(base);
+}
+ShaderPrepareBase *vk_shader_prepare_base(const char *src, int stage, char *why, size_t capacity) {
+    if (!prepare_compile) { snprintf(why, capacity, "shader compiler is closed outside preparation"); return NULL; }
+    if (!src || (stage != STAGE_VERTEX && stage != STAGE_FRAGMENT && stage != STAGE_COMPUTE)) {
+        snprintf(why, capacity, "invalid base shader source/stage"); return NULL;
     }
-    *nwords = o;
+    ShaderPrepareBase *base = calloc(1, sizeof *base);
+    if (!base) { snprintf(why, capacity, "cannot allocate base shader"); return NULL; }
+    base->key = source_key(src, stage); base->stage = stage; base->api = shader_api();
+    base->optimized = getenv("LARECOMP_VK_OPT") != NULL; base->session = prepare_session; base->owner = pthread_self();
+    pthread_once(&base_locks_once, init_base_locks);
+    pthread_mutex_t *lock = &base_locks[base->key % (sizeof base_locks / sizeof *base_locks)];
+    pthread_mutex_lock(lock);
+    base->spv = cache_load_namespace(base->key, &base->words, true, NULL, &base->cache_namespace);
+    if (!base->spv) {
+        base->spv = prepare_compile(prepare_context, src, stage, base->api, base->optimized, &base->words, why, capacity);
+        if (base->spv && !cache_store_module(base->key, base->spv, base->words, true, NULL)) {
+            snprintf(why, capacity, "cannot save prepared base shader (check free storage)");
+            free(base->spv); base->spv = NULL;
+        }
+        if (base->spv) base->cache_namespace = SHADER_CACHE_ID;
+    }
+    pthread_mutex_unlock(lock);
+    if (!base->spv) { vk_shader_prepare_base_free(base); return NULL; }
+    base->digest = payload_hash(base->spv, base->words);
+    base->dictionary = ZSTD_createCDict(base->spv, base->words * 4, 3);
+    base->compressor = ZSTD_createCCtx();
+    if (!base->dictionary || !base->compressor) {
+        snprintf(why, capacity, "cannot allocate shader dictionary compressor"); vk_shader_prepare_base_free(base); return NULL;
+    }
+    return base;
+}
+bool vk_shader_prepare_variant(ShaderPrepareBase *base, const ShaderPrepareVariant *variant, char *why, size_t capacity) {
+    if (!prepare_derive) { snprintf(why, capacity, "shader interface preparation is closed"); return false; }
+    if (!base || !variant || !pthread_equal(base->owner, pthread_self()) || base->session != prepare_session ||
+        base->api != shader_api() || base->optimized != (getenv("LARECOMP_VK_OPT") != NULL)) {
+        snprintf(why, capacity, "shader base belongs to a different preparation session/profile"); return false;
+    }
+    bool changed = false;
+    for (unsigned i = 0; i < 32; ++i) {
+        if (variant->kinds[i] > 2 || (variant->kinds[i] && (base->stage == STAGE_COMPUTE || (base->stage == STAGE_FRAGMENT && i >= 8)))) {
+            snprintf(why, capacity, "invalid shader interface kind/location"); return false;
+        }
+        changed |= variant->kinds[i] != 0;
+    }
+    size_t n = 0;
+    uint32_t *spv = cache_load_module(variant->key, &n, false, base);
+    if (spv) { free(spv); return true; }
+    // The all-float (and compute) module has already passed the compiler's validator.
+    spv = changed ? prepare_derive(base->spv, base->words, base->stage, variant->kinds, base->api, &n, why, capacity) : base->spv;
+    if (!spv) return false;
+    if (!changed) n = base->words;
+    bool ok = cache_store_module(variant->key, spv, n, false, base);
+    if (changed) free(spv);
+    if (!ok) snprintf(why, capacity, "cannot save prepared shader variant (check free storage)");
+    return ok;
+}
+uint32_t *vk_load_prepared_shader(const char *src, int stage, const char *name, size_t *nwords) {
+    *nwords = 0;
+    uint64_t h = source_key(src, stage);
+    uint32_t *spv = cache_load(h, nwords);
+    if (!spv) FATAL("Prepared shader missing or damaged: %s (%016llx). Prepare graphics before playing.\n", name, (unsigned long long)h);
+    return spv;
 }
 
-uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t *nwords) {
-    bool optimized = getenv("LARECOMP_VK_OPT") != NULL;
+bool vk_shader_runtime_compile_enabled(void) {
+    const char *value = getenv("LARECOMP_SHADER_RUNTIME_COMPILE");
+    if (value) return atoi(value) != 0;
 #ifdef __ANDROID__
-    uint64_t h = vk_shader_source_hash(src, stage, optimized);
-    uint32_t api = g_vk.api ? g_vk.api : VK_API_VERSION_1_3;  // (0: no device yet - as 1.3)
-    if (api < VK_API_VERSION_1_3) h ^= (uint64_t)api << 32;  // (older SPIR-V for a device below 1.3, below)
+    return g_settings.shader_runtime_compile;
 #else
-    uint64_t h = src_hash(src, stage);
+    return true;
 #endif
-    bool nocache = getenv("LARECOMP_VK_NO_SPIRV_CACHE") != NULL;
-    uint32_t *out = nocache ? NULL : cache_load(h, nwords);
-    if (out) return out;
-    static __thread shaderc_compiler_t comp;
-    if (!comp) comp = shaderc_compiler_initialize();
-    shaderc_compile_options_t o = shaderc_compile_options_initialize();
-#ifdef __ANDROID__  // (SPIR-V 1.6 for 1.3; 1.5 / 1.3 for a device below it, device.c COMPAT_EXT)
-    shaderc_compile_options_set_target_env(o, shaderc_target_env_vulkan,
-                                           api >= VK_API_VERSION_1_3 ? shaderc_env_version_vulkan_1_3
-                                           : api >= VK_API_VERSION_1_2 ? shaderc_env_version_vulkan_1_2
-                                                                            : shaderc_env_version_vulkan_1_1);
-#else
-    shaderc_compile_options_set_target_env(o, shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_3);
-#endif
-    shaderc_compile_options_set_optimization_level(o, optimized ? shaderc_optimization_level_performance
-                                                                                  : shaderc_optimization_level_zero);
-    shaderc_compilation_result_t r = shaderc_compile_into_spv(comp, src, strlen(src), kind_of(stage), name, "main", o);
-    shaderc_compile_options_release(o);
-    if (shaderc_result_get_compilation_status(r) != shaderc_compilation_status_success) {
-        static int nlog;
-        if (nlog++ < 20) LOG("[shader] %s: GLSL compile failed:\n%s\n%s\n", name, shaderc_result_get_error_message(r), src);
-    } else {
-        size_t n = shaderc_result_get_length(r);
-        out = malloc(n);
-        memcpy(out, shaderc_result_get_bytes(r), n);
-        *nwords = n / 4;
-        strip_names(out, nwords);
-        if (stage == STAGE_VERTEX || (stage == STAGE_FRAGMENT && writes_fragment_depth(out, *nwords)))
-            out = no_contraction(out, nwords);
-        if (!nocache) cache_store(h, out, *nwords);
+}
+
+uint32_t *vk_load_shader(const char *src, int stage, const char *name, size_t *nwords) {
+    if (!vk_shader_runtime_compile_enabled()) return vk_load_prepared_shader(src, stage, name, nwords);
+    uint64_t h = source_key(src, stage);
+    uint32_t *spv = cache_load(h, nwords);
+    if (spv) return spv;
+    // Workers may request the same source concurrently. Recheck after taking a
+    // source lock so only one compiles it; unrelated sources can build in parallel.
+    pthread_once(&base_locks_once, init_base_locks);
+    pthread_mutex_t *lock = &base_locks[h % (sizeof base_locks / sizeof *base_locks)];
+    pthread_mutex_lock(lock);
+    spv = cache_load(h, nwords);
+    char why[1024] = "";
+    if (!spv) {
+        bool opened = !prepare_library;
+        if (!opened || vk_shader_prepare_begin(why, sizeof why)) {
+            LOG("[shader-runtime] compiling %s (%016llx)\n", name, (unsigned long long)h);
+            spv = prepare_compile(prepare_context, src, stage, shader_api(), getenv("LARECOMP_VK_OPT") != NULL,
+                                  nwords, why, sizeof why);
+            if (spv && !vk_shader_cache_framed(spv, *nwords)) {
+                free(spv); spv = NULL; *nwords = 0;
+                snprintf(why, sizeof why, "compiler returned an invalid SPIR-V module");
+            }
+            if (spv && !cache_store(h, spv, *nwords))
+                LOG("[shader-runtime] could not cache %s; using the compiled module\n", name);
+            if (opened) vk_shader_prepare_end();
+        }
     }
-    shaderc_result_release(r);
-    return out;
+    pthread_mutex_unlock(lock);
+    if (!spv) FATAL("Runtime shader compilation failed: %s (%016llx): %s\n", name, (unsigned long long)h, why);
+    return spv;
+}
+
+static void prepare_builtin(const char *name, bool *opened) {
+    int stage;
+    const char *source = vk_builtin_source(name, &stage);
+    if (!source) FATAL("Unknown built-in shader: %s\n", name);
+    if (vk_shader_cached(source_key(source, stage))) return;
+    char why[1024];
+    if (!*opened) {
+        if (!vk_shader_prepare_begin(why, sizeof why)) FATAL("%s\n", why);
+        *opened = true;
+    }
+    if (!vk_shader_prepare_source(source, stage, name, why, sizeof why))
+        FATAL("Built-in shader preparation: %s\n", why);
+}
+void vk_shaders_init(void) {
+    // Runtime-owned shaders are also prepared before the guest starts. All clear
+    // target/type combinations must be included, including the depth-only clear.
+    static const char *names[] = {"present.vert", "present.frag", "present_a.frag", "post.vert",
+        "smaa_edge.frag", "smaa_weight.frag", "smaa_blend.frag", "easu.frag", "rcas.frag",
+        "sgsr1.frag", "clear.vert", "clear.frag.none"};
+    bool opened = false;
+    for (size_t i = 0; i < sizeof names / sizeof *names; ++i) prepare_builtin(names[i], &opened);
+    for (int target = 0; target < 8; ++target) for (int kind = 0; kind < 3; ++kind) {
+        char name[32]; snprintf(name, sizeof name, "clear.frag.%c%d", "fiu"[kind], target);
+        prepare_builtin(name, &opened);
+    }
+    if (opened) vk_shader_prepare_end();
 }
 
 VkShaderModule vk_module(const uint32_t *spv, size_t nwords) {
@@ -198,9 +390,9 @@ VkShaderModule vk_module(const uint32_t *spv, size_t nwords) {
     return result == VK_SUCCESS ? m : VK_NULL_HANDLE;
 }
 
-VkShaderModule vk_compile_glsl(const char *src, int stage, const char *name) {
+VkShaderModule vk_module_from_prepared(const char *src, int stage, const char *name) {
     size_t n;
-    uint32_t *spv = vk_glsl_to_spirv(src, stage, name, &n);
+    uint32_t *spv = vk_load_prepared_shader(src, stage, name, &n);
     if (!spv) return VK_NULL_HANDLE;
     VkShaderModule m = vk_module(spv, n);
     free(spv);
@@ -232,6 +424,7 @@ int vk_reflect(const uint32_t *spv, size_t n, VkBindingInfo *out, int max) {
             else if (w[2] == DEC_BUFFER_BLOCK) flags[w[1]] |= 2;
         } else if ((o == OP_TYPE_IMAGE || o == OP_TYPE_SAMPLER || o == OP_TYPE_SAMPLED_IMAGE || o == OP_TYPE_STRUCT) && wc >= 2 && w[1] < bound) {
             op[w[1]] = o;
+            if(o==OP_TYPE_IMAGE && wc>=9)sc[w[1]]=w[7]; // Sampled=2 denotes a storage image
         } else if ((o == OP_TYPE_ARRAY || o == OP_TYPE_RUNTIME_ARRAY) && wc >= 3 && w[1] < bound) {
             op[w[1]] = o;
             ref[w[1]] = w[2];
@@ -254,7 +447,7 @@ int vk_reflect(const uint32_t *spv, size_t n, VkBindingInfo *out, int max) {
         VkDescriptorType dt;
         if (t >= bound) continue;
         if (op[t] == OP_TYPE_SAMPLED_IMAGE) dt = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        else if (op[t] == OP_TYPE_IMAGE) dt = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        else if (op[t] == OP_TYPE_IMAGE) dt = sc[t]==2 ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
         else if (op[t] == OP_TYPE_SAMPLER) dt = VK_DESCRIPTOR_TYPE_SAMPLER;
         else if (op[t] == OP_TYPE_STRUCT && (sc[id] == SC_STORAGE_BUFFER || (flags[t] & 2))) dt = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         else if (op[t] == OP_TYPE_STRUCT && sc[id] == SC_UNIFORM) dt = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -265,19 +458,23 @@ int vk_reflect(const uint32_t *spv, size_t n, VkBindingInfo *out, int max) {
     return cnt;
 }
 
-VkDescriptorSetLayout vk_set_layout(const VkBindingInfo *b, int n, uint32_t set, VkShaderStageFlags stages) {
+VkResult vk_try_set_layout(const VkBindingInfo *b, int n, uint32_t set, VkShaderStageFlags stages, VkDescriptorSetLayout *layout) {
     VkDescriptorSetLayoutBinding lb[96];
     uint32_t k = 0;
     for (int i = 0; i < n && k < 96; i++)
         if (b[i].set == set) lb[k++] = (VkDescriptorSetLayoutBinding){b[i].binding, b[i].type, 1, stages, NULL};
     VkDescriptorSetLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = k, .pBindings = lb};
+    *layout=VK_NULL_HANDLE;
+    return vkCreateDescriptorSetLayout(g_vk.dev, &ci, NULL, layout);
+}
+VkDescriptorSetLayout vk_set_layout(const VkBindingInfo *b, int n, uint32_t set, VkShaderStageFlags stages) {
     VkDescriptorSetLayout l;
-    VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &ci, NULL, &l));
+    VK_CHECK(vk_try_set_layout(b,n,set,stages,&l));
     return l;
 }
 
 // ================================================================== built-in shaders
-static const char *builtin_src(const char *name, int *stage) {
+const char *vk_builtin_source(const char *name, int *stage) {
     if (!strcmp(name, "present.vert")) {
         *stage = STAGE_VERTEX;
         // pv[0].x: flip (lower-left origin), pv[1]: uv crop (origin, size). Fullscreen triangle; Vulkan NDC y points down.
@@ -558,6 +755,10 @@ static const char *builtin_src(const char *name, int *stage) {
                "  gl_Position = vec4(p * 2.0 - 1.0, pc.d.x, 1.0);\n"
                "}\n";
     }
+    if (!strcmp(name, "clear.frag.none")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\nvoid main() {}\n";
+    }
     // clear.frag.<f|i|u><index>: writes the push-constant colour to colour target <index>
     if (!strncmp(name, "clear.frag.", 11)) {
         *stage = STAGE_FRAGMENT;
@@ -573,10 +774,6 @@ static const char *builtin_src(const char *name, int *stage) {
                  "void main() { o = %s; }\n", idx, ty, cv);
         return buf;
     }
-    if (!strcmp(name, "clear.frag.none")) {
-        *stage = STAGE_FRAGMENT;
-        return "#version 450\nvoid main() {}\n";
-    }
     return NULL;
 }
 
@@ -585,9 +782,9 @@ VkShaderModule vk_builtin_shader(const char *name) {
     static int n;
     for (int i = 0; i < n; i++) if (!strcmp(cache[i].name, name)) return cache[i].m;
     int stage = 0;
-    const char *src = builtin_src(name, &stage);
+    const char *src = vk_builtin_source(name, &stage);
     if (!src) FATAL("no built-in shader %s\n", name);
-    VkShaderModule m = vk_compile_glsl(src, stage, name);
+    VkShaderModule m = vk_module_from_prepared(src, stage, name);
     if (!m) FATAL("built-in shader %s failed to compile\n", name);
     if (n < 64) { snprintf(cache[n].name, sizeof cache[n].name, "%s", name); cache[n++].m = m; }
     return m;

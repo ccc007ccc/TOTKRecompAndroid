@@ -36,6 +36,8 @@ fetch https://github.com/libsdl-org/SDL/releases/download/release-3.4.16/SDL3-3.
       7322236cd12090c3eb40b9728be4d49c76f66ad17d04369584d4ecad5cf77c68 SDL3-3.4.16.tar.gz
 fetch https://github.com/google/shaderc/archive/refs/tags/v2026.3.tar.gz \
       ee493ccf1b3038b4ef2fe024664c5eb2dc4bcc1f6b05b33e3909de0e19c81024 shaderc-2026.3.tar.gz
+fetch https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz \
+      eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3 zstd-1.5.7.tar.gz
 fetch https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/vulkan-sdk-1.4.350.1.tar.gz \
       6d1bb65e49520344cc0a48af3dc02e993781efff14c7ebdcb8ae9fa23ddf7e83 Vulkan-Headers-1.4.350.1.tar.gz
 fetch https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator/archive/refs/tags/v3.3.0.tar.gz \
@@ -79,7 +81,7 @@ fi
 
 # shaderc as one shared library (glslang, SPIRV-Tools inside), for the Android Vulkan backend; its DEPS file pins the
 # glslang / SPIRV-Tools / SPIRV-Headers commits (utils/git-sync-deps clones them)
-if [ ! -f "$P/lib/libshaderc_shared.so" ]; then
+if [ ! -f "$P/lib/libshaderc_shared.so" ] || { [ ! -f "$P/include/spirv-tools/libspirv.h" ] && [ ! -f "$W/shaderc/third_party/spirv-tools/include/spirv-tools/libspirv.h" ]; }; then
     unpack shaderc-2026.3.tar.gz shaderc
     PY=${PYTHON:-}
     for p in python3 python; do  # (Windows: python3 may be the Microsoft Store's stub, which can't run anything)
@@ -94,6 +96,21 @@ if [ ! -f "$P/lib/libshaderc_shared.so" ]; then
     mkdir -p "$P/include/shaderc"
     cp "$W/shaderc/libshaderc/include/shaderc/"*.h "$P/include/shaderc/"
     cp "$W/shaderc/build/libshaderc/libshaderc_shared.so" "$P/lib/"
+fi
+mkdir -p "$P/include/spirv-tools"
+if [ ! -f "$P/include/spirv-tools/libspirv.h" ]; then
+    cp "$W/shaderc/third_party/spirv-tools/include/spirv-tools/libspirv.h" "$P/include/spirv-tools/"
+fi
+
+# Native phone-side shader extraction; no Python/desktop asset conversion needed.
+if [ ! -f "$P/lib/libzstd.so" ] || [ ! -f "$P/include/zstd_errors.h" ]; then
+    unpack zstd-1.5.7.tar.gz zstd
+    "$CMAKE" -S "$W/zstd/build/cmake" -B "$W/zstd/build-android" "${ANDROID_CMAKE[@]}" \
+        -DZSTD_BUILD_PROGRAMS=OFF -DZSTD_BUILD_TESTS=OFF -DZSTD_BUILD_STATIC=OFF -DZSTD_BUILD_SHARED=ON \
+        -DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384
+    "$CMAKE" --build "$W/zstd/build-android" -j"$JOBS"
+    cp "$W/zstd/lib/zstd.h" "$W/zstd/lib/zstd_errors.h" "$P/include/"
+    cp -L "$W/zstd/build-android/lib/libzstd.so" "$P/lib/libzstd.so"
 fi
 
 echo "deps: $P"

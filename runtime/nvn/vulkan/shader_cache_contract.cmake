@@ -1,0 +1,55 @@
+# Compiler identity, separate from renderer/collector build identity. Source,
+# stage, target API and optimization are already part of each entry's key.
+function(totk_shader_cache_contract root out_id out_legacy)
+    set(inputs
+        runtime/nvn/vulkan/shader_cache.h
+        runtime/nvn/vulkan/shader_compiler.c
+        runtime/nvn/vulkan/shader_precision.h
+        runtime/nvn/vulkan/shader_interface.hpp
+        runtime/nvn/vulkan/shader_interface.cpp
+        android/deps/out/lib/libshaderc_shared.so)
+    file(READ "${root}/runtime/nvn/vulkan/shader_cache_compat.json" review)
+    string(JSON schema ERROR_VARIABLE schema_error GET "${review}" schema)
+    if(schema_error OR NOT schema STREQUAL "1")
+        message(FATAL_ERROR "Unsupported shader cache compatibility schema")
+    endif()
+    set(identity "totk-spirv-cache-v3;")
+    set(compatible TRUE)
+    foreach(source IN LISTS inputs)
+        file(SHA256 "${root}/${source}" digest)
+        string(APPEND identity "${source}:${digest};")
+        string(JSON expected ERROR_VARIABLE error GET "${review}" compatible_inputs "${source}")
+        if(error OR NOT digest STREQUAL expected)
+            set(compatible FALSE)
+        endif()
+    endforeach()
+    string(SHA256 id "${identity}")
+    set(legacy "")
+    if(compatible)
+        string(JSON count LENGTH "${review}" legacy_builds)
+        if(count GREATER 0)
+            math(EXPR last "${count}-1")
+            foreach(index RANGE ${last})
+                string(JSON old GET "${review}" legacy_builds ${index})
+                string(LENGTH "${old}" length)
+                if(NOT length EQUAL 64 OR NOT old MATCHES "^[0-9a-f]+$")
+                    message(FATAL_ERROR "Invalid reviewed shader cache namespace")
+                endif()
+                list(APPEND legacy "${old}")
+            endforeach()
+        endif()
+    endif()
+    set(${out_id} "${id}" PARENT_SCOPE)
+    set(${out_legacy} "${legacy}" PARENT_SCOPE)
+endfunction()
+
+# APK and standalone audits must emit exactly the same namespace declarations.
+function(totk_generate_shader_cache_contract root header)
+    totk_shader_cache_contract("${root}" SHADER_CACHE_ID legacy)
+    set(SHADER_COMPAT_CACHE_DEFINITIONS "")
+    foreach(old IN LISTS legacy)
+        string(APPEND SHADER_COMPAT_CACHE_DEFINITIONS "\"${old}\", ")
+    endforeach()
+    configure_file("${root}/runtime/nvn/vulkan/shader_cache_contract.h.in" "${header}" @ONLY)
+    message(STATUS "Shader compiler cache identity: ${SHADER_CACHE_ID}; compatible legacy: ${legacy}")
+endfunction()

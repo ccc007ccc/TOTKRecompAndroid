@@ -25,7 +25,7 @@ typedef _Bool bool;
 #define GMAP_BUFFER_INDEX 20
 typedef enum { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-       UNUSED_STORAGE_IMAGE, UNUSED_SAMPLER } VkDescriptorType;
+       VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, UNUSED_SAMPLER } VkDescriptorType;
 typedef struct { uint32_t set, binding; VkDescriptorType type; } VkBindingInfo;
 '''
 test = r'''
@@ -48,7 +48,8 @@ int check(unsigned seed, int count, unsigned set) {
     for (int i = 0; i < count; i++) {
         const VkBindingInfo *b = &binds[i];
         if (b->set != set) continue;
-        if (b->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && b->binding >= 32) legacy[n++] = i;
+        if ((b->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || b->type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) &&
+            b->binding >= 32) legacy[n++] = i;
         else if ((b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) &&
                  b->binding < 17) legacy[n++] = i;
         else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) legacy[n++] = i;

@@ -1,0 +1,22 @@
+{
+  "repository": "https://github.com/ly05010419/MacNativeGames",
+  "commit": "f024ef04c707c4b4bb5b6328bfc55ae89642af40",
+  "files": {
+    "shader_list.py": {
+      "upstream_path": "games/totk/scripts/shader_list.py",
+      "sha256_uncompressed": "24e88cf1cec77d02ab216a823ca3c31fbd1e1ecada26e6fc6e998816b9b699c5"
+    },
+    "prepare_shader_seed.py": {
+      "upstream_path": "games/totk/scripts/prepare_shader_seed.py",
+      "sha256_uncompressed": "f19d6d265597278345c3d3e499b16cd6877e3c7483b85e8c560856ace682e7d8"
+    },
+    "shader_list.tsv.gz": {
+      "upstream_path": "games/totk/assets/shader_list.tsv",
+      "sha256_uncompressed": "09de5c88ba3fe2c45769b963851976a1aca12520e98378c9456d3719b77662fe"
+    },
+    "LICENSE": {
+      "upstream_path": "LICENSE",
+      "sha256_uncompressed": "a035ee21f927d2247f30bedc8964c95b3a4d794f76c78cad178b68731815a79a"
+    }
+  }
+}

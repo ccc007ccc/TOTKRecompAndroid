@@ -24,6 +24,11 @@
 #include <atomic>
 
 #include "i18n.h"
+#ifdef __ANDROID__
+#include "../nvn/vulkan/shader_prepare.h"
+#include "../nvn/vulkan/shader_warm.h"
+#include "../nvn/vulkan/shader_runtime.h"
+#endif
 #include "imgui.h"
 #include "imgui_internal.h"  // (SetKeyOwner)
 #include "option_rows.h"
@@ -206,6 +211,10 @@ static std::string check_copied_files(const std::string &root) {
 static std::string check_game_files(const std::string &root) {
     std::string why = check_copied_files(root);
     if (why.empty() && !gamelib_present(root.c_str())) return "The game code needs building";
+#ifdef __ANDROID__
+    if (why.empty() && !vk_shader_runtime_compile_enabled() && !vk_shader_game_ready(root.c_str()))
+        return "Game graphics need preparing";
+#endif
     return why;
 }
 
@@ -349,6 +358,7 @@ static float extract_progress(void) {
 
 // Builds the game code from the copied files in dir (a few minutes); false = failed (the job line says so)
 static bool build_game_code(const std::string &dir) {
+    if (gamelib_present(dir.c_str())) return true;
     int cores = SDL_GetNumLogicalCPUCores(), ram_gb = SDL_GetSystemRAM() / 1024;
     GameBuildOpts o = {build_progress, cores < ram_gb - 2 ? cores : ram_gb - 2 > 1 ? ram_gb - 2 : 1};
     char why[256] = "";
@@ -442,6 +452,25 @@ static void *extract_thread(void *) {
         if (!build_game_code(dest)) goto done;
     }
 check:
+#ifdef __ANDROID__
+    if (vk_shader_runtime_compile_enabled()) {
+        char why[1024] = "", manifest[1200];
+        if (!rt_resource("shader-warm.bin", NULL, manifest, sizeof manifest) ||
+            !vk_shader_warm_game(dest.c_str(), manifest, true, build_progress, why, sizeof why)) {
+            set_job("Game graphics preparation failed", true, "Prepare graphics again after updating the app.");
+            set_job_detail(why[0] ? why : "Graphics warm-up list is missing.");
+            goto done;
+        }
+    }
+    if (!vk_shader_runtime_compile_enabled() && !vk_shader_game_ready(dest.c_str())) {
+        char why[1024] = "";
+        if (!vk_shader_prepare_game(dest.c_str(), build_progress, why, sizeof why)) {
+            set_job("Game graphics preparation failed", true, "Prepare graphics again after updating the app.");
+            set_job_detail(why);
+            goto done;
+        }
+    }
+#endif
     {
         std::string why = check_game_files(dest);
         ok = why.empty();
@@ -1266,6 +1295,27 @@ static void prelaunch_tab(float sc) {
     }
     ImGui::Spacing();
     ImGui::Spacing();
+    heading("Shader precision");
+    pthread_mutex_lock(&g_lock);
+    bool preparing = g_busy;
+    pthread_mutex_unlock(&g_lock);
+    ImGui::BeginDisabled(preparing);
+    if (ImGui::Checkbox(tr("Prefer FP32 (experimental)"), &g_settings.shader_fp32)) settings_save();
+    ImGui::EndDisabled();
+    ImGui::PushTextWrapPos(0);
+    ImGui::TextDisabled("%s", tr("Uses the GPU's native single precision for double arithmetic. May cause visual errors. "
+                               "Turn off to use double precision emulation on the GPU. With runtime compilation disabled, prepare graphics again after changing this."));
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+    heading("Shader cache");
+    ImGui::BeginDisabled(preparing);
+    if (ImGui::Checkbox(tr("Allow runtime shader compilation"), &g_settings.shader_runtime_compile)) settings_save();
+    ImGui::EndDisabled();
+    ImGui::PushTextWrapPos(0);
+    ImGui::TextDisabled("%s", tr("Missing or damaged cached shaders are compiled during play and saved. First use may cause a brief pause. "
+                               "Turn off to require complete graphics preparation before playing."));
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
     heading("Driver compatibility");
     {   // (runtime/settings.h gpu_heap / inplace_reads / turnip_lrz / log_file: for GPUs where a Turnip path draws wrong;
         // LASRecompAndroid's, with BOTW's in-place reads of draw targets)
@@ -1540,6 +1590,11 @@ extern "C" void launcher_run(const char *root) {
         fprintf(stderr, "[launcher] delete %.1f GB: %s -> %s\n", gb, ok ? "ok" : "refused", status.c_str());
         if (!status.empty()) { g_bg = 0; page = SETUP; }
     }
+#ifdef __ANDROID__
+    bool requested_play=play,warm_suspended=false;play=false;
+    char warm_manifest[1200]{};
+    rt_resource("shader-warm.bin",NULL,warm_manifest,sizeof warm_manifest);
+#endif
     while (!play) {
         menu_apply_window_requests(win);  // (the Video tab's Fullscreen)
         if (g_files_deleted) {  // (Settings > Prelaunch deleted them)
@@ -1562,6 +1617,10 @@ extern "C" void launcher_run(const char *root) {
 #endif
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
+#ifdef __ANDROID__
+            if(e.type==SDL_EVENT_WILL_ENTER_BACKGROUND){warm_suspended=true;vk_shader_warm_stop();}
+            if(e.type==SDL_EVENT_DID_ENTER_FOREGROUND)warm_suspended=false;
+#endif
             if (page == SETTINGS && bind_capture_event(&e)) continue;  // (waiting for a new binding: controls_ui.mm)
             if (!launcher_pad_event(e)) ImGui_ImplSDL3_ProcessEvent(&e);
             if (e.type == SDL_EVENT_QUIT) exit(0);
@@ -1584,6 +1643,23 @@ extern "C" void launcher_run(const char *root) {
             if (status.empty() && !g_switching_to && !failed) { load_background(dev); page = MAIN; }
         }
         was_busy = busy;
+        bool graphics_ready=true;
+#ifdef __ANDROID__
+        ShaderWarmStatus warming={};
+        if(page==MAIN && status.empty() && !busy && !warm_suspended && vk_shader_runtime_compile_enabled() &&
+           vk_shader_warm_enabled() && warm_manifest[0]) {
+            vk_shader_warm_start(g_root.c_str(),warm_manifest);warming=vk_shader_warm_status();
+            graphics_ready=warming.title_ready || !warming.running;
+        } else vk_shader_warm_stop();
+        if(requested_play && graphics_ready && page==MAIN && status.empty() && !busy && !warm_suspended)play=true;
+#endif
+        auto request_play=[&]{
+#ifdef __ANDROID__
+            requested_play=true;play=graphics_ready && !warm_suspended;
+#else
+            play=true;
+#endif
+        };
 
 #ifdef __APPLE__
         int w, h;
@@ -1728,21 +1804,29 @@ extern "C" void launcher_run(const char *root) {
                     sparkle(dl, ImVec2(play_at.x + w + h * 0.05f, play_at.y + h * 0.22f), h * 0.2f, k1, t * 0.6f);
                     sparkle(dl, ImVec2(play_at.x + w - h * 0.32f, play_at.y + h * 0.08f), h * 0.11f, k2 * 0.8f, -t * 0.8f);
                 }
+#ifdef __ANDROID__
+                if(!graphics_ready)ImGui::TextDisabled("%s",tr("Preparing game graphics..."));
+                else if(warming.failed && !warming.title_ready)
+                    ImGui::TextDisabled("%s",tr("Graphics will be prepared during play."));
+#endif
                 // first PLAY ever: the aspect ratio question, then how to reach our menu, then the game
                 if (pressed) {
                     if (!g_settings.aspect_asked) ImGui::OpenPopup("##aspect");
                     else if (!g_settings.menu_tip_seen) ImGui::OpenPopup("##menutip");
-                    else play = true;
+                    else request_play();
                 }
                 if (g_tip_test) ImGui::OpenPopup(g_settings.aspect_asked ? "##menutip" : "##aspect"), g_tip_test = false;
                 if (aspect_prompt(s)) {
-                    if (g_settings.menu_tip_seen) play = true;
+                    if (g_settings.menu_tip_seen) request_play();
                     else ImGui::OpenPopup("##menutip");
                 }
-                if (menu_tip(s)) play = true;
+                if (menu_tip(s)) request_play();
                 ImGui::SetCursorPosX(x0);
                 if (g_refocus == SETTINGS) ImGui::SetKeyboardFocusHere(), g_refocus = MAIN;  // (back from Settings: it
                 if (menu_item("SETTINGS", true)) {                                             //  stays selected)
+#ifdef __ANDROID__
+                    requested_play=false;vk_shader_warm_stop();
+#endif
                     static bool opened;
                     menu_tabs_focus(!opened);  // (first time this session: Prelaunch; later: the selected tab)
                     opened = true;
@@ -1751,7 +1835,12 @@ extern "C" void launcher_run(const char *root) {
                 if (!status.empty() || busy) {  // (once set up, the game files are kept up in Settings > Prelaunch)
                     ImGui::SetCursorPosX(x0);
                     if (g_refocus == SETUP) ImGui::SetKeyboardFocusHere(), g_refocus = MAIN;
-                    if (menu_item("SET UP GAME FILES", !busy)) page = SETUP;
+                    if (menu_item("SET UP GAME FILES", !busy)) {
+#ifdef __ANDROID__
+                        requested_play=false;vk_shader_warm_stop();
+#endif
+                        page = SETUP;
+                    }
                 }
                 ImGui::SetCursorPosX(x0);
                 if (menu_item("QUIT", true)) exit(0);
@@ -1816,6 +1905,7 @@ extern "C" void launcher_run(const char *root) {
                 if (back) {
                     bind_capture_cancel();
                     settings_save();
+                    status = check_game_files(g_root);  // precision/profile changes invalidate prepared graphics
                     page = MAIN, g_refocus = SETTINGS;
                 }
             } else {

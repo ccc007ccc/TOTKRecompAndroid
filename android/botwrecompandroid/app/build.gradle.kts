@@ -27,6 +27,7 @@ if (requestedProfile != null && requestedProfile != "dev") {
     layout.buildDirectory.set(repo.resolve(".work/totk-port/builds/$requestedProfile/$appDirectory"))
 }
 val gen = layout.buildDirectory.dir("generated/botwrecompandroid")
+val warmAssets = layout.buildDirectory.dir("generated/shader-warm-assets")
 val dialogTestJni = layout.buildDirectory.dir("generated/dialog-test-jni")
 // The release key: outside the repository, in ~/.totkrecompandroid/keystore.properties (storeFile, storePassword, keyAlias,
 // keyPassword); without it, release builds are signed with the debug key
@@ -75,7 +76,7 @@ android {
         getByName("main") {
             java.srcDirs("src/main/java", deps.resolve("java"))  // (SDL's Java side, the same version as libSDL3.so)
             jniLibs.srcDirs(gen.get().asFile.resolve("jniLibs"))
-            assets.srcDirs(gen.get().asFile.resolve("assets"))
+            assets.srcDirs(gen.get().asFile.resolve("assets"), warmAssets)
             res.srcDirs("src/main/res", gen.get().asFile.resolve("res"))
         }
         getByName("androidTest").jniLibs.srcDir(dialogTestJni)
@@ -89,7 +90,7 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true  // adrenotools loads its hooks from nativeLibraryDir
-            pickFirsts += listOf("**/libSDL3.so", "**/libshaderc_shared.so", "**/libavcodec.so", "**/libavformat.so",
+            pickFirsts += listOf("**/libSDL3.so", "**/libshaderc_shared.so", "**/libzstd.so", "**/libavcodec.so", "**/libavformat.so",
                                  "**/libavutil.so", "**/libswscale.so")
         }
     }
@@ -170,7 +171,7 @@ val prepareBotwRecompAndroid by tasks.registering {
     val icon = repo.resolve("assets/artwork/triforce-icon-v2.png")
     val background = repo.resolve("assets/artwork/great-plateau-background-v2.png")
     val touchSkin = repo.resolve("assets/artwork/sheikah-touch-atlas-v1.png")
-    val libs = listOf("libSDL3.so", "libshaderc_shared.so", "libavcodec.so", "libavformat.so", "libavutil.so", "libswscale.so", "libVkLayer_GLES_RenderDoc.so")
+    val libs = listOf("libSDL3.so", "libshaderc_shared.so", "libzstd.so", "libavcodec.so", "libavformat.so", "libavutil.so", "libswscale.so", "libVkLayer_GLES_RenderDoc.so")
     inputs.files(smaa, font, icon, background, touchSkin)
     inputs.files(libs.map { deps.resolve("lib/$it") }.filter { it.exists() })
     if (deps.resolve("gen").exists()) inputs.dir(deps.resolve("gen"))  // (the game code's builder, below)
@@ -245,7 +246,16 @@ val prepareBotwRecompAndroid by tasks.registering {
         }
     }
 }
-tasks.named("preBuild") { dependsOn(prepareBotwRecompAndroid) }
+val prepareShaderWarmManifest by tasks.registering(Exec::class) {
+    val output = warmAssets.get().file("res/shader-warm.bin").asFile
+    inputs.files(repo.resolve("tools/build_shader_warm_manifest.py"), repo.resolve("tools/import_shader_warm_list.py"))
+    inputs.files(fileTree(repo.resolve("third_party/macnativegames")) { exclude("**/__pycache__/**") })
+    outputs.files(output, output.resolveSibling("shader-warm.json"))
+    workingDir(repo)
+    commandLine(providers.environmentVariable("PYTHON").getOrElse("python3"),
+        repo.resolve("tools/build_shader_warm_manifest.py").absolutePath, output.absolutePath)
+}
+tasks.named("preBuild") { dependsOn(prepareBotwRecompAndroid, prepareShaderWarmManifest) }
 tasks.matching { it.name.startsWith("configureCMake") || it.name.startsWith("buildCMake") }.configureEach {
     dependsOn(prepareBotwRecompAndroid)
 }

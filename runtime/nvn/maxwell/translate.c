@@ -25,6 +25,7 @@
 uint64_t maxwell_gmem_base, maxwell_gmem_size;
 bool maxwell_gmem_map_all;
 bool maxwell_no_int64;
+bool maxwell_fp32_double;
 bool maxwell_gmem_miss_log;
 unsigned maxwell_gmem_miss_stages = ~0u;
 #define GMISS_ON(st) (maxwell_gmem_miss_log && (maxwell_gmem_miss_stages >> (st) & 1u))
@@ -77,7 +78,7 @@ typedef struct {
     uint8_t pred_used[8];
     uint32_t in_attr_mask, out_attr_mask;
     uint32_t vs_in_comp[32];
-    bool uses_branches, uses_cc, uses_local, uses_vid, uses_iid, uses_frag_coord, uses_front_facing, uses_lane;
+    bool uses_branches, uses_cc, uses_cco, uses_local, uses_vid, uses_iid, uses_frag_coord, uses_front_facing, uses_lane;
     bool uses_rscale;  // resolution-scale table (fragment/compute only)
     uint32_t flat_mask;           // fragment inputs using constant (flat) interpolation
     uint32_t noperspective_mask;  // fragment inputs using pass (linear) interpolation
@@ -90,6 +91,7 @@ typedef struct {
     int ipa_mul;   // its multiplier register (mode 1: the result is the "pass" value attr/w times this register)
     // GLSL (fields kept last: the MSL path's layout, including its out-of-range reg_used writes, is unchanged)
     bool glsl;               // emit Vulkan GLSL: dialect-specific constructs here, the rest via glsl_rewrite()
+    bool uses_soft64;        // binary64 through pairs of uint32, including fused multiply-add
     bool uses_gmem_store;    // STG present: the gmem buffer is not readonly
     bool uses_shared;        // LDS / STS present: workgroup shared memory array
     uint32_t cbuf_need[18];  // highest constant vec4 index + 1 per cbuf (array size of the GLSL block)
@@ -346,6 +348,103 @@ static void attr_store(Ctx *c, int src, uint32_t addr) {
 }
 
 
+// Binary64 values occupy a pair of 32-bit registers. Operand decoding follows
+// the Maxwell DADD/DMUL/DFMA/F2F layouts (including the DFMA register/cbuf swap).
+static const char *fp64_reg(Ctx *c, int r, char *out) {
+    if (r != RZ && (r & 1)) { fail(c, "unaligned fp64 register pair R%d", r); strcpy(out, "uvec2(0u)"); return out; }
+    snprintf(out, 600, "uvec2(%s, %s)", R(r), R(r | 1));
+    return out;
+}
+static const char *fp64_cbuf(Ctx *c, uint64_t w, char *out) {
+    unsigned bank = bits(w, 34, 5), offset = bits(w, 20, 14) * 4;
+    if (bank >= 18 || offset > 65528) { fail(c, "fp64 constant buffer range"); strcpy(out, "uvec2(0u)"); return out; }
+    char lo[256], hi[256];
+    cbuf_ref(c, bank, offset, NULL, lo); cbuf_ref(c, bank, offset + 4, NULL, hi);
+    snprintf(out, 600, "uvec2(%s, %s)", lo, hi);
+    return out;
+}
+static const char *fp64_b(Ctx *c, uint64_t w, char *out) {
+    if (b_form(w) == B_REG) return fp64_reg(c, bits(w, 20, 8), out);
+    if (b_form(w) == B_CBUF) return fp64_cbuf(c, w, out);
+    uint32_t high = ((uint32_t)bits(w, 20, 19) | (uint32_t)bits(w, 56, 1) << 19) << 12;
+    snprintf(out, 600, "uvec2(0u, 0x%08xu)", high);
+    return out;
+}
+static void fp64_store(Ctx *c, int d, const char *value) {
+    if (d == RZ) return;
+    if (d & 1) { fail(c, "unaligned fp64 destination R%d", d); return; }
+    char part[96];
+    snprintf(part, sizeof part, "%s.x", value); set_reg(c, d, part);
+    snprintf(part, sizeof part, "%s.y", value); set_reg(c, d | 1, part);
+}
+static bool emit_fp64(Ctx *c, uint64_t w) {
+    uint64_t op = w & 0xfff8000000000000ull, imm = w & 0xfef8000000000000ull;
+    bool add = op == 0x5c70000000000000ull || op == 0x4c70000000000000ull || imm == 0x3870000000000000ull;
+    bool mul = op == 0x5c80000000000000ull || op == 0x4c80000000000000ull || imm == 0x3880000000000000ull;
+    bool fma = (w & 0xfff0000000000000ull) == 0x5b70000000000000ull ||
+               (w & 0xfff0000000000000ull) == 0x4b70000000000000ull ||
+               (w & 0xfef0000000000000ull) == 0x3670000000000000ull ||
+               (w & 0xfff0000000000000ull) == 0x5370000000000000ull;
+    int dfmt = bits(w, 8, 2), sfmt = bits(w, 10, 2);
+    bool convert = (op == 0x5ca8000000000000ull || op == 0x4ca8000000000000ull || imm == 0x38a8000000000000ull) &&
+                   (dfmt == 3 || sfmt == 3);
+    if (!add && !mul && !fma && !convert) return false;
+    if (!c->glsl || bits(w, 47, 1)) { fail(c, "fp64 dialect/condition-code mode"); return true; }
+    c->uses_soft64 = true;
+    int d = bits(w, 0, 8);
+    char av[600], bv[600], cv[600];
+    if (convert) {
+        unsigned mode = bits(w, 39, 2) | bits(w, 42, 1) << 2;
+        if (dfmt < 2 || sfmt < 2 || (mode >= 4 && dfmt != sfmt)) { fail(c, "invalid fp64 F2F format/rounding"); return true; }
+        if (sfmt == 3) sp(&c->body, "    { uvec2 dv_ = %s;\n", fp64_b(c, w, bv));
+        else {
+            sp(&c->body, "    { uint raw_ = %s;\n", operand_b(c, w, true, bv));
+            if (bits(w, 44, 1)) sp(&c->body, "      if ((raw_ & 0x7f800000u) == 0u) raw_ &= 0x80000000u;\n");
+            sp(&c->body, "      uvec2 dv_ = sf64_from_f32(raw_);\n");
+        }
+        if (bits(w, 49, 1)) sp(&c->body, "      dv_ = sf64_abs(dv_);\n");
+        if (bits(w, 45, 1)) sp(&c->body, "      dv_ = sf64_neg(dv_);\n");
+        if (mode >= 4) sp(&c->body, "      dv_ = sf64_integral(dv_, %uu);\n", mode & 3);
+        if (dfmt == 3) {
+            if (bits(w, 50, 1)) sp(&c->body, "      dv_ = sf64_sat(dv_);\n");
+            fp64_store(c, d, "dv_");
+        } else {
+            sp(&c->body, "      uint fv_ = sf64_to_f32(dv_, %uu);\n", mode);
+            if (bits(w, 44, 1)) sp(&c->body, "      if ((fv_ & 0x7f800000u) == 0u) fv_ &= 0x80000000u;\n");
+            if (bits(w, 50, 1)) sp(&c->body, "      if ((fv_ & 0x80000000u) != 0u || fv_ > 0x7f800000u) fv_ = 0u;\n"
+                                          "      else if (fv_ > 0x3f800000u) fv_ = 0x3f800000u;\n");
+            set_reg(c, d, "fv_");
+        }
+        sp(&c->body, "    }\n");
+        return true;
+    }
+    bool swapped = fma && (w & 0xfff0000000000000ull) == 0x5370000000000000ull;
+    fp64_reg(c, bits(w, 8, 8), av);
+    if (swapped) { fp64_reg(c, bits(w, 39, 8), bv); fp64_cbuf(c, w, cv); }
+    else { fp64_b(c, w, bv); if (fma) fp64_reg(c, bits(w, 39, 8), cv); }
+    sp(&c->body, "    { uvec2 da_ = %s, db_ = %s;\n", av, bv);
+    if (fma) sp(&c->body, "      uvec2 dc_ = %s;\n", cv);
+    if (add && bits(w, 46, 1)) sp(&c->body, "      da_ = sf64_abs(da_);\n");
+    if (bits(w, 48, 1)) sp(&c->body, "      da_ = sf64_neg(da_);\n");
+    if (add && bits(w, 49, 1)) sp(&c->body, "      db_ = sf64_abs(db_);\n");
+    if (add && bits(w, 45, 1)) sp(&c->body, "      db_ = sf64_neg(db_);\n");
+    if (fma && bits(w, 49, 1)) sp(&c->body, "      dc_ = sf64_neg(dc_);\n");
+    unsigned rounding = bits(w, fma ? 50 : 39, 2);
+    if (maxwell_fp32_double && rounding == 0) {
+        // Deliberately round operands and each result to FP32, but retain the
+        // guest pair encoding so MOV/LDG/STG, constants and mixed paths agree.
+        // Do not contract DADD/DMUL; only DFMA requests fused native arithmetic.
+        sp(&c->body, "      float fa_ = uintBitsToFloat(sf64_to_f32(da_, 0u));\n"
+                     "      float fb_ = uintBitsToFloat(sf64_to_f32(db_, 0u));\n");
+        if (fma) sp(&c->body, "      precise float fr_ = fma(fa_, fb_, uintBitsToFloat(sf64_to_f32(dc_, 0u)));\n");
+        else sp(&c->body, "      precise float fr_ = fa_ %s fb_;\n", add ? "+" : "*");
+        sp(&c->body, "      uvec2 dr_ = sf64_from_f32(floatBitsToUint(fr_));\n");
+    } else if (fma) sp(&c->body, "      uvec2 dr_ = sf64_fma(da_, db_, dc_, %uu);\n", rounding);
+    else sp(&c->body, "      uvec2 dr_ = sf64_%s(da_, db_, %uu);\n", add ? "add" : "mul", rounding);
+    fp64_store(c, d, "dr_"); sp(&c->body, "    }\n");
+    return true;
+}
+
 // ------------------------------------------------------------------ half precision (SM53)
 // Swizzle: 0 H1_H0 (both halves), 1 F32 (one f32 used for both lanes), 2 H0_H0, 3 H1_H1.
 // Merge: 0 H1_H0 (pack both), 1 F32 (lane 0 as f32), 2 MRG_H0 (replace low half), 3 MRG_H1 (replace high half).
@@ -533,6 +632,7 @@ static const char *tex_type_name(int t) {
     case TEXTYPE_2D_ARRAY: return "2d_array";
     case TEXTYPE_CUBE_ARRAY: return "cube_array";
     case TEXTYPE_1D_ARRAY: return "1d_array";
+    case TEXTYPE_2D_MS: return "2d_ms";
     default: return "2d";
     }
 }
@@ -564,7 +664,7 @@ static void write_tex_result(Ctx *c, int slot, const char *call, uint32_t mask, 
     for (int comp = 0; comp < 4; comp++) {
         if (!(mask & (1u << comp))) continue;
         int r = regs[n++];
-        if (r != RZ) { c->reg_used[r] = 1; sp(&c->body, "      r%d = as_type<uint>(t[%d]);\n", r, comp); }
+        if (r < RZ) { c->reg_used[r] = 1; sp(&c->body, "      r%d = as_type<uint>(t[%d]);\n", r, comp); }
     }
     sp(&c->body, "    }\n");
 }
@@ -760,6 +860,9 @@ static bool glsl_texs(Ctx *c, uint64_t w, bool fetch, int *slot_out, char *call,
             sprintf(call, "texelFetch(t%d, ivec2(%s), 0)", slot, RSC2(c, slot, "uint2(int2(%s, %s) + int2(int(%s << 28) >> 28, int(%s << 24) >> 28))", A, A1, Bv, Bv)); break;
         case 5: slot = tex_slot(c, index, TEXTYPE_2D, false, false);
             sprintf(call, "texelFetch(t%d, ivec2(%s), int(%s))", slot, RSC2(c, slot, "uint2(%s, %s)", A, A1), Bv); break;
+        case 6: slot = tex_slot(c, index, TEXTYPE_2D_MS, false, false);
+            // Ra/Ra+1 are texel coordinates; Rb selects a sample, never a mip level.
+            sprintf(call, "texelFetch(t%d, ivec2(%s), int(%s))", slot, RSC2(c, slot, "uint2(%s, %s)", A, A1), Bv); break;
         case 7: slot = tex_slot(c, index, TEXTYPE_3D, false, false);
             sprintf(call, "texelFetch(t%d, ivec3(%s, %s, %s), 0)", slot, A, A1, Bv); break;
         case 8: slot = tex_slot(c, index, TEXTYPE_2D_ARRAY, false, true);
@@ -841,6 +944,8 @@ static void emit_texs(Ctx *c, uint64_t w, bool fetch) {
             sprintf(call, "t%d.read(%s)", slot, RSC2(c, slot, "uint2(int2(%s, %s) + int2(int(%s << 28) >> 28, int(%s << 24) >> 28))", A, A1, Bv, Bv)); break;
         case 5: slot = tex_slot(c, index, TEXTYPE_2D, false, false);
             sprintf(call, "t%d.read(%s, uint(%s))", slot, RSC2(c, slot, "uint2(%s, %s)", A, A1), Bv); break;
+        case 6: slot = tex_slot(c, index, TEXTYPE_2D_MS, false, false);
+            sprintf(call, "t%d.read(%s, uint(%s))", slot, RSC2(c, slot, "uint2(%s, %s)", A, A1), Bv); break;
         case 7: slot = tex_slot(c, index, TEXTYPE_3D, false, false);
             sprintf(call, "t%d.read(uint3(%s, %s, %s))", slot, A, A1, Bv); break;
         case 8: slot = tex_slot(c, index, TEXTYPE_2D_ARRAY, false, true);
@@ -851,6 +956,73 @@ static void emit_texs(Ctx *c, uint64_t w, bool fetch) {
         }
     }
     write_tex_result(c, slot, call, mask, d0, d1, true, !bits(w, 59, 1));  // 0xd0/0xd2: .F16 results
+}
+
+// Full-form TXD uses coordinates at A, then packed layer/offset; derivatives
+// are dx followed by dy at B. Unlike TEX, the array layer is after coordinates.
+static void emit_txd(Ctx *c, uint64_t w) {
+    int d = bits(w, 0, 8), a = bits(w, 8, 8), b = bits(w, 20, 8);
+    int dim = bits(w, 28, 3), n = (dim >> 1) == 0 ? 1 : (dim >> 1) == 1 ? 2 : 3;
+    bool array = dim & 1;
+    if (!c->glsl || bits(w, 35, 1) || bits(w, 51, 3) != PT || dim == 5) {
+        fail(c, "txd dialect/offset/residency/dimension"); return;
+    }
+    if (d == RZ) return;
+    int type = n == 1 ? (array ? TEXTYPE_1D_ARRAY : TEXTYPE_1D) : n == 2 ?
+        (array ? TEXTYPE_2D_ARRAY : TEXTYPE_2D) : dim >= 6 ? (array ? TEXTYPE_CUBE_ARRAY : TEXTYPE_CUBE) : TEXTYPE_3D;
+    int slot = tex_slot(c, bits(w, 36, 13), type, false, array);
+    char coord[256] = "", dx[256] = "", dy[256] = "", tmp[96], call[1400], pos[400];
+    for (int i = 0; i < n; i++) {
+        snprintf(tmp, sizeof tmp, "%sas_type<float>(%s)", i ? ", " : "", R(a + i < RZ ? a + i : RZ)); strcat(coord, tmp);
+        snprintf(tmp, sizeof tmp, "%sas_type<float>(%s)", i ? ", " : "", R(b + i < RZ ? b + i : RZ)); strcat(dx, tmp);
+        snprintf(tmp, sizeof tmp, "%sas_type<float>(%s)", i ? ", " : "", R(b + n + i < RZ ? b + n + i : RZ)); strcat(dy, tmp);
+    }
+    if (array) snprintf(pos, sizeof pos, "vec%d(%s, float(min(%s & 65535u, uint(textureSize(t%d, 0).%s) - 1u)))",
+                        n + 1, coord, R(a + n < RZ ? a + n : RZ), slot, n == 1 ? "y" : "z");
+    else if (n == 1) snprintf(pos, sizeof pos, "%s", coord);
+    else snprintf(pos, sizeof pos, "vec%d(%s)", n, coord);
+    if (n == 1) snprintf(call, sizeof call, "textureGrad(t%d, %s, %s, %s)", slot, pos, dx, dy);
+    else snprintf(call, sizeof call, "textureGrad(t%d, %s, vec%d(%s), vec%d(%s))", slot, pos, n, dx, n, dy);
+    write_tex_result(c, slot, call, bits(w, 31, 4), d, RZ, false, false);
+}
+
+// Full-form TLD: array index precedes integer coordinates at A. Optional LOD
+// and signed 4-bit texel offsets are consecutive parameters at B.
+static void emit_tld(Ctx *c, uint64_t w) {
+    int d = bits(w, 0, 8), a = bits(w, 8, 8), b = bits(w, 20, 8);
+    int dim = bits(w, 28, 3), n = (dim >> 1) == 0 ? 1 : (dim >> 1) == 1 ? 2 : 3;
+    bool array = dim & 1, has_lod = bits(w, 55, 1), offset = bits(w, 35, 1);
+    if (!c->glsl || dim >= 5 || bits(w, 50, 1) || bits(w, 51, 3) != PT) {
+        fail(c, "tld dialect/dimension/multisample/residency"); return;
+    }
+    if (d == RZ) return;
+    int type = n == 1 ? (array ? TEXTYPE_1D_ARRAY : TEXTYPE_1D) : n == 2 ?
+        (array ? TEXTYPE_2D_ARRAY : TEXTYPE_2D) : TEXTYPE_3D;
+    int slot = tex_slot(c, bits(w, 36, 13), type, false, array);
+    char coords[640] = "", part[180], call[1400], pos[900], lod[40];
+    snprintf(lod, sizeof lod, "%s", has_lod ? R(b) : "0u");
+    int offreg = b + has_lod;
+    for (int i = 0; i < n; i++) {
+        int ar = a + array + i;
+        const char *v = R(ar < RZ ? ar : RZ);
+        if (offset) snprintf(part, sizeof part, "%s(int(%s) + (int(%s << %du) >> 28))", i ? ", " : "", v,
+                             R(offreg < RZ ? offreg : RZ), 28 - 4 * i);
+        else snprintf(part, sizeof part, "%sint(%s)", i ? ", " : "", v);
+        strcat(coords, part);
+    }
+    if (n == 2) {
+        // Same texel-center scaling as TLDS, retaining negative coordinates.
+        c->uses_rscale = true;
+        sp(&c->body, "    { ivec2 tc_ = ivec2(%s); vec2 ts_ = rscale[%d].xy;\n"
+                     "      if (any(notEqual(ts_, vec2(1.0f)))) tc_ = ivec2(floor((vec2(tc_) + 0.5f) * ts_));\n", coords, slot + 1);
+        snprintf(pos, sizeof pos, "tc_");
+    } else if (n == 1) snprintf(pos, sizeof pos, "%s", coords);
+    else snprintf(pos, sizeof pos, "ivec3(%s)", coords);
+    if (array) snprintf(call, sizeof call, "texelFetch(t%d, ivec%d(%s, int(min(%s, uint(textureSize(t%d, int(%s)).%s) - 1u))), int(%s))",
+                        slot, n + 1, pos, R(a), slot, lod, n == 1 ? "y" : "z", lod);
+    else snprintf(call, sizeof call, "texelFetch(t%d, %s, int(%s))", slot, pos, lod);
+    write_tex_result(c, slot, call, bits(w, 31, 4), d, RZ, false, false);
+    if (n == 2) sp(&c->body, "    }\n");
 }
 
 // TEX (full form): coordinates from consecutive registers at gpr8, extra parameters at gpr20.
@@ -1061,7 +1233,7 @@ static bool handle_cbuf(const Ctx *c, uint32_t pc, int reg, uint32_t *bank, uint
 // A texture slot for a bindless handle read from c[bank][off] (the runtime reads it there at draw time)
 static int bindless_slot(Ctx *c, uint32_t bank, uint32_t off, int type, bool array) {
     for (int s = 0; s < c->info->ntex; s++)
-        if (c->info->tex[s].bindless && c->info->tex[s].bindless_cbuf == bank && c->info->tex[s].bindless_offset == off) return s;
+        if (!c->info->tex[s].is_image && c->info->tex[s].bindless && c->info->tex[s].bindless_cbuf == bank && c->info->tex[s].bindless_offset == off) return s;
     int s = c->info->ntex++;
     if (s >= 31) { fail(c, "too many textures"); return 0; }
     c->tex_weak[s] = false;
@@ -1073,6 +1245,55 @@ static int bindless_slot(Ctx *c, uint32_t bank, uint32_t off, int type, bool arr
     t->bindless_cbuf = bank;
     t->bindless_offset = off;
     return s;
+}
+
+// Library compute programs load NVN's bound image handles from c[2][0x120+8*i].
+// The descriptor is resolved at dispatch; no opaque runtime handle is discarded.
+static int surface_slot(Ctx *c,uint32_t pc,int handle,int type,bool raw,unsigned kind,bool write) {
+    uint32_t bank,off;
+    if(!handle_cbuf(c,pc,handle,&bank,&off) || bank!=2 || shader_bound_image_slot(off)<0){
+        fail(c,"surface handle is not an NVN bound image");return -1;
+    }
+    int image=shader_bound_image_slot(off);
+    if(!raw){kind=c->key->image_kind[image];c->info->image_format_mask|=1u<<image;}
+    if(kind>2){fail(c,"invalid image numeric type");return -1;}
+    for(int i=0;i<c->info->ntex;++i){ShaderTexture *t=&c->info->tex[i];
+        if(t->is_image && t->handle_offset==off && t->image_raw==raw && t->image_kind==kind && t->type==type){
+            t->image_write|=write;return i;}}
+    if(c->info->ntex>=31){fail(c,"too many shader resources");return -1;}
+    int slot=c->info->ntex++;
+    c->info->tex[slot]=(ShaderTexture){.handle_offset=off,.type=type,.is_image=true,.image_kind=kind,.image_raw=raw,.image_write=write};
+    return slot;
+}
+static void emit_surface(Ctx *c, uint64_t w, bool store, uint32_t pc) {
+    int d=bits(w,0,8),a=bits(w,8,8),handle=bits(w,39,8),dim=bits(w,33,3);
+    if (!c->glsl || c->stage!=STAGE_COMPUTE || (dim!=0 && dim!=3) || bits(w,49,2) || bits(w,24,2) ||
+        (store ? bits(w,20,4)!=15 : bits(w,20,3)!=4 || bits(w,23,1))) {
+        fail(c,"unsupported surface dimension/format/cache/clamp/dialect");return;
+    }
+    int slot=surface_slot(c,pc,handle,dim==0?TEXTYPE_1D:TEXTYPE_2D,!store,2,store);
+    if(slot<0)return;unsigned kind=c->info->tex[slot].image_kind;
+    char coordinate[128];
+    if(dim==0)snprintf(coordinate,sizeof coordinate,"int(%s)",R(a));
+    else snprintf(coordinate,sizeof coordinate,"ivec2(int(%s), int(%s))",R(a),R(a<RZ?a+1:RZ));
+    // Surface coordinates name texels directly. The backend keeps images used for
+    // surface writes at guest dimensions; it does not leave holes in a scaled image.
+    if(store){
+        char values[160];snprintf(values,sizeof values,"uvec4(%s, %s, %s, %s)",R(d),R(d+1<RZ?d+1:RZ),R(d+2<RZ?d+2:RZ),R(d+3<RZ?d+3:RZ));
+        sp(&c->body,"    imageStore(t%d, %s, %s%s%s);\n",slot,coordinate,kind==0?"uintBitsToFloat(":kind==1?"ivec4(":"",values,kind==2?"":")");
+    } else if(d!=RZ){c->reg_used[d]=1;sp(&c->body,"    r%d = imageLoad(t%d, %s).x;\n",d,slot,coordinate);}
+}
+static void emit_surface_atomic(Ctx *c,uint64_t w,uint32_t pc) {
+    int d=bits(w,0,8),a=bits(w,8,8),b=bits(w,20,8),dim=bits(w,33,3),size=bits(w,36,3),op=bits(w,29,4);
+    const char *ops[]={"Add","Min","Max",NULL,NULL,"And","Or","Xor","Exchange"};
+    if(!c->glsl || c->stage!=STAGE_COMPUTE || (dim!=0 && dim!=3) || size>1 || bits(w,28,1) || bits(w,49,2) || op>8 || !ops[op]) {
+        fail(c,"unsupported surface atomic operation/format");return;
+    }
+    int slot=surface_slot(c,pc,bits(w,39,8),dim==0?TEXTYPE_1D:TEXTYPE_2D,true,size==1?1:2,true);if(slot<0)return;
+    char coord[128];if(dim==0)snprintf(coord,sizeof coord,"int(%s)",R(a));
+    else snprintf(coord,sizeof coord,"ivec2(int(%s), int(%s))",R(a),R(a<RZ?a+1:RZ));
+    if(d!=RZ){c->reg_used[d]=1;sp(&c->body,"    r%d = uint(",d);}else sp(&c->body,"    ");
+    sp(&c->body,"imageAtomic%s(t%d, %s, %s(%s))%s;\n",ops[op],slot,coord,size==1?"int":"uint",R(b),d!=RZ?")":"");
 }
 
 // TMML (Texture MipMap Level, 0xdf58; TMML.B 0xdf60, the handle in register b): .x the computed LOD, .y the
@@ -1223,7 +1444,9 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     if (guarded) sp(&c->body, "  if (%s) {\n", P(pr, prn));
 
 #define OPM(val, mask) ((w & (uint64_t)(mask)) == (uint64_t)(val))
-    if (OPM(0xe300000000000000ull, 0xfff0000000000000ull)) {  // EXIT
+    if (emit_fp64(c, w)) {
+        // The complete 64-bit register pair is read before either destination word is written.
+    } else if (OPM(0xe300000000000000ull, 0xfff0000000000000ull)) {  // EXIT
         sp(&c->body, c->branchy ? "    exit_now = true; break;\n" : "    break;\n");
     } else if (OPM(0xe330000000000000ull, 0xfff0000000000000ull)) {  // KIL
         c->info->uses_discard = true;
@@ -1319,6 +1542,10 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         emit_texs(c, w, false);
     } else if (OPM(0xd200000000000000ull, 0xf600000000000000ull)) {  // TLDS
         emit_texs(c, w, true);
+    } else if (OPM(0xde00000000000000ull, 0xff80000000000000ull)) {  // TXD
+        emit_txd(c, w);
+    } else if (OPM(0xdc00000000000000ull, 0xff00000000000000ull)) {  // TLD
+        emit_tld(c, w);
     } else if (OPM(0xc038000000000000ull, 0xfc38000000000000ull)) {  // TEX
         emit_tex(c, w, false);
     } else if (OPM(0xdeb8000000000000ull, 0xfff8000000000000ull)) {  // TEX.B (bindless)
@@ -1331,6 +1558,12 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         emit_tmml(c, w, false, pc);
     } else if (OPM(0xdf60000000000000ull, 0xfff8000000000000ull)) {  // TMML.B (bindless)
         emit_tmml(c, w, true, pc);
+    } else if (OPM(0xeb10000000000000ull, 0xfff8000000000000ull)) { // SULD.D.B (raw)
+        emit_surface(c,w,false,pc);
+    } else if (OPM(0xeb20000000000000ull, 0xfff8000000000000ull)) { // SUST.B (formatted)
+        emit_surface(c,w,true,pc);
+    } else if (OPM(0xea70000000000000ull, 0xfff8000000000000ull)) { // SUATOM.B
+        emit_surface_atomic(c,w,pc);
     } else if (OPM(0xdf48000000000000ull, 0xfff8000000000000ull)) {  // TXQ
         uint32_t index = (uint32_t)bits(w, 36, 13);
         int qt = (int)bits(w, 22, 6);
@@ -1339,7 +1572,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (qt == 1 && c->glsl) {  // tsize<slot>() is emitted with the slot's final type (the guest size of scaled ones)
             c->uses_rscale = true;
             sp(&c->body, "    { uint lv = %s; uvec4 q = uvec4(uint(floor(float(tsize%d(int(lv)).x) / rscale[%d].x + 0.5f)), "
-               "uint(floor(float(tsize%d(int(lv)).y) / rscale[%d].y + 0.5f)), 1u, uint(textureQueryLevels(t%d)));\n",
+               "uint(floor(float(tsize%d(int(lv)).y) / rscale[%d].y + 0.5f)), 1u, uint(texture_levels%d));\n",
                R(a), slot, slot + 1, slot, slot + 1, slot);
             int n = 0;
             for (int i = 0; i < 4; i++)
@@ -1816,6 +2049,15 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         else if (right) sprintf(t, "uint((((ulong(%s) << 32) | ulong(%s)) >> (%s & 31u)))", hi, R(a), sh);
         else sprintf(t, "uint((((ulong(%s) << 32) | ulong(%s)) << (%s & 31u)) >> 32)", hi, R(a), sh);
         set_reg(c, d, t);
+    } else if (OPM(0x5bd0000000000000ull, 0xfff8000000000000ull) ||
+               OPM(0x4bd0000000000000ull, 0xfff8000000000000ull) ||
+               OPM(0x36d0000000000000ull, 0xfef8000000000000ull)) {  // LEA: low word of shifted address + base
+        if (bits(w, 46, 1) || bits(w, 47, 1) || bits(w, 48, 3) != PT) fail(c, "lea extended flags");
+        else {
+            snprintf(t, sizeof t, "(%s(%s << %du) + %s)", bits(w, 45, 1) ? "0u - " : "",
+                     R(a), (int)bits(w, 39, 5), B(false));
+            set_reg(c, d, t);
+        }
     } else if (OPM(0x1800000000000000ull, 0xfc00000000000000ull) ||
                OPM(0x5bd8000000000000ull, 0xfff8000000000000ull)) {  // LEA.HI
         bool cb = (w >> 58) == 6;
@@ -2061,10 +2303,16 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (pd != PT) { c->pred_used[pd] = 1; sp(&c->body, "    p%d = true;\n", pd); }
     } else if (OPM(0x38f0000000000000ull, 0xfef8000000000000ull) || OPM(0x5cf0000000000000ull, 0xfff8000000000000ull) ||
                OPM(0x4cf0000000000000ull, 0xfff8000000000000ull)) {  // R2P
-        if (bits(w, 40, 1)) { fail(c, "r2p cc"); }
         int shift = (int)bits(w, 41, 2) * 8;
         const char *mask = B(false);
-        for (int i = 0; i < 7; i++) {
+        if (bits(w, 40, 1)) {
+            c->uses_cc = c->uses_cco = true;
+            sp(&c->body, "    { uint flags = %s >> %du, mask_ = %s;\n"
+                         "      if ((mask_ & 1u) != 0u) ccz = (flags & 1u) != 0u;\n"
+                         "      if ((mask_ & 2u) != 0u) ccs = (flags & 2u) != 0u;\n"
+                         "      if ((mask_ & 4u) != 0u) cc = (flags >> 2u) & 1u;\n"
+                         "      if ((mask_ & 8u) != 0u) cco = (flags & 8u) != 0u; }\n", R(a), shift, mask);
+        } else for (int i = 0; i < 7; i++) {
             c->pred_used[i] = 1;
             sp(&c->body, c->glsl ? "    if (((%s >> %du) & 1u) != 0u) p%d = ((%s >> %du) & 1u) != 0u;\n"
                                  : "    if ((%s >> %du) & 1u) p%d = ((%s >> %du) & 1u) != 0u;\n", mask, i, i, R(a), shift + i);
@@ -2073,9 +2321,9 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                OPM(0x4ce8000000000000ull, 0xfff8000000000000ull)) {  // P2R
         int shift = (int)bits(w, 41, 2) * 8;
         const char *mask = B(false);
-        if (bits(w, 40, 1)) {  // .CC: the flags Z, S, C, O as bits 0-3 (overflow isn't tracked: 0)
-            c->uses_cc = true;
-            sp(&c->body, "    { uint pr = (ccz ? 1u : 0u) | (ccs ? 2u : 0u) | ((cc & 1u) << 2);\n");
+        if (bits(w, 40, 1)) {  // .CC: the flags Z, S, C, O as bits 0-3
+            c->uses_cc = c->uses_cco = true;
+            sp(&c->body, "    { uint pr = (ccz ? 1u : 0u) | (ccs ? 2u : 0u) | ((cc & 1u) << 2) | (cco ? 8u : 0u);\n");
             sp(&c->body, "      uint m = (%s & 0xFu) << %du;\n", mask, shift);
             if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = (%s & ~m) | ((pr << %du) & m);\n", d, R(a), shift); }
             sp(&c->body, "    }\n");
@@ -2195,6 +2443,18 @@ static void glsl_rewrite(Ctx *c, Str *o, const char *src) {
         memcpy(id, p, n);
         id[n] = 0;
         p = e;
+        if (!strncmp(id, "texture_levels", 14)) {
+            // TXQ can precede the instruction establishing the sampler's type.
+            // Resolve after all instructions, keeping ordinary sampler source stable.
+            char *end;
+            unsigned long slot = strtoul(id + 14, &end, 10);
+            if (end == id + 14 || *end || slot >= (unsigned)c->info->ntex) {
+                fail(c, "glsl: bad texture level query"); return;
+            }
+            if (c->info->tex[slot].type == TEXTYPE_2D_MS) sp(o, "1");
+            else sp(o, "textureQueryLevels(t%lu)", slot);
+            continue;
+        }
         if (!strcmp(id, "as_type") && *p == '<') {
             const char *gt = strchr(p, '>');
             if (!gt) { fail(c, "glsl: bad as_type"); return; }
@@ -2238,6 +2498,10 @@ static void glsl_rewrite(Ctx *c, Str *o, const char *src) {
         sp(o, "%s", rep);
     }
 }
+
+static const char glsl_soft64_helpers[] =
+#include "soft64.inc"
+    ;
 
 static const char glsl_int32_helpers[] =
     "uint shfr32(uint lo, uint hi, uint n) { n &= 31u; return n == 0u ? lo : (lo >> n) | (hi << (32u - n)); }\n"
@@ -2351,6 +2615,7 @@ static char *glsl_with_prelude(char *src) {
 }
 
 static const char *glsl_sampler_type(const ShaderTexture *t) {
+    if (t->type == TEXTYPE_2D_MS) return "sampler2DMS";
     static const char *const names[][2] = {
         {"sampler1D", "sampler1DShadow"}, {"sampler2D", "sampler2DShadow"}, {"sampler3D", "sampler3D"},
         {"samplerCube", "samplerCubeShadow"}, {"sampler2DArray", "sampler2DArrayShadow"},
@@ -2774,6 +3039,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (!maxwell_no_int64) sp(&s, "#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require\n");
     sp(&s, "%s", glsl_prelude);
     if (maxwell_no_int64) sp(&s, "%s", glsl_int32_helpers);
+    if (c->uses_soft64) sp(&s, "%s", glsl_soft64_helpers);
     if (maxwell_native_half && stage != STAGE_VERTEX) {
         // (maxwell_native_half) halves by the GPU's own conversion outside vertex shaders: the bitwise h2f (kept for
         // the positions a depth pre-pass and its colour pass must agree on) is a dozen operations with branches per
@@ -2843,9 +3109,15 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     }
     for (int i = 0; i < info->ntex; i++) {
         ShaderTexture *t = &info->tex[i];
+        if(t->is_image){
+            sp(&s,"layout(%sset = %d, binding = %d) uniform %s%simage%s t%d;\n",t->image_raw?(t->image_kind==1?"r32i, ":"r32ui, "):"",set,32+i,
+               t->image_write?(t->image_raw?"":"writeonly "):"readonly ",t->image_kind==1?"i":t->image_kind==2?"u":"",t->type==TEXTYPE_1D?"1D":"2D",i);
+            continue;
+        }
         sp(&s, "layout(set = %d, binding = %d) uniform %s t%d;\n", set, 32 + i, glsl_sampler_type(t), i);
         // size of level l as (width, height, depth or layers)
         switch (t->type) {
+        case TEXTYPE_2D_MS: sp(&s, "ivec3 tsize%d(int l) { return ivec3(textureSize(t%d), 1); }\n", i, i); break;
         case TEXTYPE_1D: sp(&s, "ivec3 tsize%d(int l) { return ivec3(textureSize(t%d, l), 1, 1); }\n", i, i); break;
         case TEXTYPE_1D_ARRAY: sp(&s, "ivec3 tsize%d(int l) { ivec2 s = textureSize(t%d, l); return ivec3(s.x, 1, s.y); }\n", i, i); break;
         case TEXTYPE_3D: case TEXTYPE_2D_ARRAY: case TEXTYPE_CUBE_ARRAY:
@@ -2900,6 +3172,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     for (int i = 0; i < 7; i++)
         if (c->pred_used[i]) sp(&s, "  bool p%d = false;\n", i);
     if (c->uses_cc) sp(&s, "  uint cc = 0u; bool ccz = false, ccs = false;\n");
+    if (c->uses_cco) sp(&s, "  bool cco = false;\n");
     if (c->uses_local) sp(&s, "  uint lmem[%d]; for (int li_ = 0; li_ < %d; li_++) lmem[li_] = 0u;\n", LMEM_WORDS, LMEM_WORDS);
     if (c->uses_shared && stage != STAGE_COMPUTE) sp(&s, "  uint smem[%d];\n", SMEM_WORDS);
     if (dbg) sp(&s, maxwell_dbg_pc == 0xffffffffu ? "  float dbgv = 1.0f;\n" : "  float dbgv = -1.0f;\n");
@@ -3187,6 +3460,7 @@ ShaderInfo *maxwell_translate_bounded(const uint8_t *blob, size_t max_size, size
     for (int i = 0; i < 7; i++)
         if (c->pred_used[i]) sp(&s, "  bool p%d = false;\n", i);
     if (c->uses_cc) sp(&s, "  uint cc = 0; bool ccz = false, ccs = false;\n");
+    if (c->uses_cco) sp(&s, "  bool cco = false;\n");
     if (c->uses_local) sp(&s, "  uint lmem[%d] = {};\n", LMEM_WORDS);
     if (c->uses_shared) sp(&s, "  threadgroup uint smem[%d];\n", SMEM_WORDS);
     if (dbg) sp(&s, maxwell_dbg_pc == 0xffffffffu ? "  float dbgv = 1.0f;\n" : "  float dbgv = -1.0f;\n");

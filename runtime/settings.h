@@ -39,6 +39,8 @@ typedef struct {
     float overlay_pos[2]; // its top left, a share of the screen, dragged there with a finger (negative: the corner)
     int fps_mode;         // 0: Auto (60), 1: 30, 2: 60, 3: 45, 4: 120; keep the old persisted values
     bool shader_int32;    // shader address math in 32-bit words even where the driver offers 64-bit (vulkan/exec.c)
+    bool shader_fp32;     // approximate double arithmetic with native FP32; prelaunch only
+    bool shader_runtime_compile; // compile missing/damaged cached shaders during play; prelaunch only
     // Driver compatibility (the start screen's Settings > Prelaunch, ui/launcher.mm; from LASRecompAndroid), for GPUs
     // where a Turnip path draws wrong: read when the game starts (gpu_heap, inplace_reads) or when the app starts
     // (turnip_lrz, log_file). -1 Automatic: on for the Adreno 8xx GPUs these paths were made on, off elsewhere

@@ -1,0 +1,4 @@
+// Generated from the current compiler inputs and the reviewed compatibility file.
+#pragma once
+#define SHADER_CACHE_ID "@SHADER_CACHE_ID@"
+#define SHADER_COMPAT_CACHE_IDS @SHADER_COMPAT_CACHE_DEFINITIONS@

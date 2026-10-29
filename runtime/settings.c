@@ -37,6 +37,8 @@ Settings g_settings = {
 #ifdef __ANDROID__
     .show_fps = true,  // (the performance overlay, ui/perf_overlay.mm: on until turned off in the menu)
     .touch_controls = true,
+    .shader_fp32 = true,  // experimental mobile default; off retains integer binary64 arithmetic on the GPU
+    .shader_runtime_compile = true,
     .overlay_pos = {-1, -1},
     .touch_pos = {{-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1},
                   {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}},
@@ -217,6 +219,8 @@ void settings_load(void) {
         else if (!strcmp(key, "frame_rate")) g_settings.fps_mode = !strcmp(val, "30") ? 1 : !strcmp(val, "60") ? 2 :
                                                                 !strcmp(val, "45") ? 3 : !strcmp(val, "120") ? 4 : 0;
         else if (!strcmp(key, "shader_int32")) g_settings.shader_int32 = atoi(val) != 0;
+        else if (!strcmp(key, "shader_fp32")) g_settings.shader_fp32 = atoi(val) != 0;
+        else if (!strcmp(key, "shader_runtime_compile")) g_settings.shader_runtime_compile = atoi(val) != 0;
         else if (!strcmp(key, "gpu_heap")) g_settings.gpu_heap = !strcmp(val, "auto") ? -1 : atoi(val) != 0;
         else if (!strcmp(key, "inplace_reads")) g_settings.inplace_reads = !strcmp(val, "auto") ? -1 : atoi(val) != 0;
         else if (!strcmp(key, "turnip_lrz")) g_settings.turnip_lrz = !strcmp(val, "auto") ? -1 : atoi(val) != 0;
@@ -292,6 +296,8 @@ void settings_save(void) {
     fprintf(f, "frame_rate = %s\n", g_settings.fps_mode == 1 ? "30" : g_settings.fps_mode == 2 ? "60" :
                                    g_settings.fps_mode == 3 ? "45" : g_settings.fps_mode == 4 ? "120" : "auto");
     fprintf(f, "shader_int32 = %d\n", g_settings.shader_int32);
+    fprintf(f, "shader_fp32 = %d\n", g_settings.shader_fp32);
+    fprintf(f, "shader_runtime_compile = %d\n", g_settings.shader_runtime_compile);
     static const char *const tri[] = {"auto", "0", "1"};  // (-1 / 0 / 1)
 #define TRI(v) tri[(v) < 0 ? 0 : (v) ? 2 : 1]
     fprintf(f, "gpu_heap = %s\ninplace_reads = %s\nturnip_lrz = %s\nlog_file = %d\ngpu_model = %s\n", TRI(g_settings.gpu_heap),

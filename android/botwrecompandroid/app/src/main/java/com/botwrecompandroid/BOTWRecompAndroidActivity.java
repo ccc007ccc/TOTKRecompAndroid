@@ -86,7 +86,7 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
 
     @Override
     protected String[] getLibraries() {
-        return new String[] {"SDL3", "shaderc_shared", "main"};
+        return new String[] {"SDL3", "main"};
     }
 
     @Override

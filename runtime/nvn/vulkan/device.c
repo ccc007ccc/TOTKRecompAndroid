@@ -772,6 +772,9 @@ static void create_device(void) {
     b->sampleRateShading = h->sampleRateShading;
     b->fragmentStoresAndAtomics = h->fragmentStoresAndAtomics;
     b->vertexPipelineStoresAndAtomics = h->vertexPipelineStoresAndAtomics;
+    b->shaderStorageImageExtendedFormats = h->shaderStorageImageExtendedFormats;
+    b->shaderStorageImageWriteWithoutFormat = h->shaderStorageImageWriteWithoutFormat;
+    g_vk.image_write_without_format = h->shaderStorageImageWriteWithoutFormat;
     b->robustBufferAccess = h->robustBufferAccess;  // guest shaders index cbufs freely: keep OOB reads harmless
     b->shaderClipDistance = h->shaderClipDistance;
 #ifdef __ANDROID__
@@ -838,7 +841,7 @@ static void create_device(void) {
     void *data = NULL;
     FILE *fp = getenv("LARECOMP_VK_NO_PIPELINE_CACHE") ? NULL : fopen("cache/vk_pipelines.bin", "rb");
     if (fp) {
-#ifdef __ANDROID__  // (a size cap and the public header checked: a file from another driver or a cut-off write)
+        // A size cap and the public header reject files from another driver or a cut-off write.
         long length = -1;
         if (!fseek(fp, 0, SEEK_END)) length = ftell(fp);
         if (length >= 32 && (unsigned long)length <= VK_BACKEND_PIPELINE_CACHE_MAX && !fseek(fp, 0, SEEK_SET)) {
@@ -848,41 +851,15 @@ static void create_device(void) {
         }
         if (!sz) { LOG("[vk-cache] ignoring unreadable, malformed or incompatible pipeline cache; starting empty\n");
             free(data); data = NULL; }
-#else
-        fseek(fp, 0, SEEK_END);
-        sz = (size_t)ftell(fp);
-        fseek(fp, 0, SEEK_SET);
-        data = malloc(sz);
-        if (fread(data, 1, sz, fp) != sz) sz = 0;
-#endif
         fclose(fp);
     }
     VkPipelineCacheCreateInfo pc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, .initialDataSize = sz,
                                     .pInitialData = data};
     if (vkCreatePipelineCache(g_vk.dev, &pc, NULL, &g_vk.pcache) != VK_SUCCESS) {
-#ifdef __ANDROID__
         LOG("[vk-cache] driver rejected pipeline cache; retrying empty\n");
         pc.pInitialData = NULL;
-#endif
         pc.initialDataSize = 0;
         VK_CHECK(vkCreatePipelineCache(g_vk.dev, &pc, NULL, &g_vk.pcache));
-    }
-    free(data);
-}
-
-void vk_pipeline_cache_save(void) {
-    if (getenv("LARECOMP_VK_NO_PIPELINE_CACHE")) return;
-    size_t sz = 0;
-    if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, NULL) != VK_SUCCESS || !sz) return;
-    void *data = malloc(sz);
-    if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, data) == VK_SUCCESS) {
-        mkdir("cache", 0755);
-        FILE *f = fopen("cache/vk_pipelines.bin.tmp", "wb");
-        if (f) {
-            bool ok = fwrite(data, 1, sz, f) == sz;
-            fclose(f);
-            if (ok) { remove("cache/vk_pipelines.bin"); rename("cache/vk_pipelines.bin.tmp", "cache/vk_pipelines.bin"); }
-        }
     }
     free(data);
 }
@@ -1859,6 +1836,11 @@ void backend_reset(void) {
 #ifdef __ANDROID__
     vk_async_drain();
 #endif
+    extern void vk_shader_jobs_drain(void);
+    extern void vk_pipeline_warm_stop(void);
+    vk_pipeline_warm_stop();
+    vk_shader_jobs_drain();
+    vk_pipeline_cache_save();
     vkDeviceWaitIdle(g_vk.dev);
     extern void vk_textures_reset(void);
     extern void vk_exec_reset(void);
@@ -1905,6 +1887,11 @@ int ui_run(void) {
         }
         test_session_poll();
         if(test_session_should_exit()) {
+            // This is the UI thread: join preparation and flush observations here,
+            // not in quick_exit_handler(), which can run on any worker thread.
+            extern void vk_shader_warm_stop(void),vk_shader_warm_observe_flush(void),vk_pipeline_warm_stop(void);
+            vk_shader_warm_stop();vk_shader_warm_observe_flush();
+            vk_pipeline_warm_stop();
             if(g_vk.dev&&!getenv("LARECOMP_VK_NO_PIPELINE_CACHE"))vk_pipeline_cache_save();
             LOG("[test-session] timed benchmark finished; exiting game\n");
             exit(0);
@@ -1922,8 +1909,17 @@ int ui_run(void) {
 #endif
 #ifdef __ANDROID__
             if(e.type==SDL_EVENT_WILL_ENTER_BACKGROUND)test_session_backgrounded();
-            if (e.type == SDL_EVENT_WILL_ENTER_BACKGROUND && g_vk.dev) vk_pipeline_cache_save();  // (may not come back)
-            if (e.type == SDL_EVENT_DID_ENTER_FOREGROUND) requested_frame_rate = -1;
+            if (e.type == SDL_EVENT_WILL_ENTER_BACKGROUND && g_vk.dev) {
+                extern void vk_shader_warm_stop(void),vk_shader_warm_observe_flush(void);
+                vk_shader_warm_stop();vk_shader_warm_observe_flush();
+                extern void vk_pipeline_warm_stop(void);
+                vk_pipeline_warm_stop();
+                vk_pipeline_cache_save();  // (may not come back)
+            }
+            if (e.type == SDL_EVENT_DID_ENTER_FOREGROUND) {
+                extern void vk_shader_warm_resume(void);
+                requested_frame_rate = -1;vk_shader_warm_resume();
+            }
 #endif
             if (e.type == SDL_EVENT_QUIT) {
                 LOG("window closed\n");
@@ -1951,12 +1947,17 @@ int ui_run(void) {
             static size_t saved;
             uint64_t now = SDL_GetTicks();
             if (g_vk.dev && now - last > 30000 && !getenv("LARECOMP_VK_NO_PIPELINE_CACHE")) {
+                extern void vk_shader_warm_observe_flush(void);
+                vk_shader_warm_observe_flush();
                 last = now;
+                extern bool vk_pipeline_warm_save(void);
+                vk_pipeline_warm_save();
                 size_t sz = 0;
                 if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, NULL) == VK_SUCCESS && sz > saved + 65536) {
-                    vk_pipeline_cache_save();
-                    saved = sz;
-                    LOG("[vk] pipeline cache saved (%zu KB)\n", sz >> 10);
+                    if (vk_pipeline_cache_save()) {
+                        saved = sz;
+                        LOG("[vk] pipeline cache saved (%zu KB)\n", sz >> 10);
+                    }
                 }
             }
         }

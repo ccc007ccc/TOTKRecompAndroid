@@ -1,5 +1,5 @@
 // Maxwell (GM20B) shader translation to Metal Shading Language (macOS) or Vulkan GLSL (Windows; compiled to
-// SPIR-V at runtime with shaderc). ShaderKey.glsl selects the dialect; the MSL output does not depend on it.
+// SPIR-V during game preparation). ShaderKey.glsl selects the dialect; the MSL output does not depend on it.
 //
 // GLSL contract (what the Vulkan renderer binds):
 //  - `#version 460`, entry point `main`. Descriptor set: vertex 0, fragment 1, compute 0.
@@ -36,6 +36,10 @@ enum { STAGE_VERTEX = 0, STAGE_FRAGMENT = 1, STAGE_GEOMETRY = 2, STAGE_TESS_CTRL
 
 enum { TEXTYPE_1D, TEXTYPE_2D, TEXTYPE_3D, TEXTYPE_CUBE, TEXTYPE_2D_ARRAY, TEXTYPE_CUBE_ARRAY, TEXTYPE_1D_ARRAY,
        TEXTYPE_BUFFER, TEXTYPE_2D_MS };
+enum { NVN_IMAGE_BINDINGS = 8 };
+static inline int shader_bound_image_slot(uint32_t offset) {
+    return offset >= 0x120 && offset < 0x120 + NVN_IMAGE_BINDINGS * 8 && !(offset & 7) ? (int)(offset - 0x120) / 8 : -1;
+}
 
 typedef struct {
     uint8_t attr_kind[32];  // vertex inputs: 0 float, 1 signed int, 2 unsigned int
@@ -51,6 +55,7 @@ typedef struct {
     bool gmem_linear_lookup;  // Qualcomm compute: cached linear GMap lookup avoids its compiler's binary-search failure
     uint8_t gather_bias_bits; // 0: native gather; otherwise compensate host subtexel truncation (half a subtexel)
     bool vertex_snap;        // experimental vertex UV quantization; part of program identity, off by default for TotK
+    uint8_t image_kind[NVN_IMAGE_BINDINGS]; // formatted image writes: float, sint, uint (0/1/2); raw loads ignore this
 } ShaderKey;
 
 typedef struct {
@@ -58,6 +63,8 @@ typedef struct {
     uint8_t type;            // TEXTYPE_*
     bool shadow, is_array, is_image, bindless;
     uint32_t bindless_cbuf, bindless_offset;
+    uint8_t image_kind;      // GLSL scalar type (0 float, 1 sint, 2 uint)
+    bool image_raw, image_write; // B32 accesses reinterpret texels as R32_UINT
 } ShaderTexture;
 
 typedef struct {
@@ -83,6 +90,7 @@ typedef struct {
     uint32_t local_mem;     // bytes of local memory
     uint32_t num_insts;
     char error[256];        // set when translation fails
+    uint8_t image_format_mask; // bound image slots requiring numeric-format variants
 } ShaderInfo;
 
 // Global memory (LDG/STG) is addressed through one buffer that wraps the guest heap.
@@ -98,6 +106,10 @@ extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
 extern bool maxwell_gmem_map_all;
 // Vulkan drivers without shaderInt64: preserve address/carry semantics using 32-bit words.
 extern bool maxwell_no_int64;
+// Experimental GLSL lowering: nearest-even DADD/DMUL/DFMA use native FP32.
+// Register pairs and conversions retain binary64 encoding; directed rounding
+// still uses integer binary64. False selects integer binary64 for all operations.
+extern bool maxwell_fp32_double;
 // (diagnostics, Android copy mode) a mapped access outside the table records its heap offset at the end of the gfast_
 // buffer (the arena: exec.c) instead of reading the heap binding, which isn't there
 extern bool maxwell_gmem_miss_log;

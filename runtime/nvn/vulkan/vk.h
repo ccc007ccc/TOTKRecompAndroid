@@ -1,6 +1,6 @@
 // Vulkan backend for the NVN layer (Windows; macOS uses runtime/nvn/metal.m + renderer.m).
 // Files: device.c (instance, window, swapchain, present, screenshots, ImGui hooks), textures.c (images, uploads,
-// views), exec.c (command execution: passes, draws, clears, copies, compute), shaders.c (GLSL -> SPIR-V, programs,
+// views), exec.c (command execution: passes, draws, clears, copies, compute), shaders.c (prepared SPIR-V loading, programs,
 // pipelines). Mirrors the Metal backend's behaviour; differences are noted where they happen.
 //
 // Synchronisation model: every image lives in VK_IMAGE_LAYOUT_GENERAL, and a full memory barrier separates
@@ -47,6 +47,7 @@ typedef struct {
     VkSemaphore timeline;      // value = last completed submission number
     VkCommandPool pool;        // render thread only
     bool custom_border, divisor, host_import, shader_int64;
+    bool image_write_without_format;
     bool dyn_render;              // VK_KHR_dynamic_rendering in use; without it, classic render passes (rpcompat.c)
     bool sync2;                   // synchronization2 in use; without it, Vulkan 1.0 barriers (device.c sync1_*)
     bool eds;                     // extended dynamic state in use; without it, those states (and extended dynamic state
@@ -69,6 +70,7 @@ typedef struct {
     VkImageView sc_views[VK_MAX_SWAP_IMAGES];
 } VkG;
 extern VkG g_vk;
+bool vk_pipeline_cache_save(void);
 
 // ---- rendering: dynamic rendering, or classic render passes without it (rpcompat.c)
 // colors / ds_format: the attachments' view formats (VK_FORMAT_UNDEFINED: an unused slot), as the pipelines get them
@@ -86,6 +88,9 @@ VkCommandBuffer vk_cmd(void);         // current command buffer (outside any ren
 VkCommandBuffer vk_upload_cmd(void);  // upload command buffer of the pending submission
 uint64_t vk_pending_seq(void);        // number the pending submission will get
 uint64_t vk_completed_seq(void);
+void vk_memory_written(uint64_t addr, uint64_t size); // render-thread invalidation after a CPU flush
+void vk_async_memory_written(uint64_t addr, uint64_t size); // order invalidation with queued command lists
+void vk_async_call_sync(void (*call)(void *), void *arg);
 void vk_wait_seq(uint64_t seq);
 void vk_full_barrier(VkCommandBuffer cb);
 void vk_end_pass(void);
@@ -118,6 +123,7 @@ typedef struct TexBackend {
     uint64_t cpu_write_epoch;
     uint32_t wgen;  // page write tracking generation at the last upload check (textures.c)
     bool scalable, presented;
+    bool storage; // surface image: storage usage, mutable format, guest dimensions
     uint8_t rs_group;  // RS_*: which output scale its allocation follows (textures.c)
     uint64_t touched_frame, frame_cleared;
     uint64_t rt_frame;  // the last frame a draw rendered into it, + 1 (0: never) - exec.c rt_one_off
@@ -144,6 +150,7 @@ void renderer_get_scene_scale(float *sx, float *sy);
 void renderer_set_scene_scale(float sx, float sy);
 // View of t (optionally through an NVN texture view) for rendering or sampling.
 VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool render, int want_textype);
+VkImageView vk_storage_view(NvnTexture *t,const NvnTextureView *v,bool has_view,const ShaderTexture *shader);
 VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uint32_t lv0, uint32_t nlv, uint32_t ly0,
                           uint32_t nly, VkComponentMapping sw, VkImageAspectFlags aspect);
 VkImageView vk_dummy_view(int textype);
@@ -158,7 +165,7 @@ void vk_views_forget(TexBackend *b);  // drop (deferred) the cached views of an 
 uint64_t vk_frame_counter(void);
 
 // ---- shaders / pipelines (shaders.c)
-VkShaderModule vk_compile_glsl(const char *src, int stage, const char *name);  // NULL on failure (logged)
+VkShaderModule vk_module_from_prepared(const char *src, int stage, const char *name);  // NULL on failure (logged)
 VkShaderModule vk_builtin_shader(const char *name);  // internal shaders (clear, copy, present)
 
 // ---- device / window (device.c)

@@ -27,8 +27,8 @@
 #include "../../test_session.h"
 #include "vk.h"
 
-enum { REQ_EXEC, REQ_PRESENT, REQ_FENCE };
-typedef struct { int type; uint64_t a; void *p; uint64_t id; } Req;
+enum { REQ_EXEC, REQ_PRESENT, REQ_FENCE, REQ_MEMORY_WRITE, REQ_CALL };
+typedef struct { int type; uint64_t a; void *p; uint64_t id, b; } Req;
 typedef struct { uint8_t *list; SubmitSnapshot *snapshot; } ExecCopy;
 
 #define QN 4096  // requests in flight (a frame has a few dozen)
@@ -105,6 +105,8 @@ static void *render_main(void *arg) {
         }
         else if (r.type == REQ_PRESENT) vk_present_now((NvnTexture *)r.p);
         else if (r.type == REQ_FENCE) nvn_sync_set_seq(r.a, renderer_fence_seq());
+        else if (r.type == REQ_MEMORY_WRITE) vk_memory_written(r.a, r.b);
+        else if (r.type == REQ_CALL) ((void (*)(void *))(uintptr_t)r.a)(r.p);
         uint64_t elapsed = plat_now_ns() - t0;
         frame_cpu += cpu_timing ? render_cpu_ns() - cpu0 : elapsed;
         frame_work += elapsed;
@@ -132,7 +134,7 @@ static void *render_main(void *arg) {
     return NULL;
 }
 
-static uint64_t push(int type, uint64_t a, void *p) {
+static uint64_t push(int type, uint64_t a, void *p, uint64_t b) {
     pthread_mutex_lock(&q_lock);
     if (!started) {
         started = true;
@@ -148,7 +150,7 @@ static uint64_t push(int type, uint64_t a, void *p) {
         pthread_mutex_lock(&q_lock);
     }
     uint64_t id = ++q_tail;  // (ids 1, 2, ...: the request at index id - 1)
-    q[(id - 1) % QN] = (Req){type, a, p, id};
+    q[(id - 1) % QN] = (Req){type, a, p, id, b};
     if (type == REQ_PRESENT) q_presents++;
     pthread_cond_signal(&q_more);
     pthread_mutex_unlock(&q_lock);
@@ -246,7 +248,7 @@ void vk_async_execute(uint64_t handle) {
     uint64_t next = q_tail + 1;  // (the id the push gets: the list's fences carry it before the render thread sees them)
     pthread_mutex_unlock(&q_lock);
     mark_fences(handle, next, 0);
-    uint64_t id = push(REQ_EXEC, handle, copy);  // the render thread owns both list and payload until translated
+    uint64_t id = push(REQ_EXEC, handle, copy, 0);  // the render thread owns both list and payload until translated
     if (sync) {
         kernel_blocking_begin();
         vk_async_wait_id(id);
@@ -257,15 +259,30 @@ void vk_async_execute(uint64_t handle) {
 
 void vk_async_present(NvnTexture *t) {
     pthread_mutex_lock(&p_lock);
-    push(REQ_PRESENT, 0, t);
+    push(REQ_PRESENT, 0, t, 0);
     pthread_mutex_unlock(&p_lock);
 }
 
 uint64_t vk_async_fence(uint64_t guest_sync) {
     pthread_mutex_lock(&p_lock);
-    uint64_t id = push(REQ_FENCE, guest_sync, NULL);
+    uint64_t id = push(REQ_FENCE, guest_sync, NULL, 0);
     pthread_mutex_unlock(&p_lock);
     return id;
+}
+void vk_async_memory_written(uint64_t addr, uint64_t size) {
+    if (!vk_async_on() || vk_async_is_render_thread()) { vk_memory_written(addr, size); return; }
+    pthread_mutex_lock(&p_lock);
+    push(REQ_MEMORY_WRITE, addr, NULL, size);
+    pthread_mutex_unlock(&p_lock);
+}
+void vk_async_call_sync(void (*call)(void *), void *arg) {
+    if (!vk_async_on() || vk_async_is_render_thread()) { call(arg); return; }
+    pthread_mutex_lock(&p_lock);
+    uint64_t id = push(REQ_CALL, (uintptr_t)call, arg, 0);
+    pthread_mutex_unlock(&p_lock);
+    kernel_blocking_begin();
+    vk_async_wait_id(id);
+    kernel_blocking_end();
 }
 #else
 typedef int vk_async_unused;  // (Android only)

@@ -12,13 +12,23 @@
 #include <vulkan/vulkan.h>
 
 #include "../runtime/nvn/vulkan/shaders.h"
+#include "../runtime/nvn/vulkan/shader_prepare.h"
 
 // ---- what shaders.c needs from the rest of the runtime
 VkG g_vk;
 void rt_fatal_trace(void) { abort(); }
+void vk_device_fault_report(void) { fprintf(stderr, "test device lost\n"); }
 ShaderInfo *old_maxwell_translate(const uint8_t *c, size_t m, int s, const ShaderKey *k) { (void)c, (void)m, (void)s, (void)k; return NULL; }
 void old_maxwell_free(ShaderInfo *s) { (void)s; }
 uint64_t old_maxwell_gmem_base, old_maxwell_gmem_size;
+
+static uint32_t *prepare_shader(const char *src, int stage, const char *name, size_t *words) {
+    char why[1024];
+    if (!vk_shader_prepare_source(src, stage, name, why, sizeof why)) {
+        fprintf(stderr, "%s\n", why); return NULL;
+    }
+    return vk_load_prepared_shader(src, stage, name, words);
+}
 
 static long g_messages;
 static VKAPI_ATTR VkBool32 VKAPI_CALL on_message(VkDebugUtilsMessageSeverityFlagBitsEXT sev, VkDebugUtilsMessageTypeFlagsEXT t,
@@ -97,8 +107,9 @@ static bool make_layout(Layout *l, const uint32_t *const *spv, const size_t *nw,
     for (int i = 0; i < l->n; i++) {  // the binding numbers the renderer fills (exec.c stage_set)
         VkBindingInfo *b = &l->b[i];
         bool ok = b->binding >= 32 ? b->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
-                : b->binding == 17 ? b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
-                : b->binding <= 19 ? b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : false;
+                : b->binding == GMEM_BUFFER_INDEX || b->binding == GFAST_BUFFER_INDEX
+                    ? b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+                : b->binding <= GMAP_BUFFER_INDEX ? b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : false;
         if (!ok || (int)b->set >= nsets) { fprintf(stderr, "unexpected binding set %u binding %u type %d\n", b->set, b->binding, b->type); return false; }
     }
     VkShaderStageFlags st[2] = {nsets == 1 ? VK_SHADER_STAGE_COMPUTE_BIT : VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT};
@@ -134,7 +145,7 @@ static void test_graphics(void) {
     if (!fi->msl) { maxwell_free(vi); maxwell_free(fi); n_skip++; return; }
     n_pairs++;
     size_t nv = 0, nf = 0;
-    uint32_t *sv = vk_glsl_to_spirv(vi->msl, STAGE_VERTEX, "vs", &nv), *sf = vk_glsl_to_spirv(fi->msl, STAGE_FRAGMENT, "fs", &nf);
+    uint32_t *sv = prepare_shader(vi->msl, STAGE_VERTEX, "vs", &nv), *sf = prepare_shader(fi->msl, STAGE_FRAGMENT, "fs", &nf);
     Layout l;
     const uint32_t *mods[2] = {sv, sf};
     size_t nws[2] = {nv, nf};
@@ -207,7 +218,7 @@ static void test_compute(void) {
     if (!ci->msl) { maxwell_free(ci); n_skip++; return; }
     n_cs++;
     size_t n = 0;
-    uint32_t *s = vk_glsl_to_spirv(ci->msl, STAGE_COMPUTE, "cs", &n);
+    uint32_t *s = prepare_shader(ci->msl, STAGE_COMPUTE, "cs", &n);
     VkShaderModule m = s ? vk_module(s, n) : VK_NULL_HANDLE;
     Layout l;
     const uint32_t *mods[1] = {s};
@@ -242,7 +253,8 @@ int main(int argc, char **argv) {
     maxwell_gmem_base = 0x7240000000ull;
     maxwell_gmem_size = 0xD0000000ull;
     init_device();
-    vk_shaders_init();
+    char why[1024];
+    if (!vk_shader_prepare_begin(why, sizeof why)) { fprintf(stderr, "%s\n", why); return 2; }
     for (long i = 0; i < count; i++) {
         if (rnd(4) == 0) test_compute(); else test_graphics();
         if ((i + 1) % 500 == 0) fprintf(stderr, "%ld: %ld pairs, %ld compute, %ld skipped (translation failed), %ld failures\n",
@@ -250,5 +262,6 @@ int main(int argc, char **argv) {
     }
     printf("%ld graphics pairs, %ld compute programs, %ld skipped, %ld failures, %ld validation messages\n", n_pairs, n_cs,
            n_skip, n_fail, g_messages);
+    vk_shader_prepare_end();
     return n_fail != 0;
 }
