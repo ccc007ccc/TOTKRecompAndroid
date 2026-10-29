@@ -1,11 +1,10 @@
 #include "test_boot.h"
 #include <string.h>
 
-static const char title[] = "Sequence/NormalTitle.140.module.ainb";
 static const char load[] = "Sequence/OnLoadGameSaveData.module.ainb";
 
 bool test_boot_target(const char *path) {
-    return !strcmp(path, title) || !strcmp(path, load);
+    return !strcmp(path, load);
 }
 
 static uint64_t fingerprint(const uint8_t *data, size_t size) {
@@ -21,13 +20,7 @@ static void put32(uint8_t *data, uint32_t value) {
 int test_boot_patch(const char *path, uint8_t *data, size_t size, int slot) {
     if (!test_boot_target(path)) return 0;
     if (!data || slot < 0 || slot > 5) return -1;
-    if (!strcmp(path, title)) {
-        if (size != 19190 || fingerprint(data, size) != UINT64_C(0xf44fc44f2750b7ef)) return -1;
-        // Root command: enter the game's existing confirmed-load branch (44),
-        // which handles SceneTransition pause and then TitleToMainWithLoadSave.
-        // The normal entry (11) waits for title/list/confirmation button input.
-        data[0x88] = 44;
-    } else {
+    {
         if (size != 7845 || fingerprint(data, size) != UINT64_C(0x4a1c97cdcae85f0f)) return -1;
         // AINB 0x407, TotK 1.4.3. Only change the four Index input connections:
         // load types 0/6/5 and SetCaptionMgrLatestIndex. Keep every load/reset,

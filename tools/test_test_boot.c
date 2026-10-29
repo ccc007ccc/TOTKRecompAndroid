@@ -13,6 +13,11 @@ int main(int argc, char **argv) {
         assert(!fseek(f, 0, SEEK_END));long size = ftell(f);assert(size > 0 && size < 32768);rewind(f);
         uint8_t *original = malloc(size), *data = malloc(size);assert(original && data);
         assert(fread(original, 1, size, f) == (size_t)size);fclose(f);
+        if(k==0) {
+            memcpy(data,original,size);
+            assert(!test_boot_target(names[k]) && test_boot_patch(names[k],data,size,0)==0);
+            assert(!memcmp(data,original,size));free(data);free(original);continue;
+        }
         for (int slot = 0; slot <= 5; ++slot) {
             memcpy(data, original, size);assert(test_boot_patch(names[k], data, size, slot) == 1);
             // Patched assets must not be accepted as fresh originals on a subsequent boot.

@@ -29,3 +29,4 @@ Their devices, addresses and performance figures are not support claims for this
 Inherited touch UI and the Zepp companion are described in [status](STATUS.md); the companion is not adapted to TOTK.
 
 - [Project closeout and remaining work (Chinese)](../PROJECT-CLOSEOUT.md)
+- [Visual validation (Chinese)](../VISUAL-VALIDATION.md)

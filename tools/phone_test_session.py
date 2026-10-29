@@ -46,7 +46,7 @@ def main():
     start.add_argument('--diagnostic-present-interval',type=int,choices=[1,2,3],
                        help='Override the game present interval for diagnosis; may change game speed, not a gameplay FPS result')
     boot=start.add_mutually_exclusive_group()
-    boot.add_argument('--save-slot',type=int,choices=range(6),help='Directly load slot_00..slot_05 using the original game load sequence; requires --save-seed')
+    boot.add_argument('--save-slot',type=int,choices=range(6),help='Load slot_00..slot_05 through the normal menu confirmation flow; requires --save-seed')
     boot.add_argument('--auto-load',action='store_true',help='Legacy button-based startup; prefer --save-slot')
     start.add_argument('--timeout',type=int,default=150,help='Maximum seconds to wait for automatic pause')
     for name in ['status','pause','resume','a','gpu','shot']:

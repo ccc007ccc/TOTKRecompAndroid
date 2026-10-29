@@ -221,6 +221,7 @@ TOTK_STAGE=.work/totk-port/packages/release-snapdragon-8elite-perftest
 
 尖括号处必须换成实际路径；默认存档种子为测试包 `files/performance/seed`，也可用 `--save-seed` 指定。
 自动复制完整存档，固定 **60 FPS 目标**，加载就绪后计时、到时退出；不暂停、不例行截图。
+指定槽位保留正常菜单确认流程，实际读取目标进度文件后停止自动按键；不要改写标题入口跳过界面初始化。
 默认 15 秒，可选 1–60 秒。就绪条件是连续 90 帧场景 G-buffer/绘制量启发式，不是内部“已可操作”标志。
 `--profile` 是诊断计数开关，和构建脚本的 `--profile <编译档>` 含义不同；诊断/回读结果单独记账。
 

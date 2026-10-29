@@ -99,7 +99,9 @@ static void initialize(void) {
         }
         ts.save_slot=(int)value;
     }
-    ts.auto_load=getenv("LARECOMP_TEST_AUTOLOAD")!=NULL;
+    // Keep the normal title/list/confirmation flow: it initializes the game's
+    // loading background. The save-load resource fixes the requested slot.
+    ts.auto_load=ts.save_slot>=0 || getenv("LARECOMP_TEST_AUTOLOAD")!=NULL;
     snprintf(ts.directory,sizeof ts.directory,"%s",root);
     if(mkdir(root,0755)&&access(root,W_OK)) {
         fprintf(stderr,"[test-session] directory is not writable: %s\n",root);exit(1);
@@ -217,6 +219,23 @@ uint64_t test_session_buttons(uint64_t frame) {
     pthread_mutex_lock(&ts.lock);uint64_t b=frame<ts.button_until?ts.buttons:0;
     if(ts.auto_load&&ts.phase==LOADING&&frame>=120&&frame%60<2)b|=1;
     pthread_mutex_unlock(&ts.lock);return b;
+}
+void test_session_file_read(const char* path) {
+    if(!path || !test_session_enabled() || ts.save_slot<0)return;
+    const char* save=getenv("LARECOMP_SAVE_DIR");
+    if(!save || !*save)return;
+    size_t prefix=strlen(save),length=strlen(path);
+    char suffix[48];snprintf(suffix,sizeof suffix,"/slot_%02d/progress.sav",ts.save_slot);
+    size_t tail=strlen(suffix);
+    if(length<=prefix+tail || strncmp(path,save,prefix) || path[prefix]!='/' ||
+       strcmp(path+length-tail,suffix))return;
+    pthread_mutex_lock(&ts.lock);
+    if(ts.auto_load) {
+        ts.auto_load=false;
+        fprintf(stderr,"[test-session] menu confirmation complete at frame %llu; automatic input stopped\n",
+                (unsigned long long)ts.frame);
+    }
+    pthread_mutex_unlock(&ts.lock);
 }
 bool test_session_take_gpu_request(void) {
     if(!test_session_enabled())return false;

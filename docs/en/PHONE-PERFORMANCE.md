@@ -53,11 +53,21 @@ PHONE_TEST=("$PYTHON" tools/phone_test_session.py --serial 192.168.0.12:45117 \
 
 Slots 0..5 mean the game's `slot_00..slot_05` directories, not the date-sorted menu rows. The runtime clones the entire save root, including store metadata, into a new private `save-*` directory before boot. Missing slots and reused destinations are rejected. The source save is unchanged.
 
-The runtime checks the original TotK 1.4.3 AINB resources and creates private temporary overrides from the player's files. `NormalTitle.140.module` enters the existing confirmed-load branch. Four index inputs in `OnLoadGameSaveData.module` select progress, auxiliary data, footprint and caption from the requested slot. The existing load/reset/post-load branch is retained, but intermediate loading-screen states are not guaranteed to match manual entry. Modified or unsupported source resources are rejected. No game assets are bundled in the APK, and normal launches do not enable these patches.
+Selected-slot loading keeps the normal title, save-list and confirmation screens and confirms them automatically.
+`NormalTitle.140.module` remains unchanged, preserving loading-background initialization. Only the player's original
+`OnLoadGameSaveData.module` is checked and patched in a private copy: its four index inputs select progress,
+auxiliary data, footprint and caption from the requested file slot (0..5), independently of menu order.
+No game assets are bundled, and ordinary launches enable neither test input nor these overrides.
 
-Known limitation (2026-10-28): automatic direct loading can leave the left grid background black. The user confirms normal manual loading in the same test app and has deferred this issue. Intermittent missing grass also occurs in the ordinary app and is deferred separately; it is neither established as a test-entry fault nor fixed. A recent grassland save has been copied without modifying its source and loaded automatically. It differs from the bare-cliff seed used for historical performance results, so those scenes must not be mixed in comparisons.
+Automatic confirmation stops on the first successful read of the selected `progress.sav` inside this session's save copy.
+Resource preloads, caption reads, other slots and the original save do not stop it. Startup remains bounded to 120 seconds;
+timed measurement still starts at scene readiness and exits automatically.
 
-This skips menu interaction while retaining the existing title-entry setup. `--auto-load` retains the older button simulation for compatibility; it is not direct loading. Use `--session` to select a separate private control directory, consistently for all commands.
+The automatic-loading black grid was reproduced and fixed on 2026-10-29; see [visual validation](../VISUAL-VALIDATION.md).
+Missing grass remains a separate unresolved issue; it did not recur on this short walking route. The grassland and
+historical bare-cliff seeds are different scenes and must not be mixed in performance comparisons.
+`--auto-load` retains the older unselected button mode; use `--save-slot` for controlled slot selection and input cutoff.
+Use `--session` to select a separate private control directory, consistently for all commands.
 
 The example seed is a complete save copy prepared beforehand. `start --game-library <absolute phone path>` selects an existing alternative library through `LARECOMP_GAME_LIB`, such as a private O1 library, without replacing the default one. The tool verifies app readability and records APK and explicitly selected library SHA256 hashes in `launch.json`.
 
@@ -137,9 +147,13 @@ clang -O1 -g -fsanitize=address,undefined -Wall -Wextra \
 for mode in timed timed-stall timed-timeout timed-background; do
   "$TEST_OUT/test-session" "$TEST_OUT/new-$mode" "--$mode"
 done
+clang -O1 -g -fsanitize=address,undefined -Wall -Wextra \
+  tools/test_test_autoload.c runtime/test_session.c -lpthread -lm -o "$TEST_OUT/test-autoload"
+mkdir -p "$TEST_OUT/new-autoload"
+"$TEST_OUT/test-autoload" "$TEST_OUT/new-autoload"
 "$PYTHON" tools/test_phone_benchmark.py
 ```
 
 Timed checks cover continuous sampling after readiness, no pause, stalled rendering, startup timeout and background exit. The controller tests use mock ADB to cover one launch, results, legacy APK rejection and shutdown fallback without contacting a phone. These C/controller checks do not establish full gameplay correctness on a device.
 
-`TEST_OUT` is a project-local scratch directory and `SEQUENCES` holds original files extracted from the player's RomFS. All six slots were also checked using the independent [AINB parser](https://github.com/dt-12345/AINB), comparing complete parsed graphs and allowing only the intended entry and index changes. Do not commit game assets or generated test output.
+`TEST_OUT` is a project-local scratch directory and `SEQUENCES` holds original files extracted from the player's RomFS. All six slots were also checked using the independent [AINB parser](https://github.com/dt-12345/AINB), comparing complete parsed graphs and verifying unchanged title resources and only the four intended index changes. Do not commit game assets or generated test output.

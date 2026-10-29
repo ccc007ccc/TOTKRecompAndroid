@@ -67,16 +67,19 @@ PHONE_TEST=("$PYTHON" tools/phone_test_session.py --serial 192.168.0.12:45117 \
 
 `--save-slot 0..5` 对应游戏的 `slot_00..slot_05`，不是存档菜单中按日期排序后的行号。启动前完整复制存档根目录，包括 `stores/*/metadata`，到本次会话的新 `save-*` 目录；目标已存在、槽位不存在时拒绝启动。原存档保持不变。
 
-运行时从玩家自己的 RomFS 读取两份原始 AINB 资源，检查长度和完整内容指纹后，在私有测试目录生成临时覆盖文件：
+指定槽位启动保留原有标题、存档列表和确认界面，自动发送确认按键。`NormalTitle.140.module` 保持原样，
+避免跳过加载背景等界面状态的初始化。运行时只对玩家自己的 `OnLoadGameSaveData.module` 检查长度和完整指纹，
+在测试私有目录生成临时覆盖，固定进度、辅助数据、足迹与 caption 四处索引；0..5 仍是文件槽位，不是菜单行号。
+APK 不携带游戏流程资源，普通启动不启用测试输入或索引修改。
 
-- `NormalTitle.140.module`：从标题页等待按钮的入口转入已有的确认读档分支。
-- `OnLoadGameSaveData.module`：固定进度、辅助数据、足迹和 caption 的四处存档索引，保留原有重置、加载与读档后处理。
+首次成功读取本次存档副本中所选槽位的 `progress.sav` 后，自动确认立即停止。资源预加载、caption 读取、
+其他槽位和原存档不会触发停止；不会等到场景就绪后才停止按键。脚本的 120 秒启动上限和就绪后定时退出保持不变。
 
-目前仅接受已校验的 TotK 1.4.3 原始资源；修改过的输入会被拒绝。APK 不携带游戏流程资源。普通启动不启用补丁。此入口跳过人工操作，沿用已有读档分支，但不保证加载界面的每个中间状态与手动流程一致。
+2026-10-29 已复现并修复此前自动读档特有的加载格线黑底，证据见 [画面验收](VISUAL-VALIDATION.md)。
+草偶尔消失属于另一问题，本轮移动短线中没有复现，仍保留待定位。草地存档与历史裸岩悬崖性能种子不同，不能混作对照。
 
-已知测试限制（2026-10-28）：自动指定读档时，加载画面左侧的格线背景可能为纯黑；用户确认同一测试版手动读档正常，已决定暂不修复。草偶尔消失也在普通版出现，按用户要求另留后续处理，不能将其归因于本测试入口或声称已经修好。最新草地存档已只读克隆并成功自动读入；它与历史性能样本的裸岩悬崖存档不同，不能混作同场景性能对照。
-
-`--auto-load` 是此前的模拟按键方案，仅为兼容保留，不能作为直接读档的验收证据。`--session` 可以指定独立的私有控制目录，后续所有命令需使用相同目录。
+`--auto-load` 保留不指定槽位的旧按键模式；常规测试继续使用 `--save-slot`，让索引和输入停止条件都受控。
+`--session` 可以指定独立的私有控制目录，后续所有命令需使用相同目录。
 
 示例中的 seed 是预先准备的完整存档副本。`start --game-library <手机上的绝对路径>` 可通过 `LARECOMP_GAME_LIB` 选择另一份已有游戏库，例如私有目录中的 O1 库，用于单变量比较，不必替换默认库。工具检查应用能否读取它，并将 APK 和指定游戏库的 SHA256 写入 `launch.json`。
 
@@ -219,9 +222,13 @@ clang -O1 -g -fsanitize=address,undefined -Wall -Wextra \
 for mode in timed timed-stall timed-timeout timed-background; do
   "$TEST_OUT/test-session" "$TEST_OUT/new-$mode" "--$mode"
 done
+clang -O1 -g -fsanitize=address,undefined -Wall -Wextra \
+  tools/test_test_autoload.c runtime/test_session.c -lpthread -lm -o "$TEST_OUT/test-autoload"
+mkdir -p "$TEST_OUT/new-autoload"
+"$TEST_OUT/test-autoload" "$TEST_OUT/new-autoload"
 "$PYTHON" tools/test_phone_benchmark.py
 ```
 
 定时检查覆盖就绪后连续采样、无暂停、停帧到期、加载超时及后台退出；脚本使用mock ADB检查单次启动、结果收集、旧APK拒绝与退出兜底，不连接手机。已有C/脚本检查不等同于完整手机玩法验收。
 
-`TEST_OUT` 为项目内新的测试输出目录，`SEQUENCES` 为从自己的 RomFS 提取的原始资源目录。另用独立的 [AINB 解析器](https://github.com/dt-12345/AINB) 核对六个槽位的完整结构，确认除了目标入口与索引连接之外没有变化。游戏资源与测试输出不得提交到仓库。
+`TEST_OUT` 为项目内新的测试输出目录，`SEQUENCES` 为从自己的 RomFS 提取的原始资源目录。另用独立的 [AINB 解析器](https://github.com/dt-12345/AINB) 核对六个槽位的完整结构，确认标题资源不变、读档资源只有四处索引连接变化。游戏资源与测试输出不得提交到仓库。

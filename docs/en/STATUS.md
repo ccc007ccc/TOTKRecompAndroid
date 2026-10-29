@@ -44,7 +44,7 @@ The user confirmed that this device build fixed the reported halo clipping and s
 ## Remaining validation
 
 - Intermittent missing grass occurs in both Performance Test and the ordinary app, and has also recovered. The user requested submission now and investigation later. The previous row-stride fix remains; vertex sampling quantization is now opt-in, without a proven connection to the grass fault.
-- Automatic test loading can leave the loading-screen grid black. The user confirms normal manual loading in the same test app and has deferred this issue. It is tracked separately from the historical intermittent UI fault below.
+- The automatic-loading black grid was fixed on 2026-10-29 by preserving the normal menu confirmation flow and stopping test input when the selected progress file is read. See [visual validation](../VISUAL-VALIDATION.md); the historical intermittent UI fault below remains separate.
 - Missing loading UI layers and single-frame scene blackouts remain unresolved. Correcting the texture layout removed the blue spawn-platform rectangles; this does not establish a fix for the other two faults. The capture controls provide lightweight stage/state diagnostics by default, with full replay as an advanced option; see [testing](TESTING.md#on-device-flicker-capture).
 - Broader scenes, ordinary shadows, transparency and long sessions still need coverage. Current scene acceptance does not cover every game area or device.
 - Some views previously encountered an unimplemented vertex `DMUL`; this change does not address it, and its relation to the fixed faults was not established.

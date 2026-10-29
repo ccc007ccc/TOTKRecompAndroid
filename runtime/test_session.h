@@ -8,6 +8,7 @@ bool test_session_timed(void); // 60 FPS benchmark: sample on readiness, then qu
 bool test_session_should_exit(void); // event thread: result/status are already flushed before this becomes true
 void test_session_backgrounded(void); // timed measurements stop if the game leaves the foreground
 int test_session_save_slot(void); // -1 unless direct loading was explicitly requested
+void test_session_file_read(const char *path); // stop menu input on actual progress-save reads, not resource preloads
 int test_session_target_fps(void); // 0: normal setting; explicit test override never writes the player's ini
 const char *test_session_directory(void);
 void test_session_poll(void); // SDL/event thread, also while the renderer is paused

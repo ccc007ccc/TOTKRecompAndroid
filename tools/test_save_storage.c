@@ -4,6 +4,7 @@
 #include "../runtime/services/fs.c"
 
 void plat_write_prepare(uint64_t a, uint64_t n) { (void)a; (void)n; }
+void test_session_file_read(const char *path) { (void)path; } // session behavior has its own fixture
 void rt_fatal_trace(void) { abort(); }
 Service *service_new(const char *name, ServiceHandler handler, void *state) {
     Service *s = calloc(1, sizeof *s);

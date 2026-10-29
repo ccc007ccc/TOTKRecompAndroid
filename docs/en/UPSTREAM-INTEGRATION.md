@@ -1,5 +1,8 @@
 # Upstream integration and frame timing
 
+2026-10-29 follow-up: the automatic-loading black grid is fixed. See [visual validation](../VISUAL-VALIDATION.md)
+for evidence and the short grassland check; the older record below retains its original status.
+
 [简体中文](../UPSTREAM-INTEGRATION.md) | English
 
 The branch targets TotK Switch 1.4.3 with 30/45/60/120 FPS settings. Requested frame rates and achieved throughput

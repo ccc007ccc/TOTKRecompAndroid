@@ -30,3 +30,4 @@
 长期规范以 `Agent.md` 为入口；专题的历史“下一步”不自动覆盖当前任务范围。
 
 - [项目收尾与剩余任务](PROJECT-CLOSEOUT.md)
+- [画面复现与验收](VISUAL-VALIDATION.md)
