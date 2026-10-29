@@ -4,6 +4,8 @@
 
 This guide targets TOTKRecompAndroid with Switch 1.4.3 inputs. See [status](STATUS.md) for current limitations.
 Run commands from the project root unless stated otherwise.
+The [project conventions (Chinese)](../../Agent.md) define the shared workflow and coding rules;
+the [2026-10-29 baseline](../PROJECT-BASELINE.md) reconciles the recent shader and memory work.
 
 ## Environment and APK
 
@@ -35,6 +37,9 @@ The APK contains the runtime, not game code.
 Release defaults to `performance`; selecting a performance profile alone selects Release. The 8 Elite profile uses
 `-march=armv8.7-a+crypto+fp16 -mtune=oryon-1`. NDK r30's Clang 21 has no distinct second-generation Oryon scheduling
 model. Performance profiles retain `-fno-fast-math` to preserve guest floating-point behavior.
+Use `debug --profile dev` for everyday debugging and `release --profile performance` for a general Release.
+The 8 Elite profile is device-specific. Both use NDK Clang; host Clang builds desktop tools/tests.
+Variant, native profile, test package and runtime feature switches are separate choices.
 
 ```bash
 bash android/build_totk.sh release --profile snapdragon-8elite
@@ -50,6 +55,9 @@ Add `--perftest` to both commands for `com.totkrecomp.android.perftest`; its dir
 Perftest Release keeps the debug signature and `run-as` while native CMake remains Release/O3. Ordinary Release is
 not debuggable. `push_game.sh --perftest` explicitly targets this package. Changing profile requires both a new APK
 and matching game library.
+Ordinary Release uses `~/.totkrecompandroid/keystore.properties` when configured and otherwise falls back to the
+debug key. Verify signing separately before publishing. Use `build_totk.sh` to stage packages and identity records;
+direct Gradle builds do not refresh them. Serialize Gradle builds in one checkout: dev app/perftest still share intermediates.
 
 On memory-limited hosts, set `JOBS=2 TOTK_LTO_JOBS=1` in dev. Native Ninja compiler pools also obey JOBS; linking is
 serial. `TOTK_BUILD_LAUNCHER` can provide a compiler/linker resource-limit wrapper. NDK's LICM promotion workaround
@@ -115,15 +123,14 @@ unvalidated and its compiler is not included in the current APK.
 A change under `runtime/` usually needs only an APK rebuild:
 
 ```bash
-distrobox enter dev -- bash <<'SH'
-set -e
-source android/dev_env.sh
-cd android/botwrecompandroid
-bash gradlew --no-daemon --max-workers=2 assembleDebug
-SH
+# Keep the existing profile; choose the matching ordinary Debug or 8 Elite test package.
+bash android/build_totk.sh debug --profile dev
+bash android/build_totk.sh release --profile snapdragon-8elite --perftest
 ```
 
-In `dev`, install with `adb -s "$ANDROID_SERIAL" install --streaming -r` followed by the APK path.
+In `dev`, verify the existing library's profile/GAMELIB_ID, then install with
+`adb -s "$ANDROID_SERIAL" install --streaming -r` followed by the exact staged APK path.
+For tests, prefer `phone_test_session.py benchmark --apk` to install under the device lock.
 `android/run_boot.sh` stops and restarts the application, captures logs for a bounded duration and leaves the game running afterward.
 Use it for a required version update or a defined comparison; capture can otherwise be triggered in the running game.
 

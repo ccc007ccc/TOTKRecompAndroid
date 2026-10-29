@@ -4,7 +4,7 @@
 
 本分支开发《王国之泪》Switch 1.4.3 的 Android ARM64 移植。直接上游是
 [mamcjr/BOTWRecompAndroid](https://github.com/mamcjr/BOTWRecompAndroid)。
-请先阅读 [状态](docs/STATUS.md)、[架构](docs/ARCHITECTURE.md) 与 [上游关系](docs/UPSTREAM.md)。
+请先阅读统一的 [项目规范](Agent.md)，再按需查阅 [状态](docs/STATUS.md)、[架构](docs/ARCHITECTURE.md) 与 [上游关系](docs/UPSTREAM.md)。
 
 ## 提交内容
 

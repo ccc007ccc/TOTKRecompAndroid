@@ -3,6 +3,12 @@
 简体中文 | [English](en/BUILD.md)
 
 本指南针对 TOTKRecompAndroid 的 Switch 1.4.3 输入。功能边界见 [当前状态](STATUS.md)。
+统一操作与代码约定见 [项目规范](../Agent.md)；两条近期工作线的阶段状态见 [整理基线](PROJECT-BASELINE.md)。
+
+当前工作版采用[着色器均衡准备方向](SHADER-BALANCED.md)，默认允许缓存缺失时编译；关闭回退才使用[完整准备门禁](SHADER-PREPARATION.md)。补齐库/UI/特效读取后为 28,634 组输入，多重采样、图像读写及原子加法修复后，FP32 翻译失败归零。
+Android 默认启用可关闭的 FP32 优先试验；原范围通用配置清单为 694,772 条目，PJZ110 系统驱动配置的 800,432 条目已在手机完成准备。
+旧扩展范围通用审计为 2,666,099 条目，PJZ110 系统驱动为 2,798,003 条目；该长任务已按新方向停止，旧结果保留。
+该原范围缓存内容 1.02 GB、实际占盘 3.58 GB，全部缓存通过只读加载检查，但首次真实绘制缺少 AGL 程序；扩展范围尚未完成准备，构建成功不等于可玩性通过。
 
 ## 构建
 
@@ -25,6 +31,9 @@ bash android/build_totk.sh
 | `snapdragon-8elite` | O3 + ThinLTO，ARMv8.7-A + crypto + FP16，Oryon 调优 | 同一组参数，巨大函数也完整优化 |
 
 `release` 默认选择 `performance`；单独指定性能 profile 默认选择 Release。`snapdragon-8elite` 使用 `-march=armv8.7-a+crypto+fp16 -mtune=oryon-1`；NDK r30 的 Clang 21 没有独立的第二代 Oryon 调度模型。性能档保留 `-fno-fast-math`，维护游戏的浮点语义。
+日常 Debug 选择 `debug --profile dev`，通用 Release 选择 `release --profile performance`；
+8 Elite 为设备专用档。两者均使用 NDK Clang，系统 Clang 仅编译桌面工具/测试。
+variant、profile、测试包与运行时功能开关互相独立，不能用 Debug/Release 判断某条开发线是否编入。
 
 ```bash
 bash android/build_totk.sh release --profile snapdragon-8elite
@@ -34,6 +43,9 @@ bash android/build_gamelib.sh .work/totk-port/game/exefs release --profile snapd
 APK、从 APK 提取的精确 `libmain.so`、游戏库及侧车文件分别放入 `.work/totk-port/packages/<variant>-<profile>/`。`build.json` 记录 APK/运行时 SHA256，以及从 stripped ELF 导出符号读取的实际 profile 和 `GAMELIB_ID`。打包与部署还从实际 APK manifest 核对包名，拒绝过期元数据、错误包名及 profile/身份不匹配的组合。
 
 需要独立性能测试包时，两条构建命令都加 `--perftest`，目录追加 `-perftest`，包名固定为 `com.totkrecomp.android.perftest`。它的 Release 保留 Debug 签名和 `run-as`，原生 CMake 仍为 Release/O3；普通 Release 不开启调试标记。`push_game.sh --perftest` 会明确选择该包。更换 profile 必须同时更新 APK 和游戏库。
+普通 Release 只有配置 `~/.totkrecompandroid/keystore.properties` 后才使用该发布密钥；缺失时回退到 debug 签名。
+正式发布需单独核对签名。`build_totk.sh` 固化 packages 产物与身份，直接调用 Gradle 不会更新这些记录；
+同一源码树的 Gradle 构建串行进行，dev 普通包和测试包目前共用中间目录。
 
 资源紧张时先在 dev 内设置 `JOBS=2 TOTK_LTO_JOBS=1`。原生 Ninja 编译池也受 JOBS 限制，链接单任务执行。可通过 `TOTK_BUILD_LAUNCHER` 为编译器/链接器设置本机资源上限。NDK 的 LICM promotion 修正同时作用于性能档前置编译和 ThinLTO 后端，参数纳入库身份。手机 Zig 参数另行转换：ARM ISA 使用 feature set，Oryon tuning 直接传给 Clang；链接以 `-O3 -flto=thin` 选择实际 LLD O3，不传 Zig 不支持的 LLD CLI 选项。
 
@@ -90,15 +102,13 @@ source android/dev_env.sh
 修改 `runtime/` 通常只需重建 APK，不必重新生成庞大的游戏库：
 
 ```bash
-distrobox enter dev -- bash <<'SH'
-set -e
-source android/dev_env.sh
-cd android/botwrecompandroid
-bash gradlew --no-daemon --max-workers=2 assembleDebug
-SH
+# 保持原有 profile；分别为普通 Debug 与已有 8 Elite 测试库的更新入口
+bash android/build_totk.sh debug --profile dev
+bash android/build_totk.sh release --profile snapdragon-8elite --perftest
 ```
 
-在 `dev` 内设置目标设备后，用 `adb -s "$ANDROID_SERIAL" install --streaming -r` 安装新的 APK。
+在 `dev` 内设置目标设备后，用 `adb -s "$ANDROID_SERIAL" install --streaming -r <packages 中的确切 APK>` 安装。
+先核对 APK 与现有游戏库的 profile/GAMELIB_ID；测试包优先用 `phone_test_session.py benchmark --apk` 在设备锁内安装。
 `android/run_boot.sh` 会停止并重新启动应用，抓取限时日志后保留游戏运行；只在需要新版本或明确对照时使用。
 设备列表可能同时包含其他设备，每次部署都必须指定正确目标。
 

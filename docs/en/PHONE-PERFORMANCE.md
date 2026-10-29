@@ -6,13 +6,21 @@ Direct loading is verified on OnePlus 13 / Adreno 830: TotK 1.4.3 slot_00 loads 
 
 ## Isolated test package
 
-Inside `dev`, source the main checkout's `android/dev_env.sh`, enter this branch's `android/botwrecompandroid`, and run:
+From the repository root, build the Release test package matching the existing O3/8 Elite game library:
 
 ```sh
-bash gradlew --offline -PperformanceTest=true assembleDebug
+bash android/build_totk.sh release --profile snapdragon-8elite --perftest
 ```
 
-This builds `com.totkrecomp.android.perftest` (TOTK Performance Test), which coexists with the ordinary app. Omit the property for an ordinary build. Import or copy the player's own game data once into the test package, matching drivers and settings. Install, launch and stop only this package during tests so another task updating the ordinary app cannot terminate the session. Always select the intended ADB device.
+The staged output is `.work/totk-port/packages/release-snapdragon-8elite-perftest/`, package
+`com.totkrecomp.android.perftest`. Release perftest retains `run-as`; do not switch to an incompatible Debug/dev
+build just to obtain debug access. Import or copy the player's own game data once, with matching drivers/settings.
+Operate only this test package and always select the intended ADB device. See the [project conventions](../../Agent.md).
+
+`benchmark --apk <exact local APK>` installs while holding the same-workspace device lock, then records the installed
+APK hash. Direct ADB, other workspaces and interactive sessions after `start` returns are outside that lock.
+The [project baseline (Chinese)](../PROJECT-BASELINE.md) records later shared-memory/copy implementation;
+earlier measurements below describe their historical version.
 
 Run inside `dev`, after sourcing the main checkout's `android/dev_env.sh`:
 

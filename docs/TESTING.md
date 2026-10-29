@@ -4,6 +4,7 @@
 
 在项目根目录进入 `distrobox enter dev` 并执行 `source android/dev_env.sh`。
 生成器、编译器、Python 和 Java 的临时目录统一留在 `.work/totk-port/`。
+按变更选择测试的索引与证据规则见 [项目规范](../Agent.md#6-测试与证据)。
 
 ## 常用检查
 
@@ -22,6 +23,24 @@
 
 只运行与变更相关的检查。APK 构建命令见 [构建指南](BUILD.md)。上游 `tools/test_lift.py` 依赖 macOS/ARM64，
 不能把在本机 x86_64 Linux 上未执行的测试记为通过。
+
+共享着色器清单的上游解析/去重、选定游戏过滤、阶段与类型保留，以及缓存优先加载分别执行：
+
+```bash
+bash tools/test_shader_warm_list.sh
+bash tools/test_shader_warm_prepare.sh .work/shader-warm-check .work/totk-port/game/romfs.bin
+bash tools/test_shader_warm_background.sh .work/shader-background-check .work/totk-port/game/romfs.bin
+bash tools/test_shader_runtime.sh
+bash tools/test_shader_cache_compat.sh .work/shader-cache-check
+bash tools/test_pipeline_warm.sh .work/pipeline-warm-check
+bash tools/test_vk_pipeline_warm.sh .work/pipeline-warm-gpu
+```
+
+第一条可再传输出目录和本地 RomFS 路径，检查完整真实目录；第二条编译真实标题请求并关闭编译入口后严格加载，核对接口类型和配对掩码。
+工具与当前匹配结果见[均衡准备方案](SHADER-BALANCED.md)。
+后台测试覆盖生命周期、最近记录、取消/配置变化和真实任务缓存保留；这些检查不代替完整 Android 游戏启动与帧时间验收。
+缓存兼容测试检查编译器身份、审核白名单、跨目录字典依赖和新变体写入；同格式旧库可读不等于当前源码键命中。
+管线预热另有记录/线程竞争检查及跨进程 GPU 数值检查，覆盖传统/动态渲染、EDS 和计算工作组特殊化；不能代替游戏帧时间验收。
 
 ## 实机证据
 
@@ -149,9 +168,11 @@ done
 
 ```bash
 mkdir -p .work/totk-port/shader-depth-tests
+sh tools/build_host_shader_compiler.sh .work/totk-port/shader-depth-tests
+export LARECOMP_NATIVE_LIB_DIR="$PWD/.work/totk-port/shader-depth-tests"
 clang -O1 -g -fsanitize=address,undefined -ffunction-sections -fdata-sections \
   -Iandroid/deps/out/include tools/test_shader_depth_precision.c -Wl,--gc-sections \
-  -lshaderc_shared -lpthread -lvulkan -o .work/totk-port/shader-depth-tests/test-depth
+  -lzstd -ldl -lpthread -lvulkan -o .work/totk-port/shader-depth-tests/test-depth
 .work/totk-port/shader-depth-tests/test-depth "$PWD/.work/totk-port/shader-depth-tests"
 for s in .work/totk-port/shader-depth-tests/*.spv; do spirv-val --target-env vulkan1.3 "$s"; done
 ```
@@ -201,7 +222,7 @@ bash gradlew --no-daemon --max-workers=4 assembleDebug assembleDebugAndroidTest
 adb -s "$ANDROID_SERIAL" install --streaming -r app/build/outputs/apk/debug/app-debug.apk
 adb -s "$ANDROID_SERIAL" install --streaming -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
 adb -s "$ANDROID_SERIAL" shell am instrument -w \
-  com.totkrecomp.android.test/com.botwrecompandroid.RuntimeErrorDialogCheck </dev/null
+  com.totkrecomp.android.debug.test/com.botwrecompandroid.RuntimeErrorDialogCheck </dev/null
 ```
 
 输出须包含 `PASS: Copy preserved the dialog`；不要仅根据 adb 退出码判定通过。
@@ -218,3 +239,17 @@ clang -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Wno-format \
 `LARECOMP_AUDIO_STATS=1` 每 200 个音频帧记录直接/分流/未连接声道及解码样本数；未连接声源可能是游戏主动停用，
 不能直接视作丢失。`LARECOMP_AUDIO_DUMP=1` 保存包括首次完整初始化在内的参数快照；
 `LARECOMP_AUDIO_WAV=<应用数据目录内路径>` 保存 audren 的浮点立体声输出。抓取不是完整游戏音频覆盖率证明。
+
+手机端全库预编译的覆盖率、当前阻塞和组件测试见[着色器准备](SHADER-PREPARATION.md)。
+`tools/test_shader_fp32.py` 检查 FP32 优先与 GPU 整数双精度路径的选择、92 个着色器的 SPIR-V，
+以及 2,600,960 个正常范围格式转换样本（CPU）。两模式下 8,697 组输入均通过翻译，原有 30 份
+双精度程序均通过正式 SPIR-V 验证；仍未完成全变体准备、GPU 双精度数值或游戏画面验收。
+
+[文件关联审计](SHADER-ASSET-LINKS.md)覆盖全部程序归属和 54,541 份材质的静态选项匹配。
+`tools/test_shader_catalog.cpp` 验证有界解析、阶段配对、选项/默认值、顶点映射及新旧代码输入一致性；
+主机 ASan/UBSan 和手机原生测试均通过。它不把静态资源候选当成完整运行时绘制状态。
+
+原生准备清单审计见 `tools/audit_shader_variants.cpp`；类型/状态规则与工作队列分别由
+`tools/test_shader_variant_plan.cpp`、`tools/test_shader_prepare_queue.cpp` 检查。
+`tools/test_shader_prepare_workers.cpp` 用正式编译器和压缩缓存验证多线程会话、去重和准备结束后的只读加载。
+当前 736 个真实组合样本通过 SPIR-V 验证；此样本通过不代表 694,772 条目的完整准备已经完成。

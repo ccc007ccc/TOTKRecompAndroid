@@ -36,8 +36,26 @@
 | runtime/ui/ | 启动器、设置、触控和性能叠层 |
 | android/ | Gradle APK、依赖和 NDK 游戏库构建 |
 
-NVN 55.15 控制块决定着色器代码和常量范围。Maxwell 经 GLSL/SPIR-V 进入 Vulkan。
-Turnip 可把 guest heap 映射为 GPU 内存；高通原厂路径使用复制和地址表。超过存储缓冲范围的 heap 使用窗口。
+NVN 55.15 控制块决定着色器代码和常量范围。GPU 着色器采用[缓存优先的均衡准备方向](SHADER-BALANCED.md)，
+默认允许缺失时编译；文件设置和正常启动先准备标题，后台再处理最近状态、默认计算输入和共享清单。
+Android 默认 FP32 优先，保留 GPU 整数双精度选项。关闭运行时编译才启用严格完整准备门禁，部分预热不能伪造完成标记。
+
+| 着色器/管线模块 | 职责 |
+| --- | --- |
+| `shader_archive.hpp` / `shader_catalog.hpp` / `shader_material.hpp` | 有界读取原生目录、程序与材质关系；[关联审计](SHADER-ASSET-LINKS.md)使用同一解析路径 |
+| `shader_compiler.c` / `shader_interface.cpp` | `libshaderprepare.so` 编译插件，处理编译与接口特殊化；缓存命中无需打开编译器 |
+| `shaders.c` / `shader_cache_contract.cmake` | SPIR-V 内容键、压缩/字典缓存、稳定编译器身份、审核过的旧目录兼容 |
+| `shader_warm*` / `shader_prepare*` | 清单规划、单项请求复用、收据、队列和前后台/重启生命周期 |
+| `pipeline_state.c` / `pipeline_warm.c` / `pipeline_cache.c` | 正常与预热共用管线创建、真实状态记录和绑定设备身份的驱动缓存 |
+
+已有固定存档启动、缓存复用及独立 GPU 检查；全冷缓存、跨区域路线与全游戏画面尚未验收。
+旧全量展开的数量和存储测量保留在[历史准备记录](SHADER-PREPARATION.md)，不作为当前启动要求。
+
+支持 placed mapping 的驱动可让 guest heap 与 GPU 共享页面；不支持的路径保留复制和地址表，超出存储缓冲范围时使用窗口。
+`shared_memory.c` 为堆外 alias 资源提供实验性共享 backing；`buffer_copy.c` 为复制提供 GPU 排序和 CPU 访问保护，
+两项默认关闭。纹理布局转换和内存可见性仍各自处理；统一内存不等于可以省去所有复制或同步。
+这两个实验模块留在本机性能工作区，未随本次着色器提交合入；共用 CPU 写入失效通知已包含在提交中。
+默认开关、线程/锁和释放规则见 [项目规范](../Agent.md)，阶段状态见 [整理基线](PROJECT-BASELINE.md)。
 
 纹理路径处理 Tegra 排布、mip/layer、格式、CPU 上传和 GPU 所有权。颜色、深度、采样副本及不同分辨率目标
 需分别核对；同一 guest 地址也可能只是不同阶段的临时内存复用。当前并非完整 NVN 实现，缺口见 [状态](STATUS.md)。

@@ -46,6 +46,7 @@ bash android/build_totk.sh
 
 ## 文档与参与
 
+- [项目规范](Agent.md)：环境、Debug/Release 编译、配套部署、代码与协作规则的统一入口。
 - [文档索引](docs/README.md)：构建、架构、测试、已知问题及历史资料。
 - [贡献指南](CONTRIBUTING.md)：修改范围、验证要求和问题反馈。
 - [问题反馈](https://github.com/ccc007ccc/TOTKRecompAndroid/issues)：请附设备、驱动、复现步骤和日志。

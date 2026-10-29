@@ -4,7 +4,8 @@
 
 This branch targets TOTK Switch 1.4.3 on Android ARM64. Its direct upstream is
 [mamcjr/BOTWRecompAndroid](https://github.com/mamcjr/BOTWRecompAndroid).
-Read the [status](docs/en/STATUS.md), [architecture](docs/en/ARCHITECTURE.md) and [upstream notes](docs/en/UPSTREAM.md).
+Start with the [project conventions (Chinese)](Agent.md), then read the [status](docs/en/STATUS.md),
+[architecture](docs/en/ARCHITECTURE.md) and [upstream notes](docs/en/UPSTREAM.md).
 
 ## Contribution scope
 

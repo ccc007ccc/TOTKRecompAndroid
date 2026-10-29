@@ -38,8 +38,24 @@ Library ABI 2 checks all four full build IDs against ExeFS. Keep `runtime/game_p
 | android/ | APK, dependencies and NDK library builds |
 
 NVN 55.15 control blocks define shader code and constant ranges. Maxwell shaders become GLSL/SPIR-V.
-Turnip can map the guest heap as GPU memory; the proprietary Qualcomm path uses copies and address tables.
-Heaps beyond a storage-buffer range use windows.
+The [balanced preparation path (Chinese)](../SHADER-BALANCED.md) checks caches first and allows runtime misses to
+compile by default. Title preparation precedes background recent states, default compute inputs and the shared list.
+Android defaults to FP32-first with an integer double-emulation option. Only disabling runtime compilation enables
+the strict full-preparation gate; partial warming cannot claim full completion.
+
+The native archive/catalog/material readers are shared with audits. `shader_compiler.c` and `shader_interface.cpp`
+form the compiler plugin, while `shaders.c` and `shader_cache_contract.cmake` own the content cache and reviewed
+compatibility rules. `shader_warm*`/`shader_prepare*` handle requests, receipts, queues and lifecycle. Normal rendering
+and warming share `pipeline_state.c`; pipeline recipes and driver caches retain device identity.
+Fixed-save startup and independent GPU checks exist, with cold-cache, cross-region and full visual acceptance still pending.
+
+Drivers supporting placed mapping can share guest-heap pages with the GPU; the fallback uses copies and address
+tables. Heaps beyond a storage-buffer range use windows. `shared_memory.c` adds experimental alias-resource backing,
+and `buffer_copy.c` provides GPU copy ordering with CPU-access protection; both remain off by default.
+Texture conversion and memory visibility still need their own handling. See [project conventions](../../Agent.md)
+for defaults and thread/ownership rules and the [baseline](../PROJECT-BASELINE.md) for dated evidence.
+The alias-mapping and deferred-copy experiments remain in the local performance worktree and are excluded from
+this shader submission; shared CPU-write invalidation notifications are included.
 
 Texture handling covers Tegra layout, mips/layers, formats, CPU uploads and GPU ownership.
 Color, depth, sampled copies and differently sized targets must be checked separately; reused guest addresses can represent normal temporary storage reuse.

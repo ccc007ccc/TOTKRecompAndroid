@@ -24,6 +24,20 @@ BOTW version cases in the inherited RomFS suite do not establish TOTK resource c
 Run checks relevant to the change. APK commands are in [building](BUILD.md).
 The inherited `tools/test_lift.py` depends on macOS/ARM64 and was not run successfully on this x86_64 Linux development host.
 
+Shared-list parsing, deduplication, game/stage filtering and type preservation, plus cache-first runtime loading:
+
+```bash
+bash tools/test_shader_warm_list.sh
+bash tools/test_shader_warm_prepare.sh .work/shader-warm-check .work/totk-port/game/romfs.bin
+bash tools/test_shader_warm_background.sh .work/shader-background-check .work/totk-port/game/romfs.bin
+bash tools/test_shader_runtime.sh
+```
+
+The first command optionally takes an output directory and a local RomFS image to check the complete production inventory.
+The second compiles real title requests, disables compiler access, strictly reloads the cache, and checks numeric interfaces and linked varying masks.
+The background test covers lifecycle, recency, cancellation/profile changes and cache retention against real requests.
+See the [balanced preparation work](../SHADER-BALANCED.md). These checks do not establish full Android game startup or frame-time performance.
+
 ## Device evidence
 
 See [phone performance sessions](PHONE-PERFORMANCE.md) for direct save selection, automatic timed 60-target measurements
@@ -162,9 +176,11 @@ ordinary color fragments, caching and repeated processing:
 
 ```bash
 mkdir -p .work/totk-port/shader-depth-tests
+sh tools/build_host_shader_compiler.sh .work/totk-port/shader-depth-tests
+export LARECOMP_NATIVE_LIB_DIR="$PWD/.work/totk-port/shader-depth-tests"
 clang -O1 -g -fsanitize=address,undefined -ffunction-sections -fdata-sections \
   -Iandroid/deps/out/include tools/test_shader_depth_precision.c -Wl,--gc-sections \
-  -lshaderc_shared -lpthread -lvulkan -o .work/totk-port/shader-depth-tests/test-depth
+  -lzstd -ldl -lpthread -lvulkan -o .work/totk-port/shader-depth-tests/test-depth
 .work/totk-port/shader-depth-tests/test-depth "$PWD/.work/totk-port/shader-depth-tests"
 for s in .work/totk-port/shader-depth-tests/*.spv; do spirv-val --target-env vulkan1.3 "$s"; done
 ```
@@ -220,7 +236,7 @@ bash gradlew --no-daemon --max-workers=4 assembleDebug assembleDebugAndroidTest
 adb -s "$ANDROID_SERIAL" install --streaming -r app/build/outputs/apk/debug/app-debug.apk
 adb -s "$ANDROID_SERIAL" install --streaming -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
 adb -s "$ANDROID_SERIAL" shell am instrument -w \
-  com.totkrecomp.android.test/com.botwrecompandroid.RuntimeErrorDialogCheck </dev/null
+  com.totkrecomp.android.debug.test/com.botwrecompandroid.RuntimeErrorDialogCheck </dev/null
 ```
 
 The output must include `PASS: Copy preserved the dialog`; the adb exit code alone is insufficient.
@@ -239,3 +255,25 @@ clang -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Wno-format \
 Unconnected voices may be intentionally disabled by the game, so they are not automatically missing sounds.
 `LARECOMP_AUDIO_DUMP=1` saves update snapshots, including the initial full configuration.
 `LARECOMP_AUDIO_WAV=<path inside the app data directory>` records audren's float stereo output; this is not a measure of complete game-audio coverage.
+
+The on-device preparation path is incomplete: all 8,697 inputs now translate in both FP32-preferred and integer-binary64 modes,
+but exhaustive state-variant preparation remains impractically large and has not completed.
+Its strict readiness gate prevents gameplay until every shader variant is prepared.
+Android defaults to experimental native FP32 arithmetic for nearest-even DADD/DMUL/DFMA; the Prelaunch shader-precision
+switch restores GPU integer binary64 emulation and invalidates preparation readiness.
+Both modes pass production SPIR-V validation for the 30 formerly failing double-precision programs.
+`tools/test_shader_fp32.py` covers 92 synthetic shaders and 2,600,960 normal-range conversion cases on the CPU.
+These checks do not prove GPU binary64 numerical accuracy, visual correctness or performance improvements.
+See [the preparation audit](../SHADER-PREPARATION.md) for scope and validation limits.
+
+The [asset linkage audit](../SHADER-ASSET-LINKS.md) associates all 8,697 shader inputs with file-defined programs
+and matches static options for 54,541 materials. `tools/test_shader_catalog.cpp` checks bounded parsing,
+program stage links, option keys/defaults, vertex mappings and byte-for-byte agreement with the original inventory.
+Host ASan/UBSan and the same native checks on PJZ110 pass. File-defined candidates are not a complete runtime-state set.
+
+The production planner now uses those interfaces, conservative unknown-input choices and file-defined stage pairs:
+694,772 planned entries versus 318,627,294 previously. `tools/audit_shader_variants.cpp` reproduces the plan natively.
+Variant-rule and queue tests cover default input types, unknown formats, deduplication, errors and compiler-session closure.
+736 real shader combinations pass SPIR-V validation, including modules loaded from the production compressed cache.
+Preparation defaults to one worker per logical CPU core, with a retained compiler per worker; the draw path only decompresses and validates cached bytes.
+This is not a completed full-library preparation or gameplay validation.

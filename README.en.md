@@ -50,6 +50,7 @@ Some inherited UI and tools still need TOTK adaptation; their presence does not 
 
 ## Documentation and contributions
 
+- [Project conventions, Chinese](Agent.md): environment, build profiles, deployment and code rules.
 - [English documentation](docs/en/README.md)
 - [Contribution guide](CONTRIBUTING.en.md)
 - [Issue tracker](https://github.com/ccc007ccc/TOTKRecompAndroid/issues): include device, driver, reproduction steps and logs.

@@ -1,18 +1,26 @@
 # 手机性能测试会话
 
+编译档位与默认开关见 [项目规范](../Agent.md)。本页保留分阶段测量；共享映射/异步复制的后续实现状态见
+[整理基线](PROJECT-BASELINE.md)，较早章节的“尚未实现”只描述当时版本。
+本次着色器提交保留通用诊断/预热对照入口；后文资源分类复制计数、shared-alias/async-copy 的
+实现与专项测试仍属于本机性能工作区，不随本次提交发布。
+
 常规测试使用 `benchmark`：自动加载独立存档，以 **60 FPS 目标**连续测量指定时长，然后关闭游戏。默认测量15秒；加载完成前的时间不计入结果。过程不暂停、不请求截图，也不需要逐项确认。旧的暂停/定帧数会话保留给显式诊断使用。
 
 指定存档入口已在一加 13 / Adreno 830 上实测：不发送按键，直接读入 TotK 1.4.3 的 slot_00 空岛悬崖存档。历史 O0 库缓存启动约45–49秒，O1约30–38秒，全O3/8 Elite约31秒；这些是加载耗时，不是帧率收益。
 
 ## 独立测试包
 
-在 `dev` 中 source 主工作区的 `android/dev_env.sh`，进入本分支 `android/botwrecompandroid` 后运行：
+在项目根目录构建与现有 O3/8 Elite 游戏库配套的 Release 测试包：
 
 ```sh
-bash gradlew --offline -PperformanceTest=true assembleDebug
+bash android/build_totk.sh release --profile snapdragon-8elite --perftest
 ```
 
-安装产物为 `com.totkrecomp.android.perftest`（TOTK Performance Test），可与普通应用共存。不传属性则构建普通包。独立包需要自己的游戏资料、相同驱动和图形设置，使用玩家自己的文件导入或复制一次即可。后续测试只安装、启动、停止这个包，避免另一项任务更新普通包而中断测试。不要使用未指定设备的 ADB 命令。
+产物在 `.work/totk-port/packages/release-snapdragon-8elite-perftest/`，包名 `com.totkrecomp.android.perftest`，可与普通应用共存。
+Release 测试包仍允许 `run-as`；不能因需要调试权限改用不匹配的 Debug/dev。
+独立包需要自己的游戏资料、相同驱动和图形设置，使用玩家自己的文件导入或复制一次即可。
+后续测试只安装、启动、停止这个包。不要使用未指定设备的 ADB 命令。
 
 ## 指定存档启动
 
@@ -30,6 +38,18 @@ bash gradlew --offline -PperformanceTest=true assembleDebug
 运行时使用既有连续90帧场景G-buffer/绘制量条件开始计时，当前仍是启发式就绪判定，并非游戏内部“可操作”标志。计时结束时原子写入 `sample-0001.json` 和最终状态后请求进程退出；加载超过120秒、应用进入后台时也结束。渲染停止出帧时，事件线程仍可到期结束，未完成帧的等待计入总时长。脚本收集结果、日志、温度和电池状态，并在异常或进程未自行退出时关闭测试包。主机断连后运行时计时仍继续。
 
 `launch.json` 记录包/库SHA256、启动环境及实际退出方；结果记录目标档位、实际FPS、总时长和帧耗时分位数。常规测试不启用逐帧诊断计数、抓帧或人工预热/暂停流程。30/45/60/120仍是游戏可选档位，性能测试只使用60。
+
+`--settings-seed <手机上的绝对路径>` 会把可读设置复制到本次私有会话，使用 `LARECOMP_SETTINGS` 启动，
+并记录副本路径和初始 SHA-256。应用保存驱动选项时只影响该副本。优先使用测试包私有目录中的种子；
+Android 的 `run-as` 不一定能读取应用在共享存储里的设置。
+`--shader-warm on|off` 控制自动 SPIR-V 和管线准备；`--pipeline-warm on|off` 单独控制管线准备。
+未传参数时沿用运行时默认值。对照需固定 APK、游戏库、设置、存档和目标档位，同时记录温度。
+定时退出在 UI 线程停止准备任务、刷新最近状态并输出管线复用统计，然后保存缓存并退出。
+
+`benchmark --apk <本地确切 APK>` 会在设备锁内校验包名并安装，再记录实际安装包的 SHA-256。
+同一工作区的自动启动按设备序列号持有进程锁，另一控制器会在执行ADB前退出，避免互相force-stop。
+锁文件存在不表示仍有测试运行，进程结束会自动释放锁。直接执行ADB安装或手动停止不受该锁保护；
+安装前仍需检查目标包进程，避免中断另一项测量。其他工作区不共享这把锁；`start` 返回后也不继续持锁。
 
 ## 显式交互诊断
 
@@ -90,7 +110,7 @@ PHONE_TEST=("$PYTHON" tools/phone_test_session.py --serial 192.168.0.12:45117 \
 
 电池温度旧版 29.3–29.5°C，当前版 28.7–29.5°C，thermal status 均为 0。合并使用总帧数/总耗时；保留波动较大的第三次样本，没有择优筛选。约 -0.5% 的差异没有在这个场景复现明显回退，但样本短、只有一个视角，不能排除其他场景或实际抓帧时的损耗。
 
-已有 run56 显示资源绑定、常量复制、顶点与纹理处理有明显成本，其中常量复制约 6.9 ms/帧；约 1.4 GiB/两秒的复制量主要是常量缓冲，不是纹理上传。最新单独的 simpleperf 渲染线程样本中，`memmove` 14.41%、`upload_texture` 13.81%、`getenv` 11.71%；这些是该线程 CPU 周期采样占比，不能直接换算成 FPS 增益。采集命令必须使用 `simpleperf record --in-app`。
+已有 run56 显示资源绑定、常量处理、顶点与纹理处理有明显成本，其中常量处理约 6.9 ms/帧。旧日志约 1.4 GiB/两秒的 `copied` 计数来自共用的 `guest_copy`，也包含顶点流和 shader constants，不能直接认定为常量缓冲；2026-10-29 的分类实测见下节。单独的 simpleperf 渲染线程样本中，`memmove` 14.41%、`upload_texture` 13.81%、`getenv` 11.71%；这些是该线程 CPU 周期采样占比，不能直接换算成 FPS 增益。采集命令必须使用 `simpleperf record --in-app`。
 
 本分支让 `vertex_debug_capturing()` 在普通帧提前返回，省掉每次顶点常量绑定的环境查询；调试帧仍按原设置执行。改动后单独 CPU 复测有 1139 个渲染线程样本，`getenv` 降至 0.10%，`memmove` 15.56%、`upload_texture` 15.70%。不带 simpleperf 的三轮为 18.302、19.332、19.693 FPS，尚未证明稳定的 FPS 提升。不同轮的采样占比不是同等幅度的总 CPU 耗时变化。
 
@@ -125,6 +145,64 @@ PHONE_TEST=("$PYTHON" tools/phone_test_session.py --serial 192.168.0.12:45117 \
 两组温度与充电条件不同，不能据此判定O3带来提升或回退。按用户最新要求不再重跑这组构建对照，保留原始结果与条件差异。O1的30/45/120目标短测约27.78/27.61/27.46 FPS，只证明低吞吐场景下目标与计时路径可运行，没有证明稳定超过30帧或120帧玩法。
 
 全O3库来自 `aaf348b`，1755个生成单元均为 `-O3 -flto=thin -fno-fast-math`，没有O0回退；8 Elite使用 `-march=armv8.7-a+crypto+fp16 -mtune=oryon-1`。游戏库264946296字节，SHA256 `5f3156b208076afa8b07d831d538977e643083ed6014bfd8711760d5137f087c`，GAMELIB_ID `993c0a5c82dc5099`；当时APK SHA256 `ac037f1031d1e42a171182d4b434784d3750351f6f5fbda6f34973b9ffb9c457`。后续只改运行时的修正可复用配套游戏库，不需要重编整库。
+
+## 2026-10-29：统一内存与当前瓶颈
+
+当前优先检查可消除的资源复制和同步等待。最新结果显示 CPU 渲染线程与 GPU 都有显著成本，
+还不能把问题归为游戏 CPU 逻辑慢或 GPU 算力不足中的某一种；GPU 提交时长也包含其内部同步与内存访问成本。
+
+PJZ110 / Turnip 的启动日志先出现 `no heap import`，随后实际通过 `VK_EXT_map_memory_placed` 将 **2120 MiB**
+游戏堆映射为 GPU 内存，CPU/GPU 访问同一组页面。实际内存类型为 `0xf`（device-local、host-visible、coherent、cached）。
+因此启动早期的日志不能作为整场仍在 CPU 复制模式的证据。超过 2047 MiB storage descriptor 范围的部分使用窗口访问。
+
+一次 60 档自动诊断在同一进程每 60 帧交替普通 UBO 复制与已有的直接读取路径，30 秒后自行退出：
+
+| 稳定日志行均值 | 复制 UBO | 共享 UBO 直读 |
+| --- | ---: | ---: |
+| 整帧周期 | 39.84 ms | 39.39 ms |
+| 命令执行（含内部等待） | 24.45 ms | 23.95 ms |
+| 渲染线程处理（含等待） | 25.64 ms | 25.17 ms |
+| GPU 提交执行时间 | 26.00 ms | 25.77 ms |
+
+去掉加载阶段，并去掉每次切换后前五条 pace 日志，保留 360 / 330 条稳定记录。
+这是短时诊断，不构成约 0.5 ms 收益可重复的证明，也没有完成直接 UBO 路径的画面/同步验收，默认不启用。
+普通 `benchmark` 仍不带这些计数，避免把诊断开销混进常规 FPS 样本。
+
+随后将 `guest_copy` 的实际复制字节拆为普通 uniform、shader constants 和 vertex 三类。
+新 APK 在独立 15 秒测试内的六个完整统计区间（289 帧、约 12.2 秒）得到：
+
+| 复制类型 | 每帧实际复制 | 所在范围 |
+| --- | ---: | --- |
+| 顶点流 | **19.09 MiB** | 全部在共享游戏堆范围之外 |
+| 普通常量缓冲 | 2.58 MiB | 全部在堆内 |
+| shader constants | 0.54 MiB | 主要在堆外 |
+
+顶点流占上述三类实际复制字节的 **85.94%**。这是共用 guest-copy 的细分，不包含所有纹理转换、索引展开或 GPU 内部复制。
+同一区间渲染命令执行约 26.09 ms/帧、GPU 提交约 26.85 ms/帧；其中 `buffer -> buffer copy` 的强制 GPU 等待约 **4.01 ms/帧**。
+CPU/GPU 时间有重叠，不能相加；渲染命令执行是墙钟时间，不能冒充纯 CPU 核心执行时间。
+
+因此优先方向是把**堆外顶点资源**纳入 GPU 可见的共享分配和绑定路径。目前 `guest_direct` 只覆盖已有的 `gmem_buf`，
+堆外资源会逐次进入 staging ring。需继续确认实际资源地址、分配入口及生命周期；`physical_memory` 的 alias 区分配是待核对入口，
+尚未证明全部顶点流来自该入口。不能简单把指针范围检查删除，因为普通 CPU 虚拟地址并不自动对应一个已注册的 Vulkan buffer。
+
+第二个方向是把 buffer-copy 的立即 `renderer_flush` 改为受资源依赖约束的处理，尽量留在 GPU 队列中，
+真正发生 CPU 读取时再等待。不同地址间的游戏语义复制仍需要保留；同一物理内存也不能取消写入顺序和在途读取保护。
+纹理另有 Tegra 布局转换，不能直接套用线性顶点 buffer 的同一方案。
+
+复现命令仍自动读档、60 档、定时退出，无暂停/截图：
+
+```bash
+# source android/dev_env.sh 后，使用前文相同 serial/package/game-library 参数
+"$PYTHON" tools/phone_test_session.py --serial 192.168.0.12:45117 \
+  --package com.totkrecomp.android.perftest --output .work/totk-port/memory-profile \
+  benchmark --seconds 15 --profile
+# 比较已有 UBO 直读时，将 --profile 换为 --compare-ubo 60；该项仅作诊断。
+```
+
+`launch.json` 保存诊断设置和 APK/library 身份。`LARECOMP_LOG_CBUF_BYTES` 现在额外输出 `[copy-bytes]` 的三类实际复制及堆外字节。
+测试脚本六项模拟设备检查、上传缓存 helper 检查和新 APK 构建通过；两次手机会话都由运行时按时退出。
+证据目录 `.work/totk-port/memory-bottleneck-20261029/` 的 `summary.json`、`classified-blocks.json` 和两份 phone/classified 日志。
+两次 APK 身份不同，不跨两次测试比较 FPS；新版本只是补齐诊断，还未实现堆外资源零拷贝。
 
 ## 离线验证
 
