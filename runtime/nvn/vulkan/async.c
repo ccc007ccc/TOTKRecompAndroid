@@ -26,6 +26,7 @@
 #include "../../rt.h"
 #include "../../test_session.h"
 #include "vk.h"
+#include "timing_trace.h"
 
 enum { REQ_EXEC, REQ_PRESENT, REQ_FENCE, REQ_MEMORY_WRITE, REQ_CALL };
 typedef struct { int type; uint64_t a; void *p; uint64_t id, b; } Req;
@@ -142,11 +143,13 @@ static uint64_t push(int type, uint64_t a, void *p, uint64_t b) {
     }
     if (q_tail - q_head >= QN || (type == REQ_PRESENT && q_presents >= ahead)) {
         pthread_mutex_unlock(&q_lock);
+        uint64_t wait_start = vk_timing_trace_on() ? plat_now_ns() : 0;
         kernel_blocking_begin();
         pthread_mutex_lock(&q_lock);
         while (q_tail - q_head >= QN || (type == REQ_PRESENT && q_presents >= ahead)) pthread_cond_wait(&q_less, &q_lock);
         pthread_mutex_unlock(&q_lock);
         kernel_blocking_end();
+        if (wait_start) vk_timing_trace_wait(VK_TIMING_QUEUE, plat_now_ns() - wait_start);
         pthread_mutex_lock(&q_lock);
     }
     uint64_t id = ++q_tail;  // (ids 1, 2, ...: the request at index id - 1)
@@ -160,18 +163,22 @@ static uint64_t push(int type, uint64_t a, void *p, uint64_t b) {
 // Until the render thread has finished request `id` (0: nothing to wait for).
 void vk_async_wait_id(uint64_t id) {
     if (!id || !started || vk_async_is_render_thread()) return;
+    uint64_t wait_start = vk_timing_trace_on() ? plat_now_ns() : 0;
     pthread_mutex_lock(&q_lock);
     while (q_done < id) pthread_cond_wait(&q_less, &q_lock);
     pthread_mutex_unlock(&q_lock);
+    if (wait_start) vk_timing_trace_wait(VK_TIMING_TRANSLATION, plat_now_ns() - wait_start);
 }
 
 // Until every request queued so far has run (the render thread is idle after it).
 void vk_async_drain(void) {
     if (!started || vk_async_is_render_thread()) return;
+    uint64_t wait_start = vk_timing_trace_on() ? plat_now_ns() : 0;
     pthread_mutex_lock(&q_lock);
     uint64_t id = q_tail;
     while (q_done < id) pthread_cond_wait(&q_less, &q_lock);
     pthread_mutex_unlock(&q_lock);
+    if (wait_start) vk_timing_trace_wait(VK_TIMING_DRAIN, plat_now_ns() - wait_start);
 }
 
 // The fences a command list signals (CMD_FENCE_SYNC, in it or in the lists it calls) get the list's request: a wait
@@ -275,11 +282,19 @@ void vk_async_memory_written(uint64_t addr, uint64_t size) {
     push(REQ_MEMORY_WRITE, addr, NULL, size);
     pthread_mutex_unlock(&p_lock);
 }
-void vk_async_call_sync(void (*call)(void *), void *arg) {
-    if (!vk_async_on() || vk_async_is_render_thread()) { call(arg); return; }
+static uint64_t enqueue_call(void (*call)(void *), void *arg) {
     pthread_mutex_lock(&p_lock);
     uint64_t id = push(REQ_CALL, (uintptr_t)call, arg, 0);
     pthread_mutex_unlock(&p_lock);
+    return id;
+}
+void vk_async_call(void (*call)(void *), void *arg) {
+    if (!vk_async_on() || vk_async_is_render_thread()) { call(arg); return; }
+    enqueue_call(call, arg);
+}
+void vk_async_call_sync(void (*call)(void *), void *arg) {
+    if (!vk_async_on() || vk_async_is_render_thread()) { call(arg); return; }
+    uint64_t id = enqueue_call(call, arg);
     kernel_blocking_begin();
     vk_async_wait_id(id);
     kernel_blocking_end();

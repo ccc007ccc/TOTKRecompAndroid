@@ -114,7 +114,8 @@ void vk_timing_trace_frame(uint64_t frame) {
     LOG("[gpu-fences] frame %llu waits %llu clamped-to-submitted %llu\n", (unsigned long long)frame,
         (unsigned long long)atomic_exchange_explicit(&fence_calls, 0, memory_order_relaxed),
         (unsigned long long)atomic_exchange_explicit(&fence_clamped, 0, memory_order_relaxed));
-    static const char *names[VK_TIMING_WAITS] = {"timeline", "slot", "acquire", "present", "submit", "poll"};
+    static const char *names[VK_TIMING_WAITS] = {"timeline", "slot", "acquire", "present", "submit", "poll",
+        "frame-limit", "translation", "drain", "queue", "texture-unchanged", "texture-drain", "sampler-drain", "texture-queued"};
     for (int i = 0; i < VK_TIMING_WAITS; i++) {
         uint64_t ns = atomic_exchange_explicit(&waits[i].ns, 0, memory_order_relaxed);
         uint64_t n = atomic_exchange_explicit(&waits[i].n, 0, memory_order_relaxed);

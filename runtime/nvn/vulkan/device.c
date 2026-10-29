@@ -1823,6 +1823,13 @@ bool vk_driver_is_turnip(void) {
     }
     return t > 0;
 }
+#ifdef __ANDROID__
+bool vk_deferred_resources_default(void) {
+    // The two paths remove complementary waits. Keep the established behavior
+    // on other games/GPUs/drivers until that combination is measured there.
+    return g_game_version == 143 && vk_driver_is_turnip() && vk_adreno_8xx(g_vk.props.deviceName);
+}
+#endif
 #endif
 
 void backend_init(void) {
@@ -1836,6 +1843,7 @@ void backend_reset(void) {
     if (!g_vk.dev) return;
 #ifdef __ANDROID__
     vk_async_drain();
+    nvn_texture_updates_collect();
 #endif
     extern void vk_shader_jobs_drain(void);
     extern void vk_pipeline_warm_stop(void);

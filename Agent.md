@@ -17,7 +17,8 @@
 - 规范整理不自动续跑历史优化、整库编译或实机测量任务。当前要求不包含额外代理并行工作。
 - 两个 2026-10-29 对话的范围、结果和未完成项见 [项目整理基线](docs/PROJECT-BASELINE.md)。
   着色器链路和项目规范已提交；后续收尾接入堆外共享映射、异步 buffer-copy 及专项测试，
-  两个实验开关仍默认关闭。收尾范围与验收见 [收尾记录](docs/PROJECT-CLOSEOUT.md)。
+  当时两个开关默认关闭；后续 GPU 复制与纹理发布的组合默认值见第 7 节及第四轮记录。
+  收尾范围与验收见 [收尾记录](docs/PROJECT-CLOSEOUT.md)。
 
 ## 2. 环境与工具链
 
@@ -193,6 +194,7 @@ TOTK_STAGE=.work/totk-port/packages/debug-dev
 | 驱动常量 | `"$PYTHON" tools/test_shader_driver_constants.py`（点尺寸上限、阶段隔离、存储表和派发尺寸） |
 | 程序/管线索引容量、重启 | `"$PYTHON" tools/test_shader_program_cache.py`；`"$PYTHON" tools/test_shader_lifetimes.py` |
 | 共享映射、异步复制 | `bash tools/test_shared_memory.sh`；`bash tools/test_buffer_copy.sh` |
+| 纹理描述符注册/队列 | `bash tools/test_texture_registration.sh`（含真实请求队列、引用寿命和对象锁回归） |
 | 清单/准备/生命周期 | `bash tools/test_shader_warm_list.sh`；`bash tools/test_shader_warm_prepare.sh`；`bash tools/test_shader_warm_background.sh` |
 | 管线 | `bash tools/test_pipeline_cache.sh`；`bash tools/test_pipeline_warm.sh`；GPU：`bash tools/test_vk_pipeline_warm.sh` |
 | Eden 对应运行时路径 | `bash tools/test_eden_runtime.sh`（含上传缓存、描述符、请求队列与编译回退） |
@@ -255,9 +257,18 @@ CPU 渲染墙钟含等待，GPU 时间可能与它重叠；复制字节占比不
 | 顶点采样量化 | 关 | `LARECOMP_VS_SNAP=1`，`exec.c`；不能标成已修复草消失 |
 | 长绘制阶段拆分 | 按驱动 | Turnip + Adreno 8xx 为 1 ms，其他非高通原厂驱动为 3 ms，高通原厂关闭；`LARECOMP_VK_SPLIT_US` / `exec.c`，仍保留阶段边界提交与同步 |
 
-`LARECOMP_VK_SHARED_ALIAS` 与 `LARECOMP_VK_ASYNC_BUFFER_COPY` 默认关闭，
-分别对应 `shared_memory.c`、`buffer_copy.c`，通过手机控制器的 `--shared-alias` / `--async-buffer-copy` 验证。
+`LARECOMP_VK_SHARED_ALIAS` 默认关闭，对应 `shared_memory.c`，通过 `--shared-alias` 验证。
 共享映射最多保留 512 MiB backing，并保留至少一半驱动分配槽；超出时新范围使用原 CPU 路径。
+
+完全相同的纹理描述符默认复用；同步发布时 `LARECOMP_TEXTURE_REUSE=0` 可对照相同注册仍排空的旧行为。
+**TotK 1.4.3 + Turnip + Adreno 8xx** 默认同时开启纹理描述符排队发布和异步 GPU buffer-copy；
+其他游戏/GPU/驱动保留关闭，条件统一由 `vk_deferred_resources_default()` 判断。
+`LARECOMP_TEXTURE_QUEUE` / `--texture-updates queued|sync` 与 `LARECOMP_VK_ASYNC_BUFFER_COPY` /
+`--async-buffer-copy on|off` 可分别覆盖。本轮同步对照须同时指定 `--texture-updates sync --async-buffer-copy off`；
+若还要恢复重复注册的旧排空行为，再加 `--texture-reuse off`，该开关不改变队列模式。
+保留新纹理预留引用、CPU 读写保护、快照及不支持映射的正确回退，不能只启用 GPU 复制而删除它的同步。
+`--game-dynres off` 只用于固定最高游戏分辨率的独立对照，
+常规测试仍默认 `on`；不同负载、诊断模式和开关的结果分别记录，见 [第四轮性能记录](docs/PERFORMANCE-DESCRIPTORS-20261029.md)。
 
 运行时编译关闭后使用严格完整准备门禁；部分预热清单不能满足该门禁。
 后台顺序是最近使用状态、当前版本 257 个计算输入的默认状态、共享清单；不恢复旧百万级全变体任务。
@@ -319,6 +330,8 @@ UI 只查询收据身份，独立可取消任务逐项检查模块和字典；�
   复制完成不能解除后续 GPU 读取的 CPU 写入保护。纹理句柄等 CPU 读取单独预检查，
   容量不足回退 CPU 路径，描述符绑定期间不得等待。命令热路径的 pending 判断不查询驱动完成序号。
 - 禁止形成“对象锁 → 等渲染队列 → 渲染线程再取对象锁”的环；纹理通知沿用渲染线程登记表和已有通知 API。
+- 排队发布纹理描述符时复制视图值并预留新纹理引用。渲染回调只更新槽位和完成链表，不取 NVN 对象锁；
+  游戏线程在锁外收集待释放引用。池销毁/重启先排空并收集，不能让引用寿命取决于调用者的临时视图或对象是否仍存在。
 - 停止/重启先停止提交，再排空翻译以及它可能新增的编译任务，最后更换 guest 内存。
   先提交并完成尚未提交的 command buffer，再销毁管线、预热产物、程序、布局和 ShaderInfo；清空所有快捷缓存。
   单次游戏状态通过 `RT_ON_RESET` 和已有后端重置入口清理；取消后 join 再释放 worker 依赖。

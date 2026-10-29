@@ -38,6 +38,9 @@ def main():
                             help='Enable experimental submit-time buffer snapshots for a separate comparison')
         launch.add_argument('--shared-alias',choices=['on','off'],help='Enable/disable GPU-visible resource mappings for a controlled comparison')
         launch.add_argument('--async-buffer-copy',choices=['on','off'],help='Enable/disable deferred GPU buffer copies for a controlled comparison')
+        launch.add_argument('--texture-reuse',choices=['on','off'],help='Skip identical registrations in sync mode (default on); with --texture-updates sync, off restores their old queue drain')
+        launch.add_argument('--texture-updates',choices=['queued','sync'],help='Queue captured texture descriptor updates, or wait for the renderer before publishing them')
+        launch.add_argument('--game-dynres',choices=['on','off'],default='on',help='Game dynamic resolution (default on); off holds its highest resolution for controlled workload comparisons')
         launch.add_argument('--render-split-us',type=int,help='Long-pass submission interval, 0..20000 microseconds; 0 disables splitting')
     benchmark.add_argument('--save-slot',type=int,choices=range(6),default=0)
     benchmark.add_argument('--seconds',type=float,default=15,help='Measurement duration after loading, 1..60 seconds (default 15)')
@@ -152,7 +155,7 @@ def main():
         if not timed:private('rm','-f',remote+'/command',remote+'/status.json')
         env=['LARECOMP_NO_LAUNCHER=1','LARECOMP_TEST_SESSION='+remote,
              'LARECOMP_LOG_FILE='+remote+'/runtime.log','LARECOMP_DISABLE_GPU_CAPTURE=1',
-             'LARECOMP_NO_SCALE=1','LARECOMP_GAME_DYNRES=1']
+             'LARECOMP_NO_SCALE=1','LARECOMP_GAME_DYNRES='+('1' if args.game_dynres=='on' else '0')]
         if timed:env+=['LARECOMP_TEST_DURATION_SECONDS='+str(args.seconds),'LARECOMP_FPS=60','LARECOMP_NO_USER_INPUT=1']
         else:env+=['LARECOMP_VK_PROF=1','LARECOMP_LOG_CBUF_BYTES=1','LARECOMP_TEXTURE_TRACE=1','LARECOMP_LOG_FRAMEPACE=120']
         if timed and args.profile:
@@ -164,6 +167,8 @@ def main():
         if args.submit_snapshot:env+=['LARECOMP_VK_SUBMIT_SNAPSHOT=1','LARECOMP_LOG_SUBMIT_SNAPSHOT=1']
         if args.shared_alias is not None:env+=['LARECOMP_VK_SHARED_ALIAS='+('1' if args.shared_alias=='on' else '0')]
         if args.async_buffer_copy is not None:env+=['LARECOMP_VK_ASYNC_BUFFER_COPY='+('1' if args.async_buffer_copy=='on' else '0')]
+        if args.texture_reuse is not None:env+=['LARECOMP_TEXTURE_REUSE='+('1' if args.texture_reuse=='on' else '0')]
+        if args.texture_updates is not None:env+=['LARECOMP_TEXTURE_QUEUE='+('1' if args.texture_updates=='queued' else '0')]
         if args.render_split_us is not None:env+=['LARECOMP_VK_SPLIT_US='+str(args.render_split_us)]
         if args.shader_warm is not None:env+=['LARECOMP_SHADER_WARM='+('1' if args.shader_warm=='on' else '0')]
         if args.pipeline_warm is not None:env+=['LARECOMP_PIPELINE_WARM='+('1' if args.pipeline_warm=='on' else '0')]
@@ -199,6 +204,9 @@ def main():
                   'submit_snapshot':args.submit_snapshot,
                   'shared_alias':args.shared_alias,
                   'async_buffer_copy':args.async_buffer_copy,
+                  'texture_reuse':args.texture_reuse,
+                  'texture_updates':args.texture_updates,
+                  'game_dynres':args.game_dynres,
                   'render_split_us':args.render_split_us,
                   'profiling':args.profile if timed else True,
                   'gpu_profile_frame':args.gpu_profile_frame if timed else None,

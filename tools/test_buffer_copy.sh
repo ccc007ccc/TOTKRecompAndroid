@@ -9,6 +9,8 @@ ${CC:-clang} -D__ANDROID__ -O1 -g -fsanitize=address,undefined -ffunction-sectio
     -Wl,--gc-sections -o "$COPY_TEST_OUT/test-buffer-copy"
 "$COPY_TEST_OUT/test-buffer-copy" off
 "$COPY_TEST_OUT/test-buffer-copy"
+"$COPY_TEST_OUT/test-buffer-copy" default-on
+"$COPY_TEST_OUT/test-buffer-copy" default-off
 ${PYTHON:-python3} tools/test_buffer_copy_commands.py "$COPY_TEST_OUT"
 ${PYTHON:-python3} tools/test_buffer_copy_uniforms.py "$COPY_TEST_OUT"
 ${PYTHON:-python3} tools/test_texture_notifications.py "$COPY_TEST_OUT"

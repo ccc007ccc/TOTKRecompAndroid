@@ -36,7 +36,7 @@ void vk_buffer_copy_trace_use(unsigned kind, int stage, int slot, uint64_t code,
 }
 static bool enabled(void) {
     static int on = -1;
-    if (on < 0) { const char *value = getenv("LARECOMP_VK_ASYNC_BUFFER_COPY"); on = value && atoi(value) != 0; }
+    if (on < 0) { const char *value = getenv("LARECOMP_VK_ASYNC_BUFFER_COPY"); on = value ? atoi(value) != 0 : vk_deferred_resources_default(); }
     return on != 0;
 }
 static void retire(uint64_t done) {

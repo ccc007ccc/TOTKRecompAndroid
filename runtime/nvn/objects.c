@@ -9,7 +9,9 @@
 #include "nvn.h"
 #ifdef __ANDROID__
 #include <pthread.h>
+#include <stdatomic.h>
 #include "submit_snapshot.h"
+#include "vulkan/timing_trace.h"
 #endif
 
 void renderer_sync(void);
@@ -1213,6 +1215,7 @@ NVN(nvnTexturePoolFinalize) {
     if (!d) return;
 #ifdef __ANDROID__
     vk_async_drain();
+    nvn_texture_updates_collect();
 #endif
     NvnTexEntry *entries = d->entries;
     for (int i = 0; i < d->count; i++) {
@@ -1230,16 +1233,117 @@ NVN(nvnTexturePoolSetDebugLabel) { (void)c; }
 NVN(nvnTexturePoolGetMemoryPool) { RET(G(uint64_t, A(0), 8)); }
 NVN(nvnTexturePoolGetMemoryOffset) { RET(G(uint64_t, A(0), 16)); }
 NVN(nvnTexturePoolGetSize) { RET(G(uint32_t, A(0), 24)); }
+#ifdef __ANDROID__
+// The render queue owns descriptor publication. A pending update pins its new
+// texture even if the guest finalizes that object before the queue reaches it.
+typedef struct TextureUpdate {
+    NvnTexEntry *slot;
+    NvnTexEntry value;
+    NvnTexture *release;
+    bool defer;
+    struct TextureUpdate *next;
+} TextureUpdate;
+static _Atomic(TextureUpdate *) texture_updates_done;
+static bool texture_entry_equal(const NvnTexEntry *a, const NvnTexEntry *b) {
+    return a->tex == b->tex && a->has_view == b->has_view &&
+           (!a->has_view || !memcmp(&a->view, &b->view, sizeof a->view));
+}
+void nvn_texture_updates_collect(void) {
+    // Game thread only, outside g_live_lock. Destruction may drain the render
+    // queue; render callbacks must never acquire that same registry lock.
+    TextureUpdate *update = atomic_exchange_explicit(&texture_updates_done, NULL, memory_order_acquire);
+    while (update) {
+        TextureUpdate *next = update->next;
+        if (update->defer) texture_retire(update->release);
+        else {
+            pthread_mutex_lock(&g_live_lock);
+            texture_release(update->release);
+            pthread_mutex_unlock(&g_live_lock);
+        }
+        free(update); update = next;
+    }
+}
+RT_ON_RESET(texture_updates_reset) {
+    // Backend reset drained the queue; texture reset separately frees all
+    // objects. Free packets without depending on reset-hook ordering.
+    TextureUpdate *update = atomic_exchange_explicit(&texture_updates_done, NULL, memory_order_acquire);
+    while (update) { TextureUpdate *next = update->next; free(update); update = next; }
+}
+static void apply_texture_update(void *arg) {
+    TextureUpdate *update = arg;
+    NvnTexEntry *slot = update->slot;
+    NvnTexture *old = slot->tex, *next = update->value.tex;
+    bool same = texture_entry_equal(slot, &update->value);
+    if (same) vk_timing_trace_wait(VK_TIMING_TEXTURE_UNCHANGED, 0);
+    else *slot = update->value;
+    // Transfer the reserved reference into a changed slot. If the texture was
+    // already there, its existing slot reference remains and the reserve goes.
+    update->release = old == next ? next : old;
+    update->defer = old != next;
+    if (!update->release) { free(update); return; }
+    update->next = atomic_load_explicit(&texture_updates_done, memory_order_relaxed);
+    while (!atomic_compare_exchange_weak_explicit(&texture_updates_done, &update->next, update,
+                                                 memory_order_release, memory_order_relaxed)) {}
+}
+#endif
 static void register_texture(Cpu *c) {
+#ifdef __ANDROID__
+    nvn_texture_updates_collect();
+#endif
     NvnDescPool *d = HOST(NvnDescPool, A(0));
     int id = (int)A(1);
     if (id < 0 || id >= d->count) return;
     g_tex_stat_reg++;
     NvnTexEntry *e = &((NvnTexEntry *)d->entries)[id];
-    NvnTexture *old = e->tex, *t = HOST(NvnTexture, A(2));
+    NvnTexture *t = HOST(NvnTexture, A(2));
+    NvnTexEntry next = {.tex = t, .has_view = A(3) != 0};
+    if (next.has_view) memcpy(&next.view, AP(3), sizeof next.view);
+    {   // Resolve object-specific swizzles before comparing effective bindings.
+        const uint8_t *sw = t ? obj_swizzle(A(2)) : NULL;
+        if (sw && memcmp(sw, t->swizzle, 4) && !(next.has_view && (next.view.setmask & 8))) {
+            next.has_view = true;
+            next.view.setmask |= 8;
+            memcpy(next.view.swizzle, sw, 4);
+        }
+    }
 #ifdef __ANDROID__
-    // An asynchronous draw must finish reading the previous descriptor before its slot is replaced.
-    if (old) vk_async_drain();
+    static int queued = -1;
+    if (queued < 0) {
+        extern bool vk_deferred_resources_default(void);
+        const char *value = getenv("LARECOMP_TEXTURE_QUEUE");
+        queued = value ? atoi(value) != 0 : vk_deferred_resources_default();
+        if (queued) LOG("[nvn] texture descriptors published through the render queue\n");
+    }
+    if (queued && vk_async_on()) {
+        extern void vk_async_call(void (*call)(void *), void *arg);
+        TextureUpdate *update = malloc(sizeof *update);
+        if (!update) FATAL("nvn: out of memory for queued texture registration\n");
+        *update = (TextureUpdate){.slot = e, .value = next};
+        pthread_mutex_lock(&g_live_lock);
+        if (t) t->refs++;
+        pthread_mutex_unlock(&g_live_lock);
+        vk_timing_trace_wait(VK_TIMING_TEXTURE_QUEUED, 0);
+        vk_async_call(apply_texture_update, update);
+        goto recorded;
+    }
+#endif
+    NvnTexture *old = e->tex;
+#ifdef __ANDROID__
+    static int reuse = -1;
+    if (reuse < 0) { const char *value = getenv("LARECOMP_TEXTURE_REUSE"); reuse = !value || atoi(value) != 0; }
+    bool same = texture_entry_equal(e, &next);
+    if (same) {
+        vk_timing_trace_wait(VK_TIMING_TEXTURE_UNCHANGED, 0);
+        // No store, refcount change or queue wait: in-flight readers see the
+        // same texture/view. Texture content writes use their own notifier.
+        if (reuse) goto recorded;
+    }
+    // A changed descriptor still waits until previous asynchronous readers finish.
+    if (old) {
+        uint64_t start = vk_timing_trace_on() ? plat_now_ns() : 0;
+        vk_async_drain();
+        if (start) vk_timing_trace_wait(VK_TIMING_TEXTURE_DRAIN, plat_now_ns() - start);
+    }
 #endif
     if (old != t) {
         pthread_mutex_lock(&g_live_lock);
@@ -1248,23 +1352,15 @@ static void register_texture(Cpu *c) {
         pthread_mutex_unlock(&g_live_lock);
         if (old) texture_retire(old);
     }
-    e->has_view = A(3) != 0;
-    if (e->has_view) memcpy(&e->view, AP(3), sizeof e->view);
-    {   // the object's own swizzle, where it shares its texture with an object of another (texture_same_storage)
-        const uint8_t *sw = t ? obj_swizzle(A(2)) : NULL;
-        if (sw && memcmp(sw, t->swizzle, 4) && !(e->has_view && (e->view.setmask & 8))) {
-            if (!e->has_view) memset(&e->view, 0, sizeof e->view);
-            e->has_view = true;
-            e->view.setmask |= 8;
-            memcpy(e->view.swizzle, sw, 4);
-        }
-    }
+    e->has_view = next.has_view;
+    if (next.has_view) e->view = next.view;
+recorded:;
     static int watch_id = -2;  // LARECOMP_WATCH_TEXID=<hex id>: its registrations (texture, view)
     if (watch_id == -2) watch_id = getenv("LARECOMP_WATCH_TEXID") ? (int)strtol(getenv("LARECOMP_WATCH_TEXID"), NULL, 16) : -1;
     if (id == watch_id || (watch_id == 0x7fffffff && t && t->width == 320 && t->height == 180 && t->levels == 5))  // (7fffffff: the bloom chain)
         LOG("[watch] texture id %#x <- %p %ux%u levels %u view %d setmask %#x levels %u+%u (lr %llx)\n", id, (void *)t,
-            t ? t->width : 0, t ? t->height : 0, t ? t->levels : 0, e->has_view, e->has_view ? e->view.setmask : 0,
-            e->view.base_level, e->view.num_levels, (unsigned long long)c->x[30]);
+            t ? t->width : 0, t ? t->height : 0, t ? t->levels : 0, next.has_view, next.has_view ? next.view.setmask : 0,
+            next.view.base_level, next.view.num_levels, (unsigned long long)c->x[30]);
 }
 NVN(nvnTexturePoolRegisterTexture) { register_texture(c); }
 NVN(nvnTexturePoolRegisterImage) { register_texture(c); }
@@ -1290,7 +1386,11 @@ static void register_sampler(NvnSamplerDesc *e, const NvnSamplerDesc *n) {
 #ifdef __ANDROID__
     static int off = -1;
     if (off < 0) off = getenv("LARECOMP_NO_SMP_DRAIN") != NULL;
-    if (!off) vk_async_drain();
+    if (!off) {
+        uint64_t start = vk_timing_trace_on() ? plat_now_ns() : 0;
+        vk_async_drain();
+        if (start) vk_timing_trace_wait(VK_TIMING_SAMPLER_DRAIN, plat_now_ns() - start);
+    }
 #endif
     *e = v;
 }
@@ -1476,6 +1576,9 @@ NVN(nvnQueuePresentTexture) {
             if (last && t0 < target) plat_sleep_until_ns(target);
             uint64_t t1 = plat_now_ns();
             g_blocked_ns += t1 - t0;
+#ifdef __ANDROID__
+            vk_timing_trace_wait(VK_TIMING_FRAME_LIMIT, t1 - t0);
+#endif
             last = last && t1 < target + period ? target : t1;
             framepace_presented(g_game_version == 143 ? t1 : last, last == target);
         } else if (on) {

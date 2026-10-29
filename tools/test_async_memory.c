@@ -9,11 +9,11 @@
 
 VkG g_vk;
 typedef struct { unsigned kind; uint64_t a, b; } Observation;
-static Observation seen[8];
+static Observation seen[16];
 static unsigned observations;
 static bool nested;
 static void observe(unsigned kind, uint64_t a, uint64_t b) {
-    assert(observations < 8); seen[observations++] = (Observation){kind, a, b};
+    assert(observations < 16); seen[observations++] = (Observation){kind, a, b};
 }
 static void nested_call(void *arg) { uint64_t *value = arg; observe(4, *value, 0); *value = 42; }
 static void synchronous_call(void *arg) {
@@ -32,6 +32,8 @@ void kernel_blocking_end(void) {}
 bool framepace_on(void) { return false; }
 uint64_t framepace_period_ns(void) { return 16666667; }
 bool test_session_enabled(void) { return false; }
+bool vk_timing_trace_on(void) { return false; }
+void vk_timing_trace_wait(int kind, uint64_t ns) { (void)kind; (void)ns; }
 void test_session_frame(uint64_t frame, bool scene, void (*idle_fn)(void)) { (void)frame; (void)scene; (void)idle_fn; }
 uint64_t renderer_present_count(void) { return 0; }
 uint64_t vk_test_scene_frame(void) { return 0; }
@@ -53,12 +55,25 @@ void submit_snapshot_free(SubmitSnapshot *snapshot) { (void)snapshot; }
 bool nvn_submit_read(uint64_t addr, uint64_t size, void *dst, uint64_t *lo, uint64_t *hi) {
     (void)addr; (void)size; (void)dst; (void)lo; (void)hi; abort();
 }
+static pthread_mutex_t gate_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t gate_cond = PTHREAD_COND_INITIALIZER;
+static bool entered, released;
+static void held_call(void *arg) {
+    pthread_mutex_lock(&gate_lock);
+    entered = true; pthread_cond_broadcast(&gate_cond);
+    while (!released) pthread_cond_wait(&gate_cond, &gate_lock);
+    pthread_mutex_unlock(&gate_lock);
+    vk_async_call(nested_call, arg); // render-thread reentry must run in place
+}
 int main(void) {
     pid_t child = fork(); assert(child >= 0);
     if (!child) {
         setenv("LARECOMP_VK_ASYNC", "0", 1);
         vk_async_memory_written(123, 456);
         assert(observations == 1 && seen[0].a == 123 && seen[0].b == 456 && !started);
+        uint64_t value = 7;
+        vk_async_call(nested_call, &value);
+        assert(value == 42 && observations == 2 && seen[1].kind == 4 && !started);
         _exit(0);
     }
     int status; assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
@@ -79,5 +94,17 @@ int main(void) {
     assert(seen[2].kind == 2 && seen[2].a == 0x300001235ull && seen[2].b == 4);
     assert(seen[3].kind == 1 && seen[3].a == 22);
     assert(seen[4].kind == 3 && seen[4].a == 17 && seen[5].kind == 4 && seen[5].a == 17);
-    puts("PASS: CPU flush ordered between command lists, 64-bit range retained, render-thread reentry and synchronous mode");
+    value = 23;
+    vk_async_call(held_call, &value);
+    pthread_mutex_lock(&gate_lock);
+    while (!entered) pthread_cond_wait(&gate_cond, &gate_lock);
+    pthread_mutex_unlock(&gate_lock);
+    // Returning while the render worker is held proves this is nonblocking.
+    // The following EXEC must stay after that update, even under queue activity.
+    vk_async_execute((uintptr_t)&first);
+    assert(value == 23 && observations == 6);
+    pthread_mutex_lock(&gate_lock); released = true; pthread_cond_broadcast(&gate_cond); pthread_mutex_unlock(&gate_lock);
+    vk_async_drain();
+    assert(value == 42 && observations == 8 && seen[6].kind == 4 && seen[6].a == 23 && seen[7].kind == 1);
+    puts("PASS: CPU flush/callback order, nonblocking enqueue, render-thread reentry, 64-bit ranges and synchronous mode");
 }

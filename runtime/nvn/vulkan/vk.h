@@ -91,6 +91,8 @@ uint64_t vk_completed_seq(void);
 void vk_memory_written(uint64_t addr, uint64_t size); // render-thread invalidation after a CPU flush
 void vk_async_memory_written(uint64_t addr, uint64_t size); // order invalidation with queued command lists
 void vk_async_call_sync(void (*call)(void *), void *arg);
+void vk_async_call(void (*call)(void *), void *arg); // ordered, nonblocking; payload must outlive callback (which may free it)
+bool vk_deferred_resources_default(void); // TotK + Turnip/Adreno 8xx: queued textures and GPU buffer copies
 bool vk_shared_memory_place(uint64_t addr, uint64_t size);
 bool vk_shared_memory_active(void);
 bool vk_shared_memory_enabled(void);

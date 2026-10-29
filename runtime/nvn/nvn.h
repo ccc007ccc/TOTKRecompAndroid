@@ -39,6 +39,9 @@ typedef struct NvnTexture {
     struct NvnTexture *next, *prev, *hnext;  // (hnext: objects.c's description hash)
 } NvnTexture;
 void nvn_texture_cpu_written(uint64_t addr, uint64_t size);
+#ifdef __ANDROID__
+void nvn_texture_updates_collect(void); // game/reset thread, outside object locks, after queued publication
+#endif
 uint64_t nvn_linear_rt_pitch(uint64_t row_bytes);
 
 // LINEAR_RENDER_TARGET (0x40) is pitch storage even without LINEAR (0x10).

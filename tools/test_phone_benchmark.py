@@ -194,6 +194,18 @@ class PhoneBenchmarkTests(unittest.TestCase):
         self.assertEqual(manifest['render_split_us'],0)
         self.assertIn('LARECOMP_VK_SPLIT_US=0',manifest['env'])
 
+    def test_texture_reuse_comparison_is_recorded_without_profiling(self):
+        proc=self.run_cli('success','--texture-reuse','off','--texture-updates','queued','--game-dynres','off')
+        self.assertEqual(proc.returncode,0,proc.stderr)
+        manifest=json.loads(next((self.path/'reports').glob('benchmark-*/launch.json')).read_text())
+        self.assertFalse(manifest['profiling'])
+        self.assertEqual(manifest['texture_reuse'],'off')
+        self.assertIn('LARECOMP_TEXTURE_REUSE=0',manifest['env'])
+        self.assertEqual(manifest['texture_updates'],'queued')
+        self.assertIn('LARECOMP_TEXTURE_QUEUE=1',manifest['env'])
+        self.assertEqual(manifest['game_dynres'],'off')
+        self.assertIn('LARECOMP_GAME_DYNRES=0',manifest['env'])
+
     def test_old_runtime_is_refused_and_closed_without_sampling(self):
         proc=self.run_cli('legacy','--seconds','1')
         self.assertNotEqual(proc.returncode,0)

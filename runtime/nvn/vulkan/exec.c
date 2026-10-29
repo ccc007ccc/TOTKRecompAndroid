@@ -699,7 +699,7 @@ static int gp_n;
 #else
 #define GP_MAX 512
 #endif
-static char gp_label[GP_MAX][112];
+static char gp_label[GP_MAX][192];
 static uint32_t gp_draws[GP_MAX];
 // LARECOMP_VK_DEVLOST_TRACE=1: the last 64 GPU operations, dumped on device loss (with LARECOMP_SYNC_SUBMIT=1 the
 // dump ends with the command list that faulted).
@@ -6159,7 +6159,10 @@ static void draw_(CmdRec *r, bool indexed) {
     if (g_gpuprof_frame && gp_n) {
         if (!gp_draws[gp_n - 1]) {  // first draw of the row: its fragment shader hash
             size_t l = strlen(gp_label[gp_n - 1]);
-            snprintf(gp_label[gp_n - 1] + l, sizeof gp_label[0] - l, ", first fs %016llx", (unsigned long long)g_cur_fs_hash);
+            snprintf(gp_label[gp_n - 1] + l, sizeof gp_label[0] - l,
+                ", first fs %016llx vs=%llx fs=%llx out=%08x write=%03x area=%ux%u",
+                (unsigned long long)g_cur_fs_hash, (unsigned long long)pr->code[0], (unsigned long long)pr->code[1],
+                pr->fs_out_mask, draw_w, pass_w, pass_h);
         }
         gp_draws[gp_n - 1]++;
 #ifdef __ANDROID__

@@ -2,7 +2,9 @@
 
 编译档位与默认开关见 [项目规范](../Agent.md)。本页保留分阶段测量；共享映射/异步复制的后续实现状态见
 [整理基线](PROJECT-BASELINE.md)，较早章节的“尚未实现”只描述当时版本。
-资源分类复制计数、shared-alias/async-copy 与专项测试已在收尾阶段提交；两个实验开关仍默认关闭。
+资源分类复制计数、shared-alias/async-copy 与专项测试已在收尾阶段提交。
+后续 GPU 复制与纹理发布队列默认在 TotK 1.4.3 + Turnip/Adreno 8xx 上组合开启，共享映射仍默认关闭；
+见 [第四轮性能记录](PERFORMANCE-DESCRIPTORS-20261029.md)。
 2026-10-29 草修复后的性能定位、上传缓存优化与对照结果见 [首轮性能优化](PERFORMANCE-20261029.md)。
 随后 GPU 阶段、复制依赖与长阶段提交频率的测量见 [第二轮性能优化](PERFORMANCE-PIPELINE-20261029.md)。
 
@@ -35,6 +37,17 @@ Release 测试包仍允许 `run-as`；不能因需要调试权限改用不匹配
 ```
 
 默认 seed 为测试包的 `files/performance/seed`，也可用 `--save-seed` 指定。每次使用新的 `benchmark-*` 目录和完整存档副本。`--seconds` 接受1–60秒；所有常规测量固定为60档，不遍历30/45/120。`--game-library <手机上的绝对路径>` 可选择已经校验的配套游戏库，避免重复部署；APK与游戏库必须使用同一profile和GAMELIB_ID。
+
+纹理描述符对照可用 `--texture-reuse on|off`（同步模式合并相同注册，默认开）和
+`--texture-updates queued|sync`（捕获后排队发布）。TotK 1.4.3 + Turnip/Adreno 8xx 默认排队发布并启用异步 buffer-copy，
+其他游戏/GPU/驱动保留同步默认值；本轮同步对照同时指定 `--texture-updates sync --async-buffer-copy off`。
+恢复相同注册仍排空的旧行为时再加 `--texture-reuse off`；这个开关不改变队列模式。这些开关不自动开启 profiling。
+`--game-dynres on|off` 默认 `on`；`off` 保持游戏最高分辨率，用于比较相同渲染负载，
+不与动态分辨率结果混算。三个开关均保存在 `launch.json`。
+
+`--timing-trace` 还统计 `frame-limit`、`translation`、`drain`、`queue` 与纹理/采样器更新。
+`texture-drain` / `sampler-drain` 是 `drain` 的子类，不相加；`texture-queued` / `texture-unchanged`
+只统计次数。GPU 阶段标签包含首个 VS/FS、输出/写入 mask 和实际区域，单行时间仍可能包含提交间空档。
 
 运行时使用既有连续90帧场景G-buffer/绘制量条件开始计时，当前仍是启发式就绪判定，并非游戏内部“可操作”标志。计时结束时原子写入 `sample-0001.json` 和最终状态后请求进程退出；加载超过120秒、应用进入后台时也结束。渲染停止出帧时，事件线程仍可到期结束，未完成帧的等待计入总时长。脚本收集结果、日志、温度和电池状态，并在异常或进程未自行退出时关闭测试包。主机断连后运行时计时仍继续。
 

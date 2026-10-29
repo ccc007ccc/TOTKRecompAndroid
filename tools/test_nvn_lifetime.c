@@ -7,7 +7,13 @@ static int destroyed, drains;
 uint64_t renderer_present_count(void) { return test_frame; }
 void backend_texture_destroyed(NvnTexture *t) { assert(t->refs == 0); destroyed++; }
 void vk_async_drain(void) { drains++; }
+bool vk_async_on(void) { return false; }
+bool vk_deferred_resources_default(void) { return false; }
+void vk_async_call(void (*call)(void *), void *arg) { call(arg); }
+bool vk_timing_trace_on(void) { return false; }
+void vk_timing_trace_wait(int kind, uint64_t ns) { (void)kind; (void)ns; }
 void rt_fatal_trace(void) { abort(); }
+void rt_fatal_message(const char *fmt, ...) { (void)fmt; abort(); }
 const FormatInfo *nvn_format_info(uint32_t f) { (void)f; static const FormatInfo fi = {0}; return &fi; }
 void tegra_layout_init(TexLayout *t) { (void)t; }
 uint64_t tegra_total_size(const TexLayout *t) { (void)t; return 0; }

@@ -4,6 +4,7 @@
 草地修复后的性能采样、减少重复上传与实机对照见 [首轮性能优化](PERFORMANCE-20261029.md)。
 Turnip / Adreno 8xx 提前提交长绘制阶段及复制依赖修正见 [第二轮性能优化](PERFORMANCE-PIPELINE-20261029.md)。
 复制结果直接作为 UBO、GPU 读取寿命保护与后续预检查修正见 [第三轮性能优化](PERFORMANCE-COPY-UBO-20261029.md)。
+纹理发布与 GPU 复制的组合收益、TotK + Turnip/Adreno 8xx 默认策略见 [第四轮性能优化](PERFORMANCE-DESCRIPTORS-20261029.md)。
 
 简体中文 | [English](en/STATUS.md)
 

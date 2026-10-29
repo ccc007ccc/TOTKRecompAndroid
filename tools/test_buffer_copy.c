@@ -12,6 +12,8 @@ static Copy copies[512];
 static unsigned ncopies, waits, invalidations, texture_writes, barriers, queries;
 static uint64_t done, seq = 1;
 static bool timeout;
+static bool deferred_default = true;
+bool vk_deferred_resources_default(void) { return deferred_default; }
 static jmp_buf fatal;
 static void complete(void) {
     for (unsigned i = 0; i < ncopies; ++i)
@@ -48,8 +50,11 @@ void vk_texture_memory_written(uint64_t addr, uint64_t size) { assert(addr && si
 void rt_fatal_message(const char *fmt, ...) { (void)fmt; longjmp(fatal, 1); }
 
 int main(int argc, char **argv) {
-    bool off = argc > 1 && !strcmp(argv[1], "off");
-    setenv("LARECOMP_VK_ASYNC_BUFFER_COPY", off ? "0" : "1", 1);
+    bool off = argc > 1 && (!strcmp(argv[1], "off") || !strcmp(argv[1], "default-off"));
+    bool automatic = argc > 1 && !strncmp(argv[1], "default-", 8);
+    deferred_default = !off;
+    if (automatic) unsetenv("LARECOMP_VK_ASYNC_BUFFER_COPY");
+    else setenv("LARECOMP_VK_ASYNC_BUFFER_COPY", off ? "0" : "1", 1);
     memset(memory, 0x31, 32);
     if (off) { assert(!vk_buffer_copy_async(0x10000, 0x10100, 32)); puts("PASS: GPU buffer copy disabled"); return 0; }
     assert(!vk_buffer_copy_async(0x10001, 0x10100, 32));
