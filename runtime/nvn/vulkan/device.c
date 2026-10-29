@@ -1262,7 +1262,7 @@ void backend_represent(void) {
 
 #ifdef __ANDROID__
 void vk_present_now(NvnTexture *t) {  // (the window's half of backend_present)
-    if (t) vk_buffer_copy_cpu_read(t->addr, tegra_total_size(&t->layout));
+    if (t) vk_buffer_copy_cpu_read(t->addr, nvn_texture_storage_size(t));
 #else
 void backend_present(NvnTexture *t) {
 #endif

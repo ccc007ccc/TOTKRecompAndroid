@@ -1631,10 +1631,10 @@ static bool wb_eligible(NvnTexture *t, TexBackend *b, uint32_t lv) {
     if (!fi || !fi->bpb || fi->bw != 1 || fi->bh != 1 || fi->bpb == 3) return false;
     static int only = -2;  // LARECOMP_WRITEBACK_FMT=<hex>: only targets of that format (bisecting)
     if (only == -2) only = getenv("LARECOMP_WRITEBACK_FMT") ? (int)strtol(getenv("LARECOMP_WRITEBACK_FMT"), NULL, 16) : -1;
-    if (only >= 0 && t->format != (uint32_t)only && tegra_total_size(&t->layout) > 4096) return false;
+    if (only >= 0 && t->format != (uint32_t)only && nvn_texture_storage_size(t) > 4096) return false;
     static int lin = -1;  // (linear targets too, up to a slot; LARECOMP_WB_LINEAR=0: not)
     if (lin < 0) lin = !getenv("LARECOMP_WB_LINEAR") || atoi(getenv("LARECOMP_WB_LINEAR"));
-    return t->addr >= HEAP_BASE && tegra_total_size(&t->layout) <= ((lin && (t->flags & 0x50)) ? WB_SLOT : WB_MAX);
+    return t->addr >= HEAP_BASE && nvn_texture_storage_size(t) <= ((lin && (t->flags & 0x50)) ? WB_SLOT : WB_MAX);
 }
 
 static void wb_queue(NvnTexture *t) {
@@ -5263,7 +5263,7 @@ static void copy_stage_inputs(int stage) {
         vk_buffer_copy_cpu_read(st.sbuf[stage][i].addr, st.sbuf[stage][i].size);
 }
 static void copy_texture_input(NvnTexture *t) {
-    if (t) vk_buffer_copy_cpu_read(t->addr, tegra_total_size(&t->layout));
+    if (t) vk_buffer_copy_cpu_read(t->addr, nvn_texture_storage_size(t));
 }
 static void copy_stage_textures(int stage, ShaderInfo *si) {
     if (!vk_buffer_copy_pending() || !si) return;

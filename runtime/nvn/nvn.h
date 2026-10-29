@@ -27,6 +27,7 @@ typedef struct NvnTexture {
     uint8_t swizzle[4];
     uint64_t stride;
     uint64_t addr;  // guest address of texel storage
+    uint64_t storage_size;  // tegra_total_size(&layout), fixed when the description is made: nvn_texture_storage_size
     NvnPool *pool;
     uint64_t pool_offset;
     void *backend;  // renderer-side texture
@@ -38,6 +39,11 @@ typedef struct NvnTexture {
     bool finalized;
     struct NvnTexture *next, *prev, *hnext;  // (hnext: objects.c's description hash)
 } NvnTexture;
+// Texel storage bytes. Write notifications compare every live texture against each flushed range, on the game's
+// threads and the render thread: summing the mip chain each time was ~10% of the game's job threads.
+static inline uint64_t nvn_texture_storage_size(const NvnTexture *t) {
+    return t->storage_size ? t->storage_size : tegra_total_size(&t->layout);  // (0: a description made elsewhere)
+}
 void nvn_texture_cpu_written(uint64_t addr, uint64_t size);
 #ifdef __ANDROID__
 void nvn_texture_updates_collect(void); // game/reset thread, outside object locks, after queued publication

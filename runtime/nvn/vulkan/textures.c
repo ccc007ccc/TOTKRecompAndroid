@@ -595,7 +595,7 @@ void vk_texture_memory_written(uint64_t addr, uint64_t size) {
     // upload or descriptor to invalidate yet.
     for (int i = 0; i < g_nlive; ++i) {
         NvnTexture *t = g_live[i];
-        if (t->addr && t->addr < addr + size && addr < t->addr + tegra_total_size(&t->layout))
+        if (t->addr && t->addr < addr + size && addr < t->addr + nvn_texture_storage_size(t))
             __atomic_add_fetch(&t->cpu_write_epoch, 1, __ATOMIC_RELEASE);
     }
 }
@@ -838,7 +838,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     const FormatInfo *fi = t->layout.fmt;
     if (!fi || !fi->bpb) return;
     VkFmt mf = fmt_of(t->format);
-    uint64_t total = tegra_total_size(&t->layout);
+    uint64_t total = nvn_texture_storage_size(t);
     b->checked_frame = frame;
     prof_tex_checks++;
     if (t->flags & 0x10) b->dynamic = true;

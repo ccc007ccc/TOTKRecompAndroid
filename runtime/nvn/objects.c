@@ -633,6 +633,7 @@ static NvnTexture *texture_from_builder(uint64_t b) {
     t->pool_offset = G(uint64_t, b, 0x40);
     t->addr = t->pool ? t->pool->storage + t->pool_offset : 0;
     builder_layout(b, &t->layout);
+    t->storage_size = tegra_total_size(&t->layout);
     t->debug_id = next_debug_id++;
     return t;
 }
@@ -823,7 +824,7 @@ void nvn_texture_cpu_written(uint64_t addr, uint64_t size) {
     if (!size || addr > UINT64_MAX - size) return;
     pthread_mutex_lock(&g_live_lock);
     for (NvnTexture *t = g_all_tex; t; t = t->next)
-        if (t->addr && t->addr < addr + size && addr < t->addr + tegra_total_size(&t->layout))
+        if (t->addr && t->addr < addr + size && addr < t->addr + nvn_texture_storage_size(t))
             __atomic_add_fetch(&t->cpu_write_epoch, 1, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&g_live_lock);
 }
@@ -958,7 +959,7 @@ NVN(nvnTextureGetStride) { RET(TEX->stride); }
 NVN(nvnTextureGetTextureAddress) { RET(TEX->addr); }
 NVN(nvnTextureGetMemoryPool) { RET(G(uint64_t, A(0), 24)); }
 NVN(nvnTextureGetMemoryOffset) { RET(TEX->pool_offset); }
-NVN(nvnTextureGetStorageSize) { RET(tegra_total_size(&TEX->layout)); }
+NVN(nvnTextureGetStorageSize) { RET(nvn_texture_storage_size(TEX)); }
 NVN(nvnTextureGetDebugID) { RET(obj_debug_id(A(0))); }
 NVN(nvnTextureGetViewOffset) {
     NvnTexture *t = TEX;
@@ -984,7 +985,7 @@ NVN(nvnTextureCompare) {  // (each object's own description: two of another swiz
     NvnTexture *t0 = HOST(NvnTexture, A(0)), *t1 = HOST(NvnTexture, A(1));
     RET(s0 && s1 ? texture_same_storage(t0, t1) && !memcmp(s0, s1, 4) : texture_same_desc(t0, t1));
 }
-NVN(nvnTextureFlushTexels) { backend_pool_written(TEX->addr, tegra_total_size(&TEX->layout)); }
+NVN(nvnTextureFlushTexels) { backend_pool_written(TEX->addr, nvn_texture_storage_size(TEX)); }
 NVN(nvnTextureInvalidateTexels) { (void)c; }
 
 // Texture views: an NvnTextureView (nvn.h) packed into the guest's 16-byte NVNtextureView. Clearing NVN 53's 0x28
@@ -1032,7 +1033,7 @@ static void texture_transfer(Cpu *c, uint64_t row_stride, uint64_t image_stride,
     bool ok = write ? tegra_write_region(&t->layout, level, layer, r, storage, stride, AP(3), row_stride, image_stride)
                     : tegra_read_region(&t->layout, level, layer, r, storage, stride, AP(3), row_stride, image_stride);
     if (!ok) FATAL("invalid %sTexels region at mip %u layer %u\n", write ? "Write" : "Read", level, layer);
-    if (write) backend_pool_written(t->addr, tegra_total_size(&t->layout));
+    if (write) backend_pool_written(t->addr, nvn_texture_storage_size(t));
     static unsigned counts[2];
     if (__atomic_fetch_add(&counts[write], 1, __ATOMIC_RELAXED) < 16 || diag_getenv("LARECOMP_TRACE_TEXELS"))
         LOG("[nvn] %sTexels %ux%u f%#x flags %#x @%llx mip %u layer %u region %d,%d,%d %dx%dx%d linear %llx strides %llu/%llu\n",
