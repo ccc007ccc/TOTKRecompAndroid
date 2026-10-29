@@ -84,8 +84,11 @@ int main(int argc,char **argv) {
     VkPipelineRecipe building=recipe(99);pthread_t taker,stopper;
     assert(!pthread_create(&taker,NULL,take_thread,&building));
     for(unsigned i=0;i<10000;++i){pthread_mutex_lock(&lock);bool waiting=readers!=0;pthread_mutex_unlock(&lock);if(waiting)break;usleep(100);}
-    assert(!take_done && !pthread_create(&stopper,NULL,stop_thread,NULL));
-    while(!take_done)usleep(100);assert(!stopped);gate=1;
+    assert(!take_done);
+    vk_pipeline_warm_cancel_async(); // must return while the driver callback is still blocked
+    while(!take_done)usleep(100);
+    assert(!stopped && !gate && !pthread_create(&stopper,NULL,stop_thread,NULL));
+    gate=1;
     assert(!pthread_join(taker,NULL) && !pthread_join(stopper,NULL) && stopped);
     setenv("LARECOMP_PIPELINE_WARM","0",1);vk_pipeline_warm_start(build);assert(!entry_count && count==100);
     vk_pipeline_warm_stop();

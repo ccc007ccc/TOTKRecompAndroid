@@ -44,6 +44,7 @@ extern "C" void vk_shader_warm_resume(void) {
     if(!game.empty() && !manifest.empty())start(game.c_str(),manifest.c_str(),true);
 }
 extern "C" void vk_shader_warm_stop(void){job().stop();}
+extern "C" void vk_shader_warm_cancel_async(void){job().cancel_async();}
 extern "C" ShaderWarmStatus vk_shader_warm_status(void) {
     auto state=job().status();return {state.running,state.title_ready,state.failed,state.progress};
 }

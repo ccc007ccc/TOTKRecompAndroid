@@ -1,5 +1,7 @@
 // Vulkan device, window, swapchain and presentation (counterpart of the window/present half of metal.m).
 #include "../../diagnostics_build.h"
+#include "../../app_lifecycle.h"
+#include "../../kernel.h"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #include <math.h>
@@ -1220,6 +1222,13 @@ void backend_present(NvnTexture *t);
 #ifdef __ANDROID__
 // The game's half of a present: pacing, input, tests - on the game's thread (its frame: renderer_present_count)
 static void present_game_half(void) {
+    // The just-enqueued present may finish, then the producer sleeps rather
+    // than building offscreen frames. SDL only suspends its own event thread.
+    if (app_lifecycle_backgrounded()) {
+        kernel_blocking_begin();
+        app_lifecycle_wait();
+        kernel_blocking_end();
+    }
     extern void vk_pace_frame(void);
     vk_pace_frame();  // (exec.c: the game's 30 fps mode when frames don't fit 60)
     extern void input_frame(uint64_t frame);
@@ -1671,6 +1680,23 @@ bool vk_adreno_8xx(const char *name) {
 }
 // A Turnip path's setting (-1 Automatic, 1 on, 0 off) for this GPU
 bool vk_turnip_path_on(int setting) { return setting < 0 ? vk_adreno_8xx(g_vk.props.deviceName) : setting != 0; }
+static bool SDLCALL app_event_watch(void *unused, SDL_Event *event) {
+    (void)unused;
+    if (event->type == SDL_EVENT_WILL_ENTER_BACKGROUND) {
+        app_lifecycle_set_foreground(false);
+        extern void vk_shader_warm_cancel_async(void), vk_pipeline_warm_cancel_async(void);
+        vk_shader_warm_cancel_async();
+        vk_pipeline_warm_cancel_async();
+        test_session_backgrounded();
+        LOG("[app] background: guest frame production paused\n");
+    } else if (event->type == SDL_EVENT_DID_ENTER_FOREGROUND) {
+        app_lifecycle_set_foreground(true);
+        LOG("[app] foreground: guest frame production resumed\n");
+    } else if (event->type == SDL_EVENT_TERMINATING) {
+        app_lifecycle_stop();
+    }
+    return true;
+}
 static bool g_lrz_at_start = true;
 bool vk_lrz_at_start(void) { return g_lrz_at_start; }  // (the start screen: a change needs a restart)
 const char *vk_gpu_name(void) { return g_vk.props.deviceName; }
@@ -1711,6 +1737,11 @@ void ui_window_init(void) {
     }
 #endif
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) FATAL("SDL_Init: %s\n", SDL_GetError());
+#ifdef __ANDROID__
+    // SDL blocks in PumpEvents after queuing background events. Waiting until
+    // PollEvent returns to react is too late; it may only return on resume.
+    if (!SDL_AddEventWatch(app_event_watch, NULL)) FATAL("SDL_AddEventWatch: %s\n", SDL_GetError());
+#endif
     int win_w = 1280, win_h = 720;
     if (diag_getenv("LARECOMP_WINDOW")) sscanf(diag_getenv("LARECOMP_WINDOW"), "%dx%d", &win_w, &win_h);
     SDL_WindowFlags wflags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;

@@ -119,10 +119,13 @@ void vk_pipeline_warm_discard(VkPipelineWarmProduct *product) {
     for(unsigned i=0;i<2;++i)if(product->sets[i])vkDestroyDescriptorSetLayout(g_vk.dev,product->sets[i],NULL);
     memset(product,0,sizeof *product);
 }
+void vk_pipeline_warm_cancel_async(void) {
+    pthread_mutex_lock(&lock);cancel=true;pthread_cond_broadcast(&changed);pthread_mutex_unlock(&lock);
+}
 void vk_pipeline_warm_stop(void) {
     // Lifecycle calls are serialized on the event thread. Render lookup and
     // record insertion synchronize independently through lock.
-    pthread_mutex_lock(&lock);cancel=true;pthread_cond_broadcast(&changed);pthread_mutex_unlock(&lock);
+    vk_pipeline_warm_cancel_async();
     for(unsigned i=0;i<thread_count;++i)pthread_join(threads[i],NULL);
     thread_count=0;
     pthread_mutex_lock(&lock);

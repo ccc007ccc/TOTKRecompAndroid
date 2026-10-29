@@ -351,6 +351,9 @@ UI 只查询收据身份，独立可取消任务逐项检查模块和字典；�
 - 停止/重启先停止提交，再排空翻译以及它可能新增的编译任务，最后更换 guest 内存。
   先提交并完成尚未提交的 command buffer，再销毁管线、预热产物、程序、布局和 ShaderInfo；清空所有快捷缓存。
   单次游戏状态通过 `RT_ON_RESET` 和已有后端重置入口清理；取消后 join 再释放 worker 依赖。
+- Android 生命周期在 SDL event watch 中先发布状态；不能等默认阻塞的 `SDL_PollEvent` 返回后才暂停后台工作。
+  watch 中只请求取消，不 join worker。游戏帧边界等待使用 `app_lifecycle`，释放 kernel core-0 所有权；
+  teardown 在 join guest 前唤醒等待者。前台恢复、窗口重建和连续切换都需实机验证，不能仅证明画面隐藏。
 
 ## 9. 上游、提交和文档
 

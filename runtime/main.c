@@ -14,6 +14,7 @@
 #include "hle.h"
 #include "kernel.h"
 #include "test_session.h"
+#include "app_lifecycle.h"
 
 const char *g_romfs_dir;
 
@@ -165,6 +166,7 @@ static void teardown(void) {
     extern void vk_shader_warm_stop(void),vk_shader_warm_observe_end(void);
     vk_shader_warm_stop();vk_shader_warm_observe_end();
 #endif
+    app_lifecycle_stop();
     kernel_stop_threads(reboot_idle);
     audio_stop();
     backend_clear_window();
@@ -183,6 +185,7 @@ static void teardown(void) {
 }
 
 static void boot(const char *root) {
+    app_lifecycle_start();
 #ifdef __ANDROID__
     extern void vk_shader_warm_stop(void);
     vk_shader_warm_stop(); // settings_load below may change the translation profile

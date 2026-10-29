@@ -28,6 +28,16 @@ int main() {
     job.stop();assert(!job.status().running && job.status().cancelled && job.status().title_ready);
     release_title=false;job.start("first",run);until([&]{return titles==2;});
     job.stop();assert(!job.status().title_ready && job.status().cancelled);
+    // A lifecycle observer can request cancellation while a worker is inside
+    // an uncancellable compiler call; it must not join under SDL's watch lock.
+    std::atomic<bool> inside{false},leave{false};
+    job.start("async-cancel",[&](bool,const auto& check,const auto&){
+        inside=true;while(!leave)std::this_thread::yield();check();
+    });
+    until([&]{return inside.load();});
+    job.cancel_async();assert(job.status().running);leave=true;
+    until([&]{return !job.status().running;});
+    assert(job.status().cancelled && !job.status().failed);job.stop();
     job.start("failure",[](bool title,const auto&,const auto&){if(!title)throw std::runtime_error("test background failure");});
     until([&]{return !job.status().running;});assert(job.status().title_ready && job.status().failed);
     // Replacing a job waits for its owner; no previous task can still touch a

@@ -77,3 +77,8 @@ void kernel_signal(KObject *o);  // caller holds g_klock
 KEvent *kernel_create_event_pair(uint32_t *writable, uint32_t *readable);
 KThread *kernel_current_thread(void);
 uint64_t kernel_heap_size(void);  // bytes from HEAP_BASE set by SetHeapSize
+#ifdef __ANDROID__
+// Host waits on guest threads release core-0 ownership and count as idle time.
+void kernel_blocking_begin(void);
+void kernel_blocking_end(void);
+#endif

@@ -38,6 +38,9 @@ private:
     }
 public:
     ~Job(){stop();}
+    // SDL lifecycle observers must not join while SDL dispatches its watches.
+    // The event-thread stop/resume path joins and resets the identity later.
+    void cancel_async() { cancelled.store(true,std::memory_order_release); }
     void start(const std::string& identity,Run run,bool low_priority=false) {
         std::lock_guard<std::mutex> owner(control);
         if(key==identity)return;

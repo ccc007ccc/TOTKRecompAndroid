@@ -13,6 +13,7 @@ void vk_pipeline_recipe_make(VkPipelineRecipe *out, uint64_t vertex, uint64_t fr
 void vk_pipeline_recipe_compute(VkPipelineRecipe *out, uint64_t compute, const uint32_t local[3]);
 void vk_pipeline_warm_start(VkPipelineWarmBuild build);
 void vk_pipeline_warm_stop(void);
+void vk_pipeline_warm_cancel_async(void);
 void vk_pipeline_warm_record(const VkPipelineRecipe *recipe);
 bool vk_pipeline_warm_take(const VkPipelineRecipe *recipe, VkPipelineWarmProduct *product);
 void vk_pipeline_warm_discard(VkPipelineWarmProduct *product);

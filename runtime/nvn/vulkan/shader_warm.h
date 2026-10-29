@@ -16,6 +16,7 @@ typedef struct {bool running,title_ready,failed;double progress;} ShaderWarmStat
 bool vk_shader_warm_enabled(void);
 void vk_shader_warm_start(const char *game,const char *manifest);
 void vk_shader_warm_stop(void); // cancel and join, retaining completed cache entries
+void vk_shader_warm_cancel_async(void); // lifecycle notification: request cancellation without joining
 void vk_shader_warm_resume(void); // foreground resume stays low priority while gameplay is active
 ShaderWarmStatus vk_shader_warm_status(void);
 struct NvnShaderStage;
