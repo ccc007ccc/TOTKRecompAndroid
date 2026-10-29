@@ -10,7 +10,10 @@
 | --- | --- |
 | 后台资源争用 | **确认并修复**：切到桌面仍持续绘制、占约 179% CPU；修复后不再持续出帧，后台约 5–6% CPU |
 | 长阶段拆分与移动 GPU 带宽 | 真实 2× / 转视角关闭拆分短测 17.99 FPS，p95 68.11 ms；未显示显著收益，保留原默认，不据不同温控的一轮数字断言必然更差 |
-| 多附件/高分辨率绘制 | GPU 已超过 30 FPS 预算；较长阶段涉及多附件和 3200×1792 深度绘制，需要继续拆分 shader 指令成本与附件带宽 |
+| 多附件/高分辨率绘制 | **2026-10-30 确认并修复主要原因**：所有颜色图像因缺少格式列表被 Turnip 关闭 UBWC；补列表后 2× 转视角 GPU 忙碌约 41 → 33 ms/帧，见下文“渲染效率审查” |
+| 渲染通道开头的全屏障 | 去掉屏障（不安全，仅测量）18.50 FPS，与基线约 19 FPS 无差别；不作为优化方向 |
+| ALIAS 区顶点零拷贝 | `--shared-alias on` 18.76 FPS，无收益；当时 GPU 受限，GPU 降载后需复测 |
+| Turnip GMEM/sysmem 选择 | 强制 sysmem 17.54 FPS、强制 GMEM 3.80 FPS；现有通道结构（全附件 LOAD/STORE、频繁打断）基本只能用 sysmem |
 | shader 指令与精度路径 | 后续检查寄存器、溢出、64-bit 运算以及慢 shader；先做独立数值/画面对照，再改默认 |
 | 编译与准备竞争 | 关闭自动预热的 2× 转向短测为 18.27 FPS，p95 67.35 ms；未出现大幅收益，保留默认，继续区分首次编译与稳态瓶颈 |
 | 缓存持久化 | 原始 Vulkan driver cache 已按 UUID/vendor/device 验证，未错误绑定整个运行时提交；不再重复设计第二套缓存。准备 recipe 的身份另行分析 |
@@ -52,3 +55,61 @@ ASan/UBSan 生命周期、pipeline warm 和 shader warm background 回归通过�
 包含一次暂停/恢复及另一进程的连续三个切换周期；测试结束均关闭独立测试包。
 
 后续按上表并行考虑不同原因，优先验证可能大幅减少 GPU 工作或 CPU 竞争的方向；尚未达到真实 2× / 60 FPS。
+
+## 2026-10-30：渲染效率审查
+
+同一草地存档、真实 2×（设置中的分辨率倍率，无 `NO_SCALE`）、60 FPS 目标、20 秒半摇杆转视角，Release/8 Elite 独立测试包。
+开关用 `--diagnostic-env` 传入；结果是同场景短测，温控状态与电源单独记录。原始数据在 `.work/render-audit-20261030/`。
+
+### 开关筛选（APK `032e096a…`，即 `3a40267`）
+
+| 运行 | 开关 | FPS | p95 ms | 温控 |
+| --- | --- | ---: | ---: | --- |
+| base-1 | 无 | 18.83 | 63.8 | 0→0 |
+| nomut-1 | `LARECOMP_VK_NO_MUTABLE=1`（渲染目标去掉 MUTABLE） | **24.29** | 52.4 | 0→1 |
+| nobarrier-1 | `LARECOMP_VK_NO_PASS_BARRIER=1`（不安全测量） | 18.50 | 68.0 | 1→1 |
+| base-2 | 无 | 19.14 | 62.3 | 2→2 |
+| alias-1 | `--shared-alias on` | 18.76 | 66.2 | 2→2 |
+| sysmem-1 | `TU_DEBUG=sysmem` | 17.54 | 71.9 | 2→2 |
+| gmem-1 | `TU_DEBUG=gmem` | 3.80 | 333 | 2→2 |
+| nomut-2 | `LARECOMP_VK_NO_MUTABLE=1` | **22.95** | 57.7 | 3→3 |
+| base-3 | 无 | 18.37 | 67.5 | 3→3 |
+
+基线在不同温控下都稳定在约 19 FPS；去掉 MUTABLE 在同温控下高 25–29%，其余方向无收益。
+
+### 原因与修复
+
+所有非深度图像都带 `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`，但没有 `VkImageFormatListCreateInfo`。
+Mesa Turnip（`tu_image.cc` 的 `format_list_ubwc_possible`）在没有列表时假定可能出现不可压缩格式，直接关闭 UBWC；
+Adreno 830 属于 `ubwc_all_formats_compatible` 的 a7xx gen3/a8xx 能力，只要列表里每个格式都支持 UBWC 就会保留压缩。
+因此 2× 下的多附件 G-buffer、后处理和所有颜色纹理都在未压缩状态下读写，sysmem 渲染带宽被放大。
+
+直接去掉 MUTABLE 会让游戏的格式重解释视图违规，所以正式修复为：Turnip + Adreno 8xx 上为可变颜色图像附加
+`image_format_list.h` 中同兼容类、且都可压缩的全部格式（只排除 E5B9G9R9）；存储图像、深度图像和其他设备不变，
+`LARECOMP_VK_FORMAT_LIST=0|1` 可覆盖。旧款 Adreno 遇到混合列表会关闭压缩甚至改线性排布，所以不扩大默认范围。
+
+同一新 APK（`ecb818a9…`，运行时 `4c43388a…`，`GAMELIB_ID=993c0a5c82dc5099`）对照：
+
+| 运行 | 格式列表 | FPS | GPU 忙碌 ms/帧 | 温控 |
+| --- | --- | ---: | ---: | --- |
+| fl-on-1 | 开（默认） | 20.40 | — | 1→1 |
+| fl-off-1 | 关 | 18.97 | — | 1→2 |
+| nomut-3 | 关 + 去 MUTABLE | 21.07 | — | 2→2 |
+| trace-fl-off | 关，`--timing-trace` | 17.49 | 40.9–42.3 | 1→2 |
+| trace-fl-on | 开，`--timing-trace` | 19.12 | **32.6–33.1** | 2→2 |
+
+GPU 每帧忙碌时间减少约 8.5 ms（约 20%），格式列表与去 MUTABLE 的帧率在噪声范围内一致。
+帧率提升小于 GPU 降幅：充电升温后 GPU 频率下降，且帧时间已转为受渲染线程（叠加层约 33 ms/帧）和游戏线程等待栅栏限制。
+同一存档就绪帧（915）开/关列表截图，差异只在随风摆动的树叶与触控按钮淡入；地面、天空、角色和建筑一致。
+`tools/test_image_format_lists.py` 用独立尺寸表核对 46 个颜色格式的整类列表、E5B9G9R9 排除和默认设备条件，并做过删格式的变异检查。
+
+### 剩余瓶颈（尚未修复）
+
+- **渲染线程**：每帧约 4400 次绘制、180 个渲染通道、27 次提交，单线程翻译约 30 ms/帧；其中描述符集约 8 ms
+  （缓存只在单次提交内有效，1 ms 拆分使其频繁失效）、顶点复制约 6 ms（约 60 MB/帧）、纹理检查约 3.5 ms、常量缓冲约 3.7 ms。
+- **线程同步**：游戏线程每帧仍在 nvnSyncWait 等待约 16–19 ms，GPU 每帧空闲约 19 ms，三段流水没有充分重叠。
+- **LRZ 失效**：`TU_DEBUG=perf` 显示大量“FS writes depth or has side-effects”“Depth write + blending”“CmdClearAttachments”，
+  需查明翻译器写 `gl_FragDepth`、内存副作用和通道中途清除对早期深度剔除的影响。
+- **GMEM 不可用**：全部附件每次 LOAD/STORE、G-buffer 被 1 ms 拆分和 6/8 目标交替打断，强制 GMEM 仅 3.8 FPS。
+
+2× / 60 FPS 仍未达到：GPU 还需再减约一半，渲染线程也需减半并改善重叠。

@@ -11,6 +11,7 @@
 
 #include "vk.h"
 #include "diagnostic.h"
+#include "image_format_list.h"
 #include "../astc.h"
 #include "../renderer.h"
 #include "../texpatch.h"
@@ -367,6 +368,16 @@ uint64_t vk_collect_dead(void) {
 static void create_image(NvnTexture *t, TexBackend *b) {
     static _Atomic uint64_t next_generation;
     b->image_generation = atomic_fetch_add_explicit(&next_generation, 1, memory_order_relaxed) + 1;
+    static int format_lists = -1;  // (LARECOMP_VK_FORMAT_LIST=0 / 1: without / with view format lists)
+    if (format_lists < 0) {
+        const char *e = getenv("LARECOMP_VK_FORMAT_LIST");
+#ifdef __ANDROID__
+        format_lists = e ? atoi(e) != 0 : vk_image_format_lists_default();
+#else
+        format_lists = e && atoi(e) != 0;
+#endif
+        LOG("[vk] mutable color images %s view format lists\n", format_lists ? "with" : "without");
+    }
     VkFmt mf = fmt_of(t->format);
     b->scalable = b->rs_group != RS_NONE;
     b->sx = g_rs[b->rs_group][0];
@@ -445,7 +456,12 @@ static void create_image(NvnTexture *t, TexBackend *b) {
     if (type == VK_IMAGE_TYPE_2D && layers >= 6 && tw == th && samples == 1) flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
     if (type == VK_IMAGE_TYPE_3D && (usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT))
         flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;  // (its slices rendered to through 2D views: vk_view)
-    VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = flags, .imageType = type, .format = vf,
+    // (surface images keep full mutability: their R32 loads and atomics; image_format_list.h)
+    VkImageFormatListCreateInfo fl = {.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
+    if (format_lists && (flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) && !b->storage)
+        fl.viewFormatCount = vk_image_view_formats(vf, &fl.pViewFormats);
+    VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .pNext = fl.viewFormatCount ? &fl : NULL,
+                            .flags = flags, .imageType = type, .format = vf,
                             .extent = {tw, th, depth}, .mipLevels = levels, .arrayLayers = layers,
                             .samples = (VkSampleCountFlagBits)samples, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = usage,
                             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
@@ -458,9 +474,11 @@ static void create_image(NvnTexture *t, TexBackend *b) {
         ci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         ci.flags &= ~VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+        if (fl.viewFormatCount) fl.viewFormatCount = vk_image_view_formats(vf, &fl.pViewFormats);
         VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL));
         depthfmt = false;
     }
+    b->format_list = fl.viewFormatCount != 0;
     b->format = vf;
     b->width = tw; b->height = th; b->depth = depth; b->layers = layers; b->levels = levels; b->samples = samples;
     b->aspect = depthfmt ? aspect_of(t->format) : VK_IMAGE_ASPECT_COLOR_BIT;
@@ -1092,6 +1110,13 @@ VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uin
     }
     extern uint64_t prof_views_created;
     prof_views_created++;
+    if (b->format_list && fmt != b->format) {  // (E5B9G9R9 alone is left out: a compressed image can't be read so)
+        const VkFormat *fs;
+        uint32_t n = vk_image_view_formats(b->format, &fs), i = 0;
+        while (i < n && fs[i] != fmt) i++;
+        static int nlog;
+        if (i == n && nlog++ < 20) LOG("[vk] view format %d outside image format %d's list\n", fmt, b->format);
+    }
     VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = b->image, .viewType = type,
                                 .format = fmt, .components = sw, .subresourceRange = {aspect, lv0, nlv, ly0, nly}};
     VkImageView v;

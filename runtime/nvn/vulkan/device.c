@@ -1865,6 +1865,11 @@ bool vk_deferred_resources_default(void) {
     // on other games/GPUs/drivers until that combination is measured there.
     return g_game_version == 143 && vk_driver_is_turnip() && vk_adreno_8xx(g_vk.props.deviceName);
 }
+bool vk_image_format_lists_default(void) {
+    // Adreno 7xx gen3 / 8xx keep UBWC across every listed format (image_format_list.h). Older Adreno GPUs can't mix
+    // them: Turnip there turns a mixed list into no compression and, with swapped formats, linear tiling.
+    return vk_driver_is_turnip() && vk_adreno_8xx(g_vk.props.deviceName);
+}
 #endif
 #endif
 

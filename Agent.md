@@ -204,6 +204,7 @@ TOTK_STAGE=.work/totk-port/packages/debug-dev
 | 程序/管线索引容量、重启 | `"$PYTHON" tools/test_shader_program_cache.py`；`"$PYTHON" tools/test_shader_lifetimes.py` |
 | 共享映射、异步复制 | `bash tools/test_shared_memory.sh`；`bash tools/test_buffer_copy.sh` |
 | 纹理描述符注册/队列 | `bash tools/test_texture_registration.sh`（含真实请求队列、引用寿命和对象锁回归） |
+| 可变图像格式列表（UBWC） | `"$PYTHON" tools/test_image_format_lists.py <输出目录>`（按独立尺寸表核对整类视图格式、E5B9G9R9 排除和默认设备条件） |
 | 清单/准备/生命周期 | `bash tools/test_shader_warm_list.sh`；`bash tools/test_shader_warm_prepare.sh`；`bash tools/test_shader_warm_background.sh` |
 | 管线 | `bash tools/test_pipeline_cache.sh`；`bash tools/test_pipeline_warm.sh`；GPU：`bash tools/test_vk_pipeline_warm.sh` |
 | Eden 对应运行时路径 | `bash tools/test_eden_runtime.sh`（含上传缓存、描述符、请求队列与编译回退） |
@@ -269,6 +270,11 @@ CPU 渲染墙钟含等待，GPU 时间可能与它重叠；复制字节占比不
 | 提交时内存快照 | 关 | `LARECOMP_VK_SUBMIT_SNAPSHOT=1`，`submit_snapshot.c` |
 | 顶点采样量化 | 关 | `LARECOMP_VS_SNAP=1`，`exec.c`；不能标成已修复草消失 |
 | 长绘制阶段拆分 | 按驱动 | Turnip + Adreno 8xx 为 1 ms，其他非高通原厂驱动为 3 ms，高通原厂关闭；`LARECOMP_VK_SPLIT_US` / `exec.c`，仍保留阶段边界提交与同步 |
+| 可变格式颜色图像的视图格式列表 | Turnip + Adreno 8xx 开 | `LARECOMP_VK_FORMAT_LIST=0\|1`；`vk_image_format_lists_default()` / `textures.c` / `image_format_list.h`，使渲染目标和纹理保留 UBWC；存储图像与其他设备不变 |
+
+Turnip 对带 `MUTABLE_FORMAT` 却没有格式列表的颜色图像一律关闭 UBWC；Adreno 7xx gen3/8xx 只要列表中的格式都支持 UBWC 即保留压缩，
+旧款 Adreno 遇到混合列表反而会关压缩甚至改线性排布，因此默认只用于 Adreno 8xx。列表包含 `fmt_of()` 在同一兼容类里可能产生的全部格式，
+只排除不能压缩的 E5B9G9R9；超出列表的视图会打印 `view format ... outside` 日志，出现时先补列表或回退，不能忽略。
 
 `LARECOMP_VK_SHARED_ALIAS` 默认关闭，对应 `shared_memory.c`，通过 `--shared-alias` 验证。
 共享映射最多保留 512 MiB backing，并保留至少一半驱动分配槽；超出时新范围使用原 CPU 路径。

@@ -93,6 +93,7 @@ void vk_async_memory_written(uint64_t addr, uint64_t size); // order invalidatio
 void vk_async_call_sync(void (*call)(void *), void *arg);
 void vk_async_call(void (*call)(void *), void *arg); // ordered, nonblocking; payload must outlive callback (which may free it)
 bool vk_deferred_resources_default(void); // TotK + Turnip/Adreno 8xx: queued textures and GPU buffer copies
+bool vk_image_format_lists_default(void); // Turnip/Adreno 8xx: view format lists keep mutable images compressed
 bool vk_shared_memory_place(uint64_t addr, uint64_t size);
 bool vk_shared_memory_active(void);
 bool vk_shared_memory_enabled(void);
@@ -151,6 +152,7 @@ typedef struct TexBackend {
     uint32_t wgen;  // page write tracking generation at the last upload check (textures.c)
     bool scalable, presented;
     bool storage; // surface image: storage usage, mutable format, guest dimensions
+    bool format_list;  // created with its class's view formats (image_format_list.h): no view outside them
     uint8_t rs_group;  // RS_*: which output scale its allocation follows (textures.c)
     uint64_t touched_frame, frame_cleared;
     uint64_t rt_frame;  // the last frame a draw rendered into it, + 1 (0: never) - exec.c rt_one_off
