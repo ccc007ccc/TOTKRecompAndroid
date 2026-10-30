@@ -204,6 +204,7 @@ TOTK_STAGE=.work/totk-port/packages/debug-dev
 | 程序/管线索引容量、重启 | `"$PYTHON" tools/test_shader_program_cache.py`；`"$PYTHON" tools/test_shader_lifetimes.py` |
 | 共享映射、异步复制 | `bash tools/test_shared_memory.sh`；`bash tools/test_buffer_copy.sh` |
 | 纹理描述符注册/队列 | `bash tools/test_texture_registration.sh`（含真实请求队列、引用寿命和对象锁回归） |
+| GPU 纹理排布转换 / 写通知策略 | `bash tools/test_vk_deswizzle.sh`（真实 Vulkan、同步验证、快照与回收）；`"$PYTHON" tools/test_texture_change_policy.py <输出目录>` |
 | 可变图像格式列表（UBWC） | `"$PYTHON" tools/test_image_format_lists.py <输出目录>`（按独立尺寸表核对整类视图格式、E5B9G9R9 排除和默认设备条件） |
 | 清单/准备/生命周期 | `bash tools/test_shader_warm_list.sh`；`bash tools/test_shader_warm_prepare.sh`；`bash tools/test_shader_warm_background.sh` |
 | 管线 | `bash tools/test_pipeline_cache.sh`；`bash tools/test_pipeline_warm.sh`；GPU：`bash tools/test_vk_pipeline_warm.sh` |

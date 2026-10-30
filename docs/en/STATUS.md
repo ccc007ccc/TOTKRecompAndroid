@@ -4,6 +4,9 @@
 
 Updated 2026-10-28. The objective is correct, stable TOTK Switch 1.4.3 execution on Android ARM64.
 The validated device is a OnePlus 13 (PJZ110, Adreno 830); this branch has no acceptance results for other devices.
+The current performance target is sustained 60 FPS at the actual 2× setting, including camera rotation.
+BC/ASTC already use hardware sampling decode. GPU upload-layout conversion and write-notification comparisons are
+tracked in the [texture investigation (Chinese)](../PERFORMANCE-TEXTURES-20261030.md); the full target remains unachieved.
 
 ## Confirmed progress
 

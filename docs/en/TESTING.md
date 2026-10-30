@@ -229,6 +229,21 @@ clang -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Wno-format \
 .work/totk-port/scratch/test_texture_read
 ```
 
+The GPU upload-layout test executes production `deswizzle.c` and its built-in GLSL against the existing CPU
+`tegra_deswizzle` reference. Run inside `dev` with Vulkan 1.3, Khronos validation, glslc and spirv-val:
+
+```bash
+bash tools/test_vk_deswizzle.sh .work/totk-port/tests/deswizzle
+"$PYTHON" tools/test_texture_change_policy.py .work/totk-port/tests/texture-change
+```
+
+It covers BC/ASTC block shapes, mips, array layers, 3D, a large atlas, dispatch limits, rejected bounds,
+partial initialization failure and reset. Mutating and freeing the source before submission verifies upload snapshots.
+Synchronization validation must report no warnings or errors. The change-policy test executes production decisions
+for notified/unannounced writes, cached/uncached pools, linear textures, periodic checks, restyling, diagnostic lifetime
+and the disabled comparison switch. These tests do not prove phone performance or long-session visual correctness.
+See the [texture investigation (Chinese)](../PERFORMANCE-TEXTURES-20261030.md) for experimental switches and device results.
+
 The default Tegra tile-height regression uses synthetic 160x160 BC3 data at independent fixed GOB addresses.
 It checks rounding boundaries, all 1,600 blocks, mip offsets, and explicit/3D layout overrides:
 

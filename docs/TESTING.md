@@ -214,6 +214,20 @@ clang -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Wno-format \
 .work/totk-port/scratch/test_texture_read
 ```
 
+GPU 纹理排布转换执行正式 `deswizzle.c` 和内置 GLSL，逐字节对照已有 CPU `tegra_deswizzle`。
+在 `dev` 中运行，需要 Vulkan 1.3、Khronos 验证层、glslc 和 spirv-val：
+
+```bash
+bash tools/test_vk_deswizzle.sh .work/totk-port/tests/deswizzle
+"$PYTHON" tools/test_texture_change_policy.py .work/totk-port/tests/texture-change
+```
+
+GPU 测试覆盖 BC/ASTC 块尺寸、mip、数组层、3D、大图集、派发上限、越界、初始化失败清理与重复 reset，
+并在提交前改写、释放原始内存，验证 GPU 使用上传时的快照。同步验证须无警告/错误。
+变化检测测试执行正式上传决策，覆盖通知/无通知、CPU 缓存/非缓存、线性纹理、周期校验、贴图重载与诊断对象寿命，
+另验证关闭通知优化保留原行为。它们不代替手机帧率、画面或长期运行验收。
+实验开关与实机进度见 [纹理优化记录](PERFORMANCE-TEXTURES-20261030.md)。
+
 默认 Tegra 分块高度回归使用独立固定地址的 160×160 BC3 数据，检查临界高度、全部1600块、mip偏移及显式布局／3D覆盖：
 
 ```bash
