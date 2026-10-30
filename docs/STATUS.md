@@ -1,5 +1,10 @@
 # 当前状态与已知问题
 
+2026-10-30 上游性能再审查：Git 核对 DXVK、Turnip、Eden、Ryujinx、MacNativeGames 和 TOTK Windows 分支，
+优先候选为原样深度的 conservative-depth 声明与完整清除合并；另查描述符 ring、验证索引和寻址。
+新清单匹配 1.4.3 增加 191 行管线元数据、没有新 variants。本轮只查证和记录，未改运行时或操作手机，见
+[上游优化方案](UPSTREAM-PERFORMANCE-20261030.md)。
+
 2026-10-30 后续代码阶段：描述符更新模板与按已解析值分类比较已完成，实际 stage_set、失败/重启及主机 GPU
 原写入/模板/模板+worker 回归通过；两种 Release 已构建并核验隔离。实验默认关闭、仅诊断包可启用，
 仍未操作手机或获得性能收益结论，见 [描述符更新记录](PERFORMANCE-DESCRIPTOR-UPDATES-20261030.md)。

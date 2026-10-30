@@ -1,5 +1,10 @@
 # Status and known issues
 
+2026-10-30 Git performance review: DXVK, Turnip, Eden, Ryujinx, MacNativeGames and a TOTK Windows branch were checked
+against fixed commits. Identity-depth declarations and deferred full clears are the first GPU candidates; descriptor
+rings, validation indexes and address lookup follow. The latest list adds 191 matching 1.4.3 pipeline metadata rows,
+with no new variants. Runtime and phone state were untouched; see the [review (Chinese)](../UPSTREAM-PERFORMANCE-20261030.md).
+
 2026-10-30 follow-up: descriptor update templates and category comparison of resolved values passed actual `stage_set`,
 failure/restart and host GPU legacy/template/template+worker regressions, plus both Release builds and isolation checks.
 The experiment remains disabled by default and diagnostic-only; no phone access or FPS gain was measured.
