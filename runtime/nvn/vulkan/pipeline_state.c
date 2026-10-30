@@ -1,5 +1,6 @@
 // Shared by live draws and recorded-pipeline warming. Keep one Vulkan builder.
 #include "pipeline_state.h"
+#include "compile_budget.h"
 
 static VkBlendFactor blend_factor(uint8_t f) {
     switch (f) {
@@ -49,7 +50,46 @@ bool vk_pipeline_state_valid(const VkPipelineState *k) {
         (k->used_streams >> 17) || k->topo_class > 2 || k->fx.on > 1 || k->a2c > 1 ||
         k->poly_fill > 1 || k->depth_clamp > 1 || k->prim_restart > 1) return false;
     for (unsigned i=0; i<32; ++i) if ((k->attr_mask & (1u<<i)) && k->attr_bind[i] >= 17) return false;
+    for(unsigned i=0;i<8;++i)if(k->write_mask[i]>15)return false;
+    if(k->fx.cull>3 || k->fx.ff>1 || k->fx.topo>VK_PRIMITIVE_TOPOLOGY_PATCH_LIST || k->fx.dt>1 || k->fx.dw>1 || k->fx.sten>1 || k->fx.dop>VK_COMPARE_OP_ALWAYS)return false;
+    for(unsigned i=0;i<2;++i)for(unsigned j=0;j<4;++j)if(k->fx.sop[i][j]>7)return false;
     return true;
+}
+bool vk_pipeline_state_supported(const VkPipelineState *s) {
+    if(!vk_pipeline_state_valid(s))return false;
+    if(!g_vk.phys)return true; // CPU codec tests have no physical device
+    const VkPhysicalDeviceLimits *l=&g_vk.props.limits;
+    if(s->ncolor>l->maxColorAttachments)return false;
+    VkPhysicalDeviceFeatures features;vkGetPhysicalDeviceFeatures(g_vk.phys,&features);
+    if((s->depth_clamp && !features.depthClamp) || (!s->poly_fill && !features.fillModeNonSolid))return false;
+    VkSampleCountFlags samples=l->framebufferColorSampleCounts;
+    if(s->depth)samples&=l->framebufferDepthSampleCounts;if(s->stencil)samples&=l->framebufferStencilSampleCounts;
+    if(!(samples&s->samples))return false;
+    unsigned attributes=0,bindings=0;
+    for(unsigned i=0;i<32;++i)if(s->attr_mask&(1u<<i)) {
+        ++attributes;if(i>=l->maxVertexInputAttributes || s->attr_bind[i]>=l->maxVertexInputBindings || s->attr_off[i]>l->maxVertexInputAttributeOffset || s->attr_fmt[i]>VK_FORMAT_ASTC_12x12_SRGB_BLOCK)return false;
+        VkFormatProperties properties;vkGetPhysicalDeviceFormatProperties(g_vk.phys,s->attr_fmt[i],&properties);
+        if(!(properties.bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT))return false;
+    }
+    for(unsigned i=0;i<17;++i)if(s->used_streams&(1u<<i)){++bindings;if(i>=l->maxVertexInputBindings || s->stride[i]>l->maxVertexInputBindingStride)return false;}
+    if(attributes>l->maxVertexInputAttributes || bindings>l->maxVertexInputBindings)return false;
+    for(unsigned i=0;i<s->ncolor;++i)if(s->color[i]) {
+        if(s->color[i]>VK_FORMAT_ASTC_12x12_SRGB_BLOCK)return false;
+        VkFormatProperties properties;vkGetPhysicalDeviceFormatProperties(g_vk.phys,s->color[i],&properties);
+        if(!(properties.optimalTilingFeatures&VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT))return false;
+    }
+    for(unsigned i=0;i<2;++i)if(i?s->stencil:s->depth) {
+        if((i?s->stencil:s->depth)>VK_FORMAT_ASTC_12x12_SRGB_BLOCK)return false;
+        VkFormatProperties properties;vkGetPhysicalDeviceFormatProperties(g_vk.phys,i?s->stencil:s->depth,&properties);
+        if(!(properties.optimalTilingFeatures&VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT))return false;
+    }
+    return true;
+}
+bool vk_pipeline_local_size_supported(const uint32_t local[3]) {
+    if(!vk_pipeline_local_size_valid(local))return false;
+    const VkPhysicalDeviceLimits *l=&g_vk.props.limits;if(!g_vk.phys)return true;
+    for(unsigned i=0;i<3;++i)if(local[i]>l->maxComputeWorkGroupSize[i])return false;
+    return (uint64_t)local[0]*local[1]*local[2]<=l->maxComputeWorkGroupInvocations;
 }
 bool vk_pipeline_local_size_valid(const uint32_t local[3]) {
     return local && local[0] && local[1] && local[2] && local[0]<=1024 && local[1]<=1024 && local[2]<=1024 &&
@@ -62,7 +102,9 @@ VkResult vk_pipeline_compute_build(VkShaderModule module,VkPipelineLayout layout
     VkComputePipelineCreateInfo ci={.sType=VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
         .stage={.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,.stage=VK_SHADER_STAGE_COMPUTE_BIT,
                 .module=module,.pName="main",.pSpecializationInfo=&spec},.layout=layout};
-    return vkCreateComputePipelines(g_vk.dev,g_vk.pcache,1,&ci,NULL,pipeline);
+    if(!vk_compile_budget_acquire())return VK_NOT_READY;
+    VkResult result=vkCreateComputePipelines(g_vk.dev,g_vk.pcache,1,&ci,NULL,pipeline);
+    vk_compile_budget_release();return result;
 }
 VkResult vk_pipeline_state_build(const VkPipelineState *k, VkShaderModule vertex, VkShaderModule fragment,
     VkPipelineLayout layout, uint32_t dynamic_count, const VkDynamicState *dynamic_states,
@@ -141,5 +183,7 @@ VkResult vk_pipeline_state_build(const VkPipelineState *k, VkShaderModule vertex
         if (crp) pi.pNext = ri.pNext, pi.renderPass = crp;
     }
     pi.flags = flags;
-    return vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, pipeline);
+    if(!vk_compile_budget_acquire())return VK_NOT_READY;
+    VkResult result=vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, pipeline);
+    vk_compile_budget_release();return result;
 }

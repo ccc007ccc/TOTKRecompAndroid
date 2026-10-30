@@ -4,6 +4,8 @@
 #include "shader_warm_observed.hpp"
 #include "shader_warm_requests.hpp"
 #include "shader_prepare_queue.hpp"
+#include "shader_artifact.h"
+#include "pipeline_seed.h"
 #include "shader_cache_receipt.hpp"
 #include <chrono>
 #include <cerrno>
@@ -15,6 +17,9 @@
 #endif
 #ifndef SHADER_WARM_ID
 #define SHADER_WARM_ID "development"
+#endif
+#ifndef SHADER_TRANSLATION_ID
+#define SHADER_TRANSLATION_ID SHADER_BUILD_ID
 #endif
 extern std::mutex vk_shader_preparation_mutex;
 
@@ -36,7 +41,7 @@ std::string warm_identity(const char* game,const char* manifest,bool title,const
     vk_shader_translate_begin();auto profile=vk_shader_prepare_profile();vk_shader_translate_end();
     if(captured_profile)*captured_profile=profile;
     std::ostringstream out;
-    out<<"warm-v2:"<<SHADER_WARM_ID<<':'<<SHADER_BUILD_ID<<':'<<title<<':'<<file.st_size<<':'<<file.st_mtim.tv_sec<<':'<<file.st_mtim.tv_nsec<<':'<<file.st_ino<<':'<<std::hex<<profile<<':';
+    out<<"warm-v3:"<<SHADER_WARM_ID<<':'<<SHADER_BUILD_ID<<':'<<title<<':'<<file.st_size<<':'<<file.st_mtim.tv_sec<<':'<<file.st_mtim.tv_nsec<<':'<<file.st_ino<<':'<<std::hex<<profile<<':'<<vk_shader_cache_namespace()<<':';
     for(auto value:digest)out<<std::setw(2)<<std::setfill('0')<<unsigned(value);
     return out.str();
 }
@@ -79,7 +84,12 @@ bool shader_warm::prepare(const char* game,const char* manifest,bool title_only,
         shader_warm::require(!identity.empty(),"cannot identify graphics warm-up inputs");
         auto receipt=state+(title_only?"/title.receipt":"/common.receipt");
         size_t hits=0;
-        if(warm_cached(receipt,identity,hits,checkpoint)) {
+        bool cached=warm_cached(receipt,identity,hits,checkpoint);
+        if(cached) {
+            std::vector<VkPipelineRecipe> seeds(4096);auto seed_id=vk_pipeline_seed_identity(143);
+            cached=vk_pipeline_seed_load((state+"/pipeline-seed.bin").c_str(),&seed_id,seeds.data(),seeds.size())!=0;
+        }
+        if(cached) {
             require_profile(identity_profile);
             double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
             fprintf(log,"result cache_hits=%zu seconds=%.3f compiler_opened=0 driver_pipelines=0\n",hits,seconds);close_log();
@@ -90,7 +100,8 @@ bool shader_warm::prepare(const char* game,const char* manifest,bool title_only,
         if(progress)progress(0,"Reading graphics warm-up list...");
         shader_archive::Romfs rom((std::string(game)+"/romfs.bin").c_str());
         auto catalog=shader_catalog::read(rom,[&](const std::string&){checkpoint();});
-        auto compute=title_only?std::vector<Request>{}:default_compute_requests(catalog);
+        auto compute=default_compute_requests(catalog);
+        if(title_only)for(auto& request:compute)request.title=true;
         requests.insert(requests.begin(),compute.begin(),compute.end());
         requests.insert(requests.begin(),recent.begin(),recent.end());
         auto selection=shader_warm::select(catalog,requests,title_only);
@@ -102,15 +113,25 @@ bool shader_warm::prepare(const char* game,const char* manifest,bool title_only,
         auto profile=vk_shader_prepare_profile();
         vk_shader_translate_end();
         if(profile!=identity_profile)throw std::runtime_error("graphics configuration changed during warm-up");
-        ShaderPrepareQueue queue(0,[&]{checkpoint();if(options.background)shader_warm::background_priority();});
+        ShaderPrepareQueue queue(0,[&]{checkpoint();if(options.background)shader_warm::background_priority();},options.background);
         // As in upstream TranslationCache, a completed item survives cancellation
         // and additions to the shared/recent list. Identity still binds the actual
         // translator, planner and profile; every reused SPIR-V key is checked.
         std::ostringstream request_identity;
-        request_identity<<SHADER_BUILD_ID<<':'<<SHADER_WARM_ID<<':'<<std::hex<<profile;
+        request_identity<<SHADER_TRANSLATION_ID<<':'<<SHADER_WARM_ID<<':'<<std::hex<<profile;
         RequestCache request_cache(state,request_identity.str());
         size_t queued=0;
         std::set<uint64_t> keys,verified;
+        std::vector<VkPipelineRecipe> seeds;
+        std::set<std::array<uint64_t,4>> seed_keys;
+        auto seed_compute=[&](unsigned record,uint64_t source) {
+            const auto& shader=catalog.records.at(record).shader;
+            if(shader.stage!=STAGE_COMPUTE || shader.control.size()<0x754)return;
+            shader_archive::View control{shader.control.data(),shader.control.size()};uint32_t local[3];
+            for(unsigned i=0;i<3;++i){local[i]=control.u32(0x748+4*i);if(!local[i])local[i]=1;}
+            if(!vk_pipeline_local_size_valid(local) || seeds.size()>=4096 || !seed_keys.insert({source,local[0],local[1],local[2]}).second)return;
+            VkPipelineRecipe recipe;vk_pipeline_recipe_compute(&recipe,source,local);seeds.push_back(recipe);
+        };
         auto report_queued=[&] {
             if(!(++queued%64)) {
                 fprintf(log,"queued=%zu completed=%llu cached_requests=%zu\n",queued,(unsigned long long)queue.done(),cached_requests);fflush(log);
@@ -122,7 +143,14 @@ bool shader_warm::prepare(const char* game,const char* manifest,bool title_only,
             checkpoint();require_profile(profile);
             const auto& shader=catalog.records.at(record).shader;RequestCache::Result cached;
             if(!request_cache.get(request_cache.key(shader,key),cached) || cached.stage!=shader.stage)return false;
+            if(!getenv("LARECOMP_SHADER_ARTIFACTS") || atoi(getenv("LARECOMP_SHADER_ARTIFACTS"))) {
+                auto raw=raw_key(shader);VkShaderArtifact artifact{};
+                vk_shader_translate_begin();auto artifact_profile=vk_shader_artifact_profile(vk_shader_prepare_profile());vk_shader_translate_end();
+                if(!vk_shader_artifact_load(raw.data(),&key,artifact_profile,shader.stage,&artifact))return false;
+                vk_shader_artifact_free(&artifact);
+            }
             if(!verified.count(cached.source) && !vk_shader_cached(cached.source))return false;
+            seed_compute(record,cached.source);
             verified.insert(cached.source);keys.insert(cached.source);++cached_requests;report_queued();return true;
         };
         reuse.mask=[&](unsigned record,const ShaderKey& key,uint32_t& mask) {
@@ -138,6 +166,10 @@ bool shader_warm::prepare(const char* game,const char* manifest,bool title_only,
             }
             shader_warm::Info info(maxwell_translate_bounded(shader.binary.data(),shader.constants,
                                   shader.binary.size()-shader.constants,shader.stage,&key),maxwell_free);
+            if(info && info->msl) {
+                auto raw=raw_key(shader);
+                vk_shader_artifact_store(raw.data(),&key,vk_shader_artifact_profile(profile),info.get());
+            }
             auto after=vk_shader_prepare_profile();vk_shader_translate_end();
             if(after!=profile)throw std::runtime_error("graphics configuration changed during warm-up");
             ++translations;
@@ -145,13 +177,26 @@ bool shader_warm::prepare(const char* game,const char* manifest,bool title_only,
             return info;
         },[&](unsigned record,const ShaderKey&,const ShaderInfo& info){
             keys.insert(vk_shader_prepare_key(info.msl,info.stage));
+            seed_compute(record,vk_shader_prepare_key(info.msl,info.stage));
             queue.submit(info.msl,info.stage,"warm-"+std::to_string(record));
             report_queued();
         },reuse);
         if(progress)progress(0.8,"Preparing graphics used by the warm-up list...");
         queue.finish();
+        vk_shader_artifact_flush();
         checkpoint();
         require_profile(identity_profile);
+        auto seed_identity=vk_pipeline_seed_identity(143);
+        if(title_only && !seeds.empty()) {
+            std::vector<VkPipelineRecipe> previous(4096);
+            unsigned n=vk_pipeline_seed_load((state+"/pipeline-seed.bin").c_str(),&seed_identity,previous.data(),previous.size());
+            for(unsigned i=0;i<n && seeds.size()<4096;++i) {
+                bool found=false;for(const auto& seed:seeds)if(!memcmp(&seed,&previous[i],sizeof seed)){found=true;break;}
+                if(!found)seeds.push_back(previous[i]);
+            }
+            if(!vk_pipeline_seed_save((state+"/pipeline-seed.bin").c_str(),&seed_identity,seeds.data(),seeds.size()))fprintf(log,"pipeline_seed_not_saved\n");
+        }
+        fprintf(log,"pipeline_seed_compute=%zu driver_pipelines=0\n",seeds.size());
         if(!save_receipt(receipt,identity,keys))fprintf(log,"receipt_not_saved\n");
         double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
         fprintf(log,"result requests=%zu source_requests=%zu unique_sources=%zu vertex=%zu fragment=%zu compute=%zu unpaired_fragments=%zu seconds=%.3f driver_pipelines=0\n",
@@ -174,4 +219,10 @@ bool shader_warm::prepare(const char* game,const char* manifest,bool title_only,
 extern "C" bool vk_shader_warm_game(const char* game,const char* manifest,bool title_only,
                                     void (*progress)(double,const char*),char* why,size_t capacity) {
     return shader_warm::prepare(game,manifest,title_only,progress?shader_warm::Progress(progress):shader_warm::Progress{},why,capacity,{});
+}
+extern "C" bool vk_shader_pipeline_seed_path(const char* game,char* out,size_t capacity) {
+    if(!game || !out || !capacity)return false;
+    try{auto path=shader_warm::state_directory(game)+"/pipeline-seed.bin";
+        if(path.size()>=capacity)return false;memcpy(out,path.c_str(),path.size()+1);return true;
+    }catch(...){return false;}
 }

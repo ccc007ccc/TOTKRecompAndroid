@@ -9,6 +9,11 @@
 ## 常用检查
 
 着色器首次使用的主机 CPU 分阶段测量执行 `bash tools/benchmark_shader_firstuse.sh <自己的 romfs.bin> <隔离输出目录>`。
+该工具同时比较原译码/严格 SPIR-V 缓存和完整输入哈希/接口直读，不测手机 FPS。
+新接口 codec/实际 handoff 用 `bash tools/test_shader_artifacts.sh <隔离输出目录>`；`TOTK_ARTIFACT_TSAN=1` 单独覆盖并发存储。
+共同预算/模块引用/取消回退/源码键 golden 用 `TOTK_SHADER_TSAN=1 bash tools/test_shader_scheduling.sh <隔离输出目录>`。
+身份拆分执行 `"$PYTHON" tools/test_shader_identity.py`；实际 compute seed 的主机管线重建用
+`bash tools/test_vk_shader_seed.sh <prepare 输出中的 result> <其中的 pipeline-seed.bin> <隔离输出目录>`，只创建/领用，不派发游戏计算。
 覆盖正式译码/准备、严格已准备 SPIR-V 加载和反射；输出是否原已缓存。它只取各阶段最大的静态输入，
 不测 driver pipeline/FPS，不触碰玩家缓存。配置、结果和架构差距见 [本轮审查](SHADER-ARCHITECTURE-20261030.md)。
 

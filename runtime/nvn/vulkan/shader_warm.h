@@ -14,6 +14,7 @@ void vk_shader_translate_end(void);
 bool vk_shader_prepare_compute_linear(void);
 typedef struct {bool running,title_ready,failed;double progress;} ShaderWarmStatus;
 bool vk_shader_warm_enabled(void);
+bool vk_shader_pipeline_seed_path(const char *game,char *out,size_t capacity);
 void vk_shader_warm_start(const char *game,const char *manifest);
 void vk_shader_warm_stop(void); // cancel and join, retaining completed cache entries
 void vk_shader_warm_cancel_async(void); // lifecycle notification: request cancellation without joining

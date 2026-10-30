@@ -7,11 +7,17 @@ typedef struct { uint64_t shader[2]; VkPipelineState state; uint32_t local[3]; }
 // without maintenance4. No handles from this object are ever persisted.
 typedef struct { VkPipeline pipeline; VkPipelineLayout layout; VkDescriptorSetLayout sets[2]; } VkPipelineWarmProduct;
 typedef VkResult (*VkPipelineWarmBuild)(const VkPipelineRecipe *, VkPipelineWarmProduct *);
-typedef struct { uint32_t loaded, prepared, used, missing, failed, cancelled; } VkPipelineWarmStats;
+typedef struct { uint32_t loaded, prepared, used, missing, failed, cancelled, seeded; } VkPipelineWarmStats;
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 void vk_pipeline_recipe_make(VkPipelineRecipe *out, uint64_t vertex, uint64_t fragment, const VkPipelineState *state);
 void vk_pipeline_recipe_compute(VkPipelineRecipe *out, uint64_t compute, const uint32_t local[3]);
 void vk_pipeline_warm_start(VkPipelineWarmBuild build);
+void vk_pipeline_warm_start_seed(VkPipelineWarmBuild build,const char *path,unsigned game);
+bool vk_pipeline_warm_wait(unsigned milliseconds);
+bool vk_pipeline_warm_waiting(void); // queued work can still make progress
 void vk_pipeline_warm_stop(void);
 void vk_pipeline_warm_cancel_async(void);
 void vk_pipeline_warm_record(const VkPipelineRecipe *recipe);
@@ -21,3 +27,7 @@ bool vk_pipeline_warm_save(void);
 VkPipelineWarmStats vk_pipeline_warm_stats(void);
 // The renderer provides this entry, using the same module/layout/pipeline builder.
 void vk_pipeline_warm_begin(void);
+void vk_pipeline_warm_begin_for_game(const char *game,void (*idle)(void));
+#ifdef __cplusplus
+}
+#endif

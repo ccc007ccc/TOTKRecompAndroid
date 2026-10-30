@@ -25,6 +25,10 @@
 #include "shader_object_cache.h"
 #include "pipeline_state.h"
 #include "pipeline_warm.h"
+#include "shader_module_cache.h"
+#include "shader_config.h"
+#include "shader_keys.h"
+#include "compile_budget.h"
 #include "vk.h"
 #include "timing_trace.h"
 #include "../renderer.h"
@@ -36,6 +40,7 @@
 #include "view_overlap.h"
 #include "feedback_identity.h"
 #include "pass_clear.h"
+#include "shader_artifact.h"
 #include "../submit_snapshot.h"
 
 // LARECOMP_AB (vk_ab, below): AB() costs no call while it is not set - it is asked per constant buffer and per pass
@@ -1181,12 +1186,11 @@ void vk_shader_translate_begin(void) {
     vk_shader_prepare_configure();
 }
 void vk_shader_translate_end(void) { pthread_mutex_unlock(&translate_lock); }
-bool vk_shader_prepare_compute_linear(void) {
+unsigned vk_shader_memory_modes(void) {
 #ifdef __ANDROID__
-    extern bool vk_driver_is_qualcomm(void);
-    return vk_driver_is_qualcomm();
+    return (gcopy_mode || gwin_mode) | (gcopy_mode<<1);
 #else
-    return false;
+    return 0;
 #endif
 }
 static Job *tjobs_head, *tjobs_tail;
@@ -1276,6 +1280,7 @@ void vk_shader_jobs_drain(void) {
     pthread_mutex_lock(&jobs_lock);
     while (jobs_head || jobs_active) pthread_cond_wait(&jobs_cond, &jobs_lock);
     pthread_mutex_unlock(&jobs_lock);
+    vk_shader_artifact_flush();
 }
 
 // The following target heuristics apply only to LARECOMP_ASYNC_SKIP_DRAWS diagnostics.
@@ -2411,9 +2416,13 @@ typedef struct {
     ShaderInfo *vi, *fi;
     uint64_t code[2], cmax[2];  // guest addresses retained for translation and diagnostics
     uint64_t source_keys[2];  // complete SPIR-V identity, independent of guest addresses
+    NvnShaderStage inputs[2]; // guest input snapshots; reset drains translation before these addresses are released
+    uint32_t *prepared_spirv[2];
+    size_t prepared_words[2];
     size_t const_bytes[2];
     ShaderKey vkey, fkey;
     VkShaderModule vs, fs;
+    VkShaderModuleLease modules[2];
     VkBindingInfo binds[MAX_BIND];
     int nbinds;
 #ifdef __ANDROID__
@@ -2500,29 +2509,30 @@ static void subst_glsl(ShaderInfo *si, uint64_t addr, const char *suffix) {
 #endif
 
 static void graphics_program_release(Prog *p) {
+    for (unsigned i=0;i<2;++i) { free(p->prepared_spirv[i]);p->prepared_spirv[i]=NULL;p->prepared_words[i]=0; }
 #if defined(__ANDROID__) && TOTK_DIAGNOSTICS
     for (unsigned i = 0; i < 2; i++) if (p->descriptor_updates[i]) {
         vk_descriptor_update_destroy(p->descriptor_updates[i], g_vk.dev);
         free(p->descriptor_updates[i]); p->descriptor_updates[i] = NULL;
     }
 #endif
-    if(p->vs)vkDestroyShaderModule(g_vk.dev,p->vs,NULL);
-    if(p->fs)vkDestroyShaderModule(g_vk.dev,p->fs,NULL);
+    if(p->modules[0].entry)vk_shader_module_release(&p->modules[0]);
+    else if(p->vs)vkDestroyShaderModule(g_vk.dev,p->vs,NULL);
+    if(p->modules[1].entry)vk_shader_module_release(&p->modules[1]);
+    else if(p->fs)vkDestroyShaderModule(g_vk.dev,p->fs,NULL);
     if(p->layout)vkDestroyPipelineLayout(g_vk.dev,p->layout,NULL);
     for(unsigned i=0;i<2;++i)if(p->set_layout[i])vkDestroyDescriptorSetLayout(g_vk.dev,p->set_layout[i],NULL);
     p->vs=p->fs=VK_NULL_HANDLE;p->layout=VK_NULL_HANDLE;p->set_layout[0]=p->set_layout[1]=VK_NULL_HANDLE;
 }
 static bool graphics_program_modules(Prog *p,const uint32_t *sv,size_t nv,const uint32_t *sf,size_t nf) {
-    p->nbinds = vk_reflect(sv, nv, p->binds, MAX_BIND);
-    p->nbinds += vk_reflect(sf, nf, p->binds + p->nbinds, MAX_BIND - p->nbinds);
-    p->vs = vk_module(sv, nv);
-    p->fs = vk_module(sf, nf);
-    if (!p->vs || !p->fs) {
-        if (p->vs) vkDestroyShaderModule(g_vk.dev, p->vs, NULL);
-        if (p->fs) vkDestroyShaderModule(g_vk.dev, p->fs, NULL);
-        p->vs = p->fs = VK_NULL_HANDLE;
-        return false;
-    }
+    if(!p->modules[0].entry && !vk_shader_module_acquire(p->source_keys[0],STAGE_VERTEX,sv,nv,&p->modules[0]))return false;
+    if(!p->modules[1].entry && !vk_shader_module_acquire(p->source_keys[1],STAGE_FRAGMENT,sf,nf,&p->modules[1])){graphics_program_release(p);return false;}
+    p->vs=p->modules[0].module;p->fs=p->modules[1].module;
+    if(p->modules[0].count+p->modules[1].count>MAX_BIND){graphics_program_release(p);return false;}
+    p->nbinds=p->modules[0].count;
+    memcpy(p->binds,p->modules[0].bindings,p->nbinds*sizeof *p->binds);
+    memcpy(p->binds+p->nbinds,p->modules[1].bindings,p->modules[1].count*sizeof *p->binds);
+    p->nbinds+=p->modules[1].count;
 #ifdef __ANDROID__
     {   // Dynamic uniform buffers: every draw copies its constant buffers to a new place in transient memory, and with
         // the offsets inside the sets hardly any set matched the previous draw's - one allocated and written per stage
@@ -2548,11 +2558,11 @@ static bool graphics_program_modules(Prog *p,const uint32_t *sv,size_t nv,const 
 }
 static void compile_program(void *arg) {
     Prog *p = arg;
-    p->source_keys[0]=vk_shader_prepare_key(p->vi->msl,STAGE_VERTEX);
-    p->source_keys[1]=vk_shader_prepare_key(p->fi->msl,STAGE_FRAGMENT);
-    size_t nv=0,nf=0;
-    uint32_t *sv=vk_load_shader(p->vi->msl,STAGE_VERTEX,"vs",&nv);
-    uint32_t *sf=sv?vk_load_shader(p->fi->msl,STAGE_FRAGMENT,"fs",&nf):NULL;
+    size_t nv=p->prepared_words[0],nf=p->prepared_words[1];
+    uint32_t *sv=p->prepared_spirv[0],*sf=p->prepared_spirv[1];
+    p->prepared_spirv[0]=p->prepared_spirv[1]=NULL;
+    if(!sv){p->source_keys[0]=vk_shader_prepare_key(p->vi->msl,STAGE_VERTEX);sv=vk_load_shader(p->vi->msl,STAGE_VERTEX,"vs",&nv);}
+    if(sv && !sf){p->source_keys[1]=vk_shader_prepare_key(p->fi->msl,STAGE_FRAGMENT);sf=vk_load_shader(p->fi->msl,STAGE_FRAGMENT,"fs",&nf);}
     bool ok=sv && sf && graphics_program_modules(p,sv,nv,sf,nf);
     free(sv);free(sf);
     atomic_fetch_add(&stat_compiles,1);
@@ -2563,131 +2573,51 @@ static void compile_program(void *arg) {
 static uint64_t hmix(uint64_t h, const void *p, size_t n);  // (below; LARECOMP_DUMP_FS)
 #endif
 
-#ifdef __ANDROID__
-// The structured control flow (maxwell_structured) unless LARECOMP_NO_STRUCTURE - and not on Qualcomm's own driver,
-// whose shader compiler crashed on it inside vkCreateGraphicsPipelines (libllvm-qgl, 2026-10-16: the overworld) -
-// LARECOMP_STRUCTURE=1 there anyway
-extern bool vk_driver_is_qualcomm(void);
-static bool structure_on(void) {
-    static int on = -1;
-    if (on < 0) {
-        extern bool vk_driver_is_qualcomm(void);
-        on = !getenv("LARECOMP_NO_STRUCTURE") && (!vk_driver_is_qualcomm() || getenv("LARECOMP_STRUCTURE"));
-        if (!on && vk_driver_is_qualcomm()) LOG("[vk] Qualcomm's driver: shaders keep their branch state machine (its compiler)\n");
+static bool shader_stage_raw_key(const NvnShaderStage *stage,uint8_t raw[32]) {
+    if(!stage->control || !stage->code_addr || !stage->const_offset ||
+       stage->const_offset>16u*1024*1024 || stage->const_size>16u*1024*1024-stage->const_offset) return false;
+    uint32_t length;memcpy(&length,stage->control+0x20,4);
+    if(length!=0x880 && length!=0x7d1)return false;
+    size_t prefix=stage->stage==STAGE_COMPUTE?stage->entry_offset:0;
+    if(prefix>=stage->const_offset)return false;
+    const uint8_t *blob=(const uint8_t *)(uintptr_t)stage->code_addr;
+    return vk_shader_artifact_input_key(stage->control,length,blob,prefix,blob+prefix,
+                                       stage->const_offset+stage->const_size-prefix,raw);
+}
+// The caller holds translate_lock so metadata and fallback see one profile.
+static ShaderInfo *load_or_translate_stage(const NvnShaderStage *input,const uint8_t *code,size_t bytes,
+                                          size_t constants,int stage,const ShaderKey *key,Prog *p,unsigned slot) {
+    uint8_t raw[32];bool known=shader_stage_raw_key(input,raw);
+    uint64_t profile=vk_shader_artifact_profile(vk_shader_prepare_profile());
+    VkShaderArtifact artifact={0};
+    if(known && vk_shader_artifact_load(raw,key,profile,stage,&artifact)) {
+        p->prepared_spirv[slot]=artifact.spirv;p->prepared_words[slot]=artifact.words;
+        p->source_keys[slot]=artifact.source_key;
+        if(stage==STAGE_VERTEX)p->vs_uses_vid=artifact.vertex_index;
+        return artifact.info;
     }
-    return on;
+    ShaderInfo *info=maxwell_translate_bounded(code,bytes,constants,stage,key);
+    if(known && info && info->msl)vk_shader_artifact_store(raw,key,profile,info);
+    return info;
 }
-#endif
-
-// Qualcomm's driver with the structured control flow (LARECOMP_STRUCTURE=1): its compiler crashed on a shader whose
-// structured form has a GLSL switch (a jump table) - those keep their state machine there. LARECOMP_QCOM_SWITCH=1: not.
-static bool qcom_no_switch(void) {
-    static int on = -1;
-    if (on < 0) {
-        extern bool vk_driver_is_qualcomm(void);
-        on = vk_driver_is_qualcomm() && !getenv("LARECOMP_QCOM_SWITCH");
-    }
-    return on;
-}
-
-static uint8_t gather_bias_bits(void) {
-    static int bits = -1;
-    if (bits < 0) {
-        // Eden a95efaf / #4565: Maxwell's gather footprint rounds at 8-bit
-        // subtexel precision, independently of the host's advertised precision.
-        int automatic = (g_vk.props.vendorID == 0x1002 || g_vk.props.vendorID == 0x8086 ||
-                         g_vk.props.vendorID == 0x5143) ? 8 : 0;
-#ifdef __ANDROID__
-        extern bool vk_driver_is_turnip(void);
-        extern bool vk_driver_is_qualcomm(void);
-        if (vk_driver_is_turnip() || vk_driver_is_qualcomm()) automatic = 8;
-#endif
-        const char *e = getenv("LARECOMP_GATHER_BIAS_BITS");
-        bits = e ? atoi(e) : automatic;
-        if (bits < 0 || bits > 23) bits = 0;
-        LOG("[vk] gather subtexel correction: %d bits%s (device precision %u)\n", bits,
-            e ? " (override)" : "", g_vk.props.limits.subTexelPrecisionBits);
-    }
-    return (uint8_t)bits;
-}
-
-static bool vertex_snap_on(void) { // shader keys are constructed on the render thread
-    static int on = -1;
-    if(on<0) {
-        const char *value=getenv("LARECOMP_VS_SNAP");
-        on=value&&atoi(value)!=0&&!getenv("LARECOMP_NO_VS_SNAP");
-        if(on)LOG("[vk] experimental vertex sampling quantization enabled\n");
-    }
-    return on!=0;
-}
-
-void vk_shader_prepare_configure(void) {
-    maxwell_gmem_base = HEAP_BASE;
-    maxwell_gmem_size = HEAP_MAX;
-#ifdef __ANDROID__
-    maxwell_no_int64 = !g_vk.shader_int64 || g_settings.shader_int32 || getenv("LARECOMP_VK_INT32") != NULL;
-    maxwell_fp32_double = g_settings.shader_fp32;
-    maxwell_gmem_map_all = gcopy_mode || gwin_mode;
-    maxwell_gmem_miss_log = gcopy_mode && !getenv("LARECOMP_NO_GMISS");
-    maxwell_gmem_miss_stages = getenv("LARECOMP_GMISS_STAGES") ?
-        (unsigned)strtoul(getenv("LARECOMP_GMISS_STAGES"), NULL, 0) : ~0u;
-    maxwell_brx_window = !getenv("LARECOMP_BRX_ALL_LABELS");
-    maxwell_static_stacks = !getenv("LARECOMP_DYN_STACKS");
-    maxwell_structured = structure_on();
-    maxwell_no_switch = qcom_no_switch();
-    maxwell_no_local_struct = qcom_no_switch() && !getenv("LARECOMP_QCOM_LOCAL");
-    maxwell_explicit_fallthrough = vk_driver_is_qualcomm();
-    maxwell_native_half = !getenv("LARECOMP_BITWISE_HALF");
-    maxwell_fast_minmax = !getenv("LARECOMP_SAFE_MATH");
-#endif
-}
-unsigned vk_shader_prepare_gather(void) { return gather_bias_bits(); }
-bool vk_shader_prepare_vertex_snap(void) { return vertex_snap_on(); }
-uint64_t vk_shader_prepare_profile(void) {
-    static const char *names[] = {"LARECOMP_VK_OPT", "LARECOMP_VK_INT32", "LARECOMP_NO_STRUCTURE", "LARECOMP_STRUCTURE",
-        "LARECOMP_QCOM_SWITCH", "LARECOMP_QCOM_LOCAL", "LARECOMP_BRX_ALL_LABELS", "LARECOMP_DYN_STACKS",
-        "LARECOMP_GMISS_STAGES", "LARECOMP_BITWISE_HALF", "LARECOMP_SAFE_MATH", "LARECOMP_GATHER_BIAS_BITS",
-        "LARECOMP_VS_SNAP", "LARECOMP_NO_VS_SNAP", "LARECOMP_NO_BANK2", "LARECOMP_NO_DISCARD", "LARECOMP_SAVE_MSL"};
-    char text[192];
-    unsigned int32_setting = 0, fp32_setting = 0;
-#ifdef __ANDROID__
-    int32_setting = g_settings.shader_int32;
-    fp32_setting = g_settings.shader_fp32;
-#endif
-    snprintf(text, sizeof text, "%llu:%llu:%u:%u:%u:%u:%u:%u:%u", (unsigned long long)HEAP_BASE,
-             (unsigned long long)HEAP_MAX, g_vk.props.vendorID, g_vk.props.deviceID,
-             g_vk.props.driverVersion, g_vk.shader_int64, int32_setting, fp32_setting, g_vk.api);
-    uint64_t h = vk_shader_source_hash(text, 0, false);
-    for (size_t i = 0; i < sizeof names / sizeof *names; ++i) {
-        const char *v = getenv(names[i]);
-        h = (h ^ vk_shader_source_hash(v ? v : "<unset>", (int)i, false)) * 0x100000001b3ull;
-    }
-    // Receipt validity includes the current heap memory access path.
-    unsigned memory=0;
-#ifdef __ANDROID__
-    memory=(gcopy_mode || gwin_mode) | ((gcopy_mode && !getenv("LARECOMP_NO_GMISS"))<<1);
-#endif
-    return h ^ gather_bias_bits() ^ ((uint64_t)memory<<24) ^ ((uint64_t)g_vk.props.apiVersion << 32);
-}
-
 static void translate_program(void *arg) {
     Prog *p = arg;
     pthread_mutex_lock(&translate_lock);
     vk_shader_prepare_configure();
-    p->vi = maxwell_translate_bounded((const uint8_t *)(uintptr_t)p->code[0], p->cmax[0], p->const_bytes[0], STAGE_VERTEX, &p->vkey);
-    if (p->vi->msl) {
+    p->vi = load_or_translate_stage(&p->inputs[0],(const uint8_t *)(uintptr_t)p->code[0],p->cmax[0],p->const_bytes[0],STAGE_VERTEX,&p->vkey,p,0);
+    if (p->vi && (p->vi->msl || p->prepared_spirv[0])) {
         p->fkey.vs_out_mask = p->vi->out_mask;
-        p->fi = maxwell_translate_bounded((const uint8_t *)(uintptr_t)p->code[1], p->cmax[1], p->const_bytes[1], STAGE_FRAGMENT, &p->fkey);
+        p->fi = load_or_translate_stage(&p->inputs[1],(const uint8_t *)(uintptr_t)p->code[1],p->cmax[1],p->const_bytes[1],STAGE_FRAGMENT,&p->fkey,p,1);
         p->fs_out_mask = p->fi ? p->fi->out_mask : 0;
     }
     pthread_mutex_unlock(&translate_lock);
-    if (!p->vi->msl) {
-        LOG("[shader] VS translate failed: %s (code %llx)\n", p->vi->error, (unsigned long long)p->code[0]);
+    if (!p->vi || (!p->vi->msl && !p->prepared_spirv[0])) {
+        LOG("[shader] VS translate failed: %s (code %llx)\n", p->vi?p->vi->error:"allocation failed", (unsigned long long)p->code[0]);
         atomic_store(&p->state, 2);
         return;
     }
-    if (!p->fi->msl) {
-        LOG("[shader] FS translate failed: %s\n", p->fi->error);
+    if (!p->fi || (!p->fi->msl && !p->prepared_spirv[1])) {
+        LOG("[shader] FS translate failed: %s\n", p->fi?p->fi->error:"allocation failed");
         atomic_store(&p->state, 2);
         return;
     }
@@ -2711,10 +2641,12 @@ static void translate_program(void *arg) {
     subst_glsl(p->vi, p->code[0], "vs");
     subst_glsl(p->fi, p->code[1], "fs");
 #endif
-    p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
-    vertex_debug_instrument(p->vi, &p->vkey, p->code[0]);
-    save_glsl(p->vi->msl, p->code[0], "vs");
-    save_glsl(p->fi->msl, p->code[1], "fs");
+    if(p->vi->msl) {
+        p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
+        vertex_debug_instrument(p->vi, &p->vkey, p->code[0]);
+        save_glsl(p->vi->msl, p->code[0], "vs");
+    }
+    if(p->fi->msl)save_glsl(p->fi->msl,p->code[1],"fs");
     run_job(compile_program, p);
 }
 
@@ -2762,6 +2694,7 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     prog_last.prog = p;
     if (!shader_object_put(&prog_tab, h, p)) FATAL("graphics program cache allocation failed\n");
     for (int i = 0; i < 2; i++) {
+        p->inputs[i]=np->stages[i];
         p->code[i] = np->stages[i].code_addr;
         p->cmax[i] = np->stages[i].const_offset ? np->stages[i].const_offset : 0x10000;
         p->const_bytes[i] = np->stages[i].const_offset ? np->stages[i].const_size : 0;
@@ -3021,20 +2954,20 @@ static void retain_warm_layout(Prog *program,VkPipelineWarmProduct *product) {
     for(unsigned i=0;i<2;++i){product->sets[i]=program->set_layout[i];program->set_layout[i]=VK_NULL_HANDLE;}
 }
 static VkResult warm_pipeline_from_cache(const VkPipelineRecipe *recipe,VkPipelineWarmProduct *product) {
-    size_t nv=0,nf=0;
-    uint32_t *sv=vk_shader_cache_load_key(recipe->shader[0],false,&nv);
-    if(sv && !recipe->shader[1]) {
-        Prog program={0};program.nbinds=vk_reflect(sv,nv,program.binds,MAX_BIND);
-        program.vs=vk_module(sv,nv);free(sv);
+    Prog program={0};
+    if(!vk_shader_module_acquire(recipe->shader[0],recipe->shader[1]?STAGE_VERTEX:STAGE_COMPUTE,NULL,0,&program.modules[0]))return VK_NOT_READY;
+    if(!recipe->shader[1]) {
+        program.nbinds=program.modules[0].count;
+        memcpy(program.binds,program.modules[0].bindings,program.nbinds*sizeof *program.binds);
+        program.vs=program.modules[0].module;
         program.layout=try_make_layout(&program,1,VK_SHADER_STAGE_COMPUTE_BIT,0);
         VkResult result=program.vs && program.layout?vk_pipeline_compute_build(program.vs,program.layout,recipe->local,&product->pipeline):VK_ERROR_INITIALIZATION_FAILED;
         retain_warm_layout(&program,product);
         graphics_program_release(&program);return result;
     }
-    uint32_t *sf=sv?vk_shader_cache_load_key(recipe->shader[1],false,&nf):NULL;
-    if(!sv || !sf){free(sv);free(sf);return VK_NOT_READY;}
-    Prog program={0};
-    bool ok=graphics_program_modules(&program,sv,nv,sf,nf);free(sv);free(sf);
+    if(!vk_shader_module_acquire(recipe->shader[1],STAGE_FRAGMENT,NULL,0,&program.modules[1])){graphics_program_release(&program);return VK_NOT_READY;}
+    program.source_keys[0]=recipe->shader[0];program.source_keys[1]=recipe->shader[1];
+    bool ok=graphics_program_modules(&program,program.modules[0].spirv,program.modules[0].words,program.modules[1].spirv,program.modules[1].words);
     if(!ok)return VK_ERROR_INITIALIZATION_FAILED;
     VkPipelineCreateFlags flags=0;
 #ifdef __ANDROID__
@@ -3046,6 +2979,17 @@ static VkResult warm_pipeline_from_cache(const VkPipelineRecipe *recipe,VkPipeli
     return result;
 }
 void vk_pipeline_warm_begin(void) { if(g_vk.dev)vk_pipeline_warm_start(warm_pipeline_from_cache); }
+void vk_pipeline_warm_begin_for_game(const char *game,void (*idle)(void)) {
+    if(!g_vk.dev)return;
+    char path[1200]={0};vk_shader_pipeline_seed_path(game,path,sizeof path);
+    vk_pipeline_warm_start_seed(warm_pipeline_from_cache,path,g_game_version);
+    uint64_t deadline=plat_now_ns()+15000000000ull;
+    while(vk_pipeline_warm_waiting() && !vk_pipeline_warm_wait(10) && plat_now_ns()<deadline){if(idle)idle();}
+    VkPipelineWarmStats status=vk_pipeline_warm_stats();
+    LOG("[pipeline-warm] loading recorded=%u seeded=%u prepared=%u missing=%u failed=%u pending=%u\n",
+        status.loaded,status.seeded,status.prepared,status.missing,status.failed,
+        status.loaded-status.prepared-status.missing-status.failed-status.cancelled);
+}
 
 // ================================================================== feedback snapshots (renderer.m resolve_feedback)
 static NvnTexture *feedback_tex[4];
@@ -5242,17 +5186,18 @@ static void build_compute(void *arg) {
     CsProg *cp = arg;
     if(cp->si->image_format_mask && !g_vk.image_write_without_format)
         FATAL("[vk] this GPU lacks formatted storage image writes without a format\n");
-    size_t n = 0;
-    uint32_t *spv = vk_load_shader(cp->si->msl, STAGE_COMPUTE, "cs", &n);
+    size_t n=cp->p.prepared_words[0];
+    uint32_t *spv=cp->p.prepared_spirv[0];cp->p.prepared_spirv[0]=NULL;
+    if(!spv){cp->p.source_keys[0]=vk_shader_prepare_key(cp->si->msl,STAGE_COMPUTE);spv=vk_load_shader(cp->si->msl,STAGE_COMPUTE,"cs",&n);}
     if (!spv) { atomic_store(&cp->p.state, 2); return; }
     cp->p.nbinds = vk_reflect(spv, n, cp->p.binds, MAX_BIND);
     VkShaderModule m = VK_NULL_HANDLE;
     cp->p.layout = make_layout(&cp->p, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0);
-    VkPipelineRecipe recipe;vk_pipeline_recipe_compute(&recipe,vk_shader_prepare_key(cp->si->msl,STAGE_COMPUTE),cp->local);
+    VkPipelineRecipe recipe;vk_pipeline_recipe_compute(&recipe,cp->p.source_keys[0],cp->local);
     VkResult r=VK_SUCCESS;
     if(vk_pipeline_warm_take(&recipe,&cp->warmed))cp->pipe=cp->warmed.pipeline;
     else {
-        m=vk_module(spv,n);
+        if(vk_shader_module_acquire(cp->p.source_keys[0],STAGE_COMPUTE,spv,n,&cp->p.modules[0]))m=cp->p.modules[0].module;
         r=m?vk_pipeline_compute_build(m,cp->p.layout,cp->local,&cp->pipe):VK_ERROR_INITIALIZATION_FAILED;
     }
     if(r==VK_SUCCESS)vk_pipeline_warm_record(&recipe);
@@ -5267,7 +5212,7 @@ static void build_compute(void *arg) {
         FILE *f = fopen(path, "wb");
         if (f) { fwrite(spv, 4, n, f); fclose(f); }
     }
-    vkDestroyShaderModule(g_vk.dev, m, NULL);
+    vk_shader_module_release(&cp->p.modules[0]);
     free(spv);
 }
 
@@ -5300,6 +5245,7 @@ static void shader_programs_destroy(void) {
     free(g_cs_tab);g_cs_tab=NULL;g_cs_n=0;g_cs_capacity=0;
     free(prog_tab.entries);prog_tab.entries=NULL;prog_tab.capacity=0;
     free(pipe_tab.entries);pipe_tab.entries=NULL;pipe_tab.capacity=0;
+    vk_shader_module_cache_reset();
 }
 
 static uint16_t compute_image_kinds(void) {
@@ -5327,18 +5273,9 @@ static CsProg *compute_program(NvnProgram *np) {
     cp->code_addr = ss->code_addr;
     pthread_mutex_lock(&translate_lock);  // (the translator's globals too: the translator thread sets them for graphics)
     vk_shader_prepare_configure();
-    ShaderKey k = {0};
-    k.glsl = 1;
-    k.gather_bias_bits = gather_bias_bits();
-    for(unsigned i=0;i<NVN_IMAGE_BINDINGS;++i)k.image_kind[i]=(kinds>>(2*i))&3;
-#ifdef __ANDROID__
-    {   // Keep the cached binary lookup for graphics and Turnip; Qualcomm rejects it in large compute shaders.
-        extern bool vk_driver_is_qualcomm(void);
-        k.gmem_linear_lookup = vk_driver_is_qualcomm();
-    }
-#endif
-    cp->si = maxwell_translate_bounded((const uint8_t *)(uintptr_t)(ss->code_addr + ss->entry_offset),
-                                      ss->const_offset - ss->entry_offset, ss->const_size, STAGE_COMPUTE, &k);
+    ShaderKey k;vk_shader_compute_key(&k,kinds);
+    cp->si = load_or_translate_stage(ss,(const uint8_t *)(uintptr_t)(ss->code_addr+ss->entry_offset),
+                                    ss->const_offset-ss->entry_offset,ss->const_size,STAGE_COMPUTE,&k,&cp->p,0);
     pthread_mutex_unlock(&translate_lock);
     if(!cp->si)FATAL("compute shader translation allocation failed\n");
     cp->p.vi = cp->si;
@@ -5349,7 +5286,7 @@ static CsProg *compute_program(NvnProgram *np) {
     }
     uint16_t mask=0;for(unsigned i=0;i<NVN_IMAGE_BINDINGS;++i)if(cp->si->image_format_mask&(1u<<i))mask|=3u<<(2*i);
     tab[n]=(struct CsEnt){ss->code_addr,cp,kinds,mask,np->generation,shader_code_state.epoch};g_cs_n=n+1;
-    if (!cp->si->msl) {
+    if (!cp->si->msl && !cp->p.prepared_spirv[0]) {
         LOG("[compute] translate failed: %s (code %llx)\n", cp->si->error, (unsigned long long)ss->code_addr);
         atomic_store(&cp->p.state, 2);
         return cp;
@@ -5358,7 +5295,7 @@ static CsProg *compute_program(NvnProgram *np) {
         cp->local[i] = ss->control ? *(const uint32_t *)(ss->control + 0x748 + 4 * i) : 1;
         if (!cp->local[i]) cp->local[i] = 1;
     }
-    save_glsl(cp->si->msl, ss->code_addr, "cs");
+    if(cp->si->msl)save_glsl(cp->si->msl,ss->code_addr,"cs");
 #ifdef __ANDROID__
     vk_shader_warm_observe(ss,NULL,&k,NULL);
 #endif
@@ -5629,18 +5566,11 @@ static void draw_(CmdRec *r, bool indexed) {
         copy_texture_input(st.rt.depth);
     }
 #endif
-    ShaderKey vkey = {0}, fkey = {0};
-    vkey.glsl = fkey.glsl = 1;
-    vkey.gather_bias_bits = fkey.gather_bias_bits = gather_bias_bits();
-    vkey.vertex_snap = vertex_snap_on();
-    vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
-    vkey.depth_minus_one = nvn_depth_mode() == 0;
+    ShaderKey vkey, fkey;
+    vk_shader_graphics_key_defaults(&vkey,&fkey,nvn_window_origin()==0,nvn_depth_mode()==0);
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)nvn_vertex_state_kind(st.attrib[i]);
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
-#ifdef __ANDROID__
-    if (maxwell_gmem_miss_log)  // (copy mode: early depth tests for the shaders that log misses - ShaderKey)
-        fkey.no_ds_write = !st.rt.depth || !((st.ds[0] && st.ds[1]) || (st.ds[3] && ((st.stencil_mask[0] | st.stencil_mask[1]) & 0xFF)));
-#endif
+    vk_shader_fragment_depth_key(&fkey,st.rt.depth && ((st.ds[0] && st.ds[1]) || (st.ds[3] && ((st.stencil_mask[0] | st.stencil_mask[1]) & 0xFF))));
     Prog *pr = get_program(st.program, &vkey, &fkey);
     bool keep = !async_skip_draws();
     if (!keep) {   // Previous skip policy is retained only for explicit comparison.

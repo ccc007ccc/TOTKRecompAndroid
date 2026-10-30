@@ -25,6 +25,7 @@ preamble = r'''
 #include <stdio.h>
 #include "runtime/nvn/vulkan/shader_code_state.h"
 static ShaderCodeState shader_code_state;
+#include "runtime/nvn/vulkan/shader_module_cache.h"
 #define MAX_BIND 96
 void rt_fatal_trace(void) { abort(); }
 '''
@@ -118,12 +119,17 @@ static unsigned computed;
 void vk_shader_prepare_configure(void) {}
 static uint16_t compute_image_kinds(void) {return 0;}
 static unsigned gather_bias_bits(void) {return 8;}
+static void vk_shader_compute_key(ShaderKey* key,uint16_t kinds){(void)kinds;memset(key,0,sizeof *key);key->glsl=1;key->gather_bias_bits=8;}
 static pthread_mutex_t translate_lock=PTHREAD_MUTEX_INITIALIZER;
 ShaderInfo* maxwell_translate_bounded(const uint8_t* code,size_t bytes,size_t constants,int stage,const ShaderKey* key) {
     (void)code;(void)bytes;(void)constants;(void)key;assert(stage==STAGE_COMPUTE);
     ShaderInfo* info=calloc(1,sizeof *info);info->msl=strdup("test");return info;
 }
 static void save_glsl(const char* text,uint64_t addr,const char* suffix){(void)text;(void)addr;(void)suffix;}
+static ShaderInfo* load_or_translate_stage(const NvnShaderStage* input,const uint8_t* code,size_t bytes,size_t constants,
+                                          int stage,const ShaderKey* key,Prog* p,unsigned slot) {
+    (void)input;(void)p;(void)slot;return maxwell_translate_bounded(code,bytes,constants,stage,key);
+}
 static void build_compute(void* p){++computed;atomic_store(&((CsProg*)p)->p.state,1);}
 static void run_job(void(*fn)(void*),void* p){fn(p);}
 """

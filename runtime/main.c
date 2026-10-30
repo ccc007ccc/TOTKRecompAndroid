@@ -206,10 +206,13 @@ static void boot(const char *root) {
     { extern void settings_load(void); settings_load(); }
 #ifdef __ANDROID__
     extern bool vk_shader_boot_warm(const char* game,void (*idle)(void));
+    extern void vk_compile_budget_loading(bool loading);
+    vk_compile_budget_loading(true);
     if(!vk_shader_boot_warm(root,reboot_idle) && !vk_shader_runtime_compile_enabled())
         FATAL("Prepared game graphics are missing or damaged. Prepare graphics or enable runtime shader compilation before playing.\n");
-    extern void vk_pipeline_warm_begin(void);
-    vk_pipeline_warm_begin();
+    extern void vk_pipeline_warm_begin_for_game(const char*,void (*)(void));
+    vk_pipeline_warm_begin_for_game(root,reboot_idle);
+    vk_compile_budget_loading(false);
 #endif
     kernel_init();
     dispatch_init();

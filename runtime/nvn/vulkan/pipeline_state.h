@@ -1,5 +1,8 @@
 // Handle-independent Vulkan graphics state, captured by value for builds and warm recipes.
 #pragma once
+#ifdef __cplusplus
+extern "C" {
+#endif
 #include "vk.h"
 
 typedef struct {
@@ -21,8 +24,13 @@ typedef struct {
 } VkPipelineState;
 
 bool vk_pipeline_state_valid(const VkPipelineState *state);
+bool vk_pipeline_state_supported(const VkPipelineState *state);
+bool vk_pipeline_local_size_supported(const uint32_t local[3]);
 VkResult vk_pipeline_state_build(const VkPipelineState *state, VkShaderModule vertex, VkShaderModule fragment,
     VkPipelineLayout layout, uint32_t dynamic_count, const VkDynamicState *dynamic_states,
     VkPipelineCreateFlags flags, VkPipeline *pipeline);
 bool vk_pipeline_local_size_valid(const uint32_t local[3]);
 VkResult vk_pipeline_compute_build(VkShaderModule module, VkPipelineLayout layout, const uint32_t local[3], VkPipeline *pipeline);
+#ifdef __cplusplus
+}
+#endif

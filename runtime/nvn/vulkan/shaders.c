@@ -20,7 +20,9 @@ static const char *dlerror(void) { return "cannot load shader preparation plugin
 #include <sys/stat.h>
 #include <zstd.h>
 #include "shaders.h"
+#include "compile_budget.h"
 #include "shader_cache.h"
+#include "shader_source_key.h"
 #include "shader_prepare.h"
 #include "shader_runtime.h"
 #include "deswizzle_shader.h"
@@ -44,17 +46,8 @@ static const char* const cache_namespaces[] = {SHADER_CACHE_ID, SHADER_BUILD_ID,
 static _Atomic uint64_t cache_current_hits,cache_compatible_hits,cache_misses;
 const char *vk_shader_cache_namespace(void) { return SHADER_CACHE_ID; }
 ShaderCacheStats vk_shader_cache_stats(void) { return (ShaderCacheStats){cache_current_hits,cache_compatible_hits,cache_misses}; }
-static uint32_t shader_api(void) {
-#ifdef __ANDROID__
-    return g_vk.api ? g_vk.api : VK_API_VERSION_1_3;
-#else
-    return VK_API_VERSION_1_3;
-#endif
-}
-static uint64_t source_key(const char *src, int stage) {
-    uint64_t h = vk_shader_source_hash(src, stage, getenv("LARECOMP_VK_OPT") != NULL);
-    return h ^ ((uint64_t)shader_api() << 32);
-}
+#define shader_api vk_shader_target_api
+#define source_key vk_shader_source_key
 uint64_t vk_shader_prepare_key(const char *src, int stage) { return source_key(src, stage); }
 static void cache_path(char *path, size_t size, uint64_t h) {
     snprintf(path, size, "cache/shaders/" SHADER_CACHE_ID "/%016llx.bin", (unsigned long long)h);
@@ -190,6 +183,11 @@ static bool cache_store(uint64_t h, const uint32_t *spv, size_t nwords) { return
 static _Thread_local void *prepare_library;
 static _Thread_local void *prepare_context;
 static _Thread_local ShaderPrepareCompileContext prepare_compile;
+static uint32_t *budget_compile(const char *src,int stage,unsigned api,bool optimized,size_t *words,char *why,size_t capacity) {
+    if(!vk_compile_budget_acquire()){snprintf(why,capacity,"graphics compilation cancelled");return NULL;}
+    uint32_t *result=prepare_compile(prepare_context,src,stage,api,optimized,words,why,capacity);
+    vk_compile_budget_release();return result;
+}
 static _Thread_local ShaderPrepareDestroy prepare_destroy;
 static _Thread_local ShaderPrepareDerive prepare_derive;
 static _Thread_local uint64_t prepare_session;
@@ -225,26 +223,30 @@ void vk_shader_prepare_end(void) {
     if (prepare_library) dlclose(prepare_library);
     prepare_library = NULL;
 }
+static pthread_once_t base_locks_once = PTHREAD_ONCE_INIT;
+static pthread_mutex_t base_locks[64];
+static void init_base_locks(void) {
+    for (size_t i = 0; i < sizeof base_locks / sizeof *base_locks; ++i) pthread_mutex_init(&base_locks[i], NULL);
+}
 bool vk_shader_prepare_source(const char *src, int stage, const char *name, char *why, size_t capacity) {
     if (!prepare_compile) { snprintf(why, capacity, "shader compiler is closed outside preparation"); return false; }
     size_t n = 0; uint64_t h = source_key(src, stage);
+    pthread_once(&base_locks_once,init_base_locks);
+    pthread_mutex_t *lock=&base_locks[h % (sizeof base_locks/sizeof *base_locks)];
+    pthread_mutex_lock(lock);
     uint32_t *spv = cache_load(h, &n);
-    if (spv) { free(spv); return true; }
-    spv = prepare_compile(prepare_context, src, stage, shader_api(), getenv("LARECOMP_VK_OPT") != NULL, &n, why, capacity);
-    if (!spv) { LOG("[shader-prepare] %s: %s\n", name, why); return false; }
+    if (spv) { free(spv);pthread_mutex_unlock(lock);return true; }
+    spv = budget_compile(src, stage, shader_api(), getenv("LARECOMP_VK_OPT") != NULL, &n, why, capacity);
+    if (!spv) { LOG("[shader-prepare] %s: %s\n", name, why);pthread_mutex_unlock(lock);return false; }
     bool ok = vk_shader_cache_framed(spv, n) && cache_store(h, spv, n);
     free(spv);
+    pthread_mutex_unlock(lock);
     if (!ok) snprintf(why, capacity, "cannot save prepared shader %s (check free storage)", name);
     return ok;
 }
 // Identical canonical sources from different records may reach different workers.
 // Serialize their cache miss/compile/store, without retaining an unbounded set of
 // modules in RAM or serializing all shaderc work behind one lock.
-static pthread_once_t base_locks_once = PTHREAD_ONCE_INIT;
-static pthread_mutex_t base_locks[64];
-static void init_base_locks(void) {
-    for (size_t i = 0; i < sizeof base_locks / sizeof *base_locks; ++i) pthread_mutex_init(&base_locks[i], NULL);
-}
 void vk_shader_prepare_base_free(ShaderPrepareBase *base) {
     if (!base) return;
     ZSTD_freeCDict(base->dictionary); ZSTD_freeCCtx(base->compressor); free(base->spv); free(base);
@@ -263,7 +265,7 @@ ShaderPrepareBase *vk_shader_prepare_base(const char *src, int stage, char *why,
     pthread_mutex_lock(lock);
     base->spv = cache_load_namespace(base->key, &base->words, true, NULL, &base->cache_namespace);
     if (!base->spv) {
-        base->spv = prepare_compile(prepare_context, src, stage, base->api, base->optimized, &base->words, why, capacity);
+        base->spv = budget_compile(src, stage, base->api, base->optimized, &base->words, why, capacity);
         if (base->spv && !cache_store_module(base->key, base->spv, base->words, true, NULL)) {
             snprintf(why, capacity, "cannot save prepared base shader (check free storage)");
             free(base->spv); base->spv = NULL;
@@ -297,7 +299,9 @@ bool vk_shader_prepare_variant(ShaderPrepareBase *base, const ShaderPrepareVaria
     uint32_t *spv = cache_load_module(variant->key, &n, false, base);
     if (spv) { free(spv); return true; }
     // The all-float (and compute) module has already passed the compiler's validator.
+    if(changed && !vk_compile_budget_acquire()){snprintf(why,capacity,"graphics compilation cancelled");return false;}
     spv = changed ? prepare_derive(base->spv, base->words, base->stage, variant->kinds, base->api, &n, why, capacity) : base->spv;
+    if(changed)vk_compile_budget_release();
     if (!spv) return false;
     if (!changed) n = base->words;
     bool ok = cache_store_module(variant->key, spv, n, false, base);
@@ -339,7 +343,7 @@ uint32_t *vk_load_shader(const char *src, int stage, const char *name, size_t *n
         bool opened = !prepare_library;
         if (!opened || vk_shader_prepare_begin(why, sizeof why)) {
             LOG("[shader-runtime] compiling %s (%016llx)\n", name, (unsigned long long)h);
-            spv = prepare_compile(prepare_context, src, stage, shader_api(), getenv("LARECOMP_VK_OPT") != NULL,
+            spv = budget_compile(src, stage, shader_api(), getenv("LARECOMP_VK_OPT") != NULL,
                                   nwords, why, sizeof why);
             if (spv && !vk_shader_cache_framed(spv, *nwords)) {
                 free(spv); spv = NULL; *nwords = 0;
@@ -386,7 +390,9 @@ void vk_shaders_init(void) {
 VkShaderModule vk_module(const uint32_t *spv, size_t nwords) {
     VkShaderModuleCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = nwords * 4, .pCode = spv};
     VkShaderModule m;
+    if(!vk_compile_budget_acquire())return VK_NULL_HANDLE;
     VkResult result = vkCreateShaderModule(g_vk.dev, &ci, NULL, &m);
+    vk_compile_budget_release();
     if (result != VK_SUCCESS) LOG("[shader] vkCreateShaderModule failed: %d (%zu words)\n", result, nwords);
     return result == VK_SUCCESS ? m : VK_NULL_HANDLE;
 }

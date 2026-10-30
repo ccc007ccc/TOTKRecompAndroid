@@ -5,9 +5,14 @@ cd "$(dirname "$0")/.."
 WARM_PREP_OUT=${1:-.work/shader-warm-prepare-tests}
 mkdir -p "$WARM_PREP_OUT"
 WARM_PREP_OUT=$(cd "$WARM_PREP_OUT" && pwd)
-FLAGS=(-O1 -g -fsanitize=address,undefined -ffunction-sections -fdata-sections -Iandroid/deps/out/include)
+FLAGS=(-O1 -g -fsanitize=address,undefined -ffunction-sections -fdata-sections -Iandroid/deps/out/include -Ithird_party/d2r-digest/include)
 sh tools/build_host_shader_compiler.sh "$WARM_PREP_OUT"
 clang "${FLAGS[@]}" -c runtime/nvn/vulkan/shaders.c -o "$WARM_PREP_OUT/shaders.o"
+clang "${FLAGS[@]}" -c runtime/nvn/vulkan/compile_budget.c -o "$WARM_PREP_OUT/compile_budget.o"
+clang "${FLAGS[@]}" -c runtime/nvn/vulkan/shader_keys.c -o "$WARM_PREP_OUT/shader_keys.o"
+clang "${FLAGS[@]}" -c runtime/nvn/vulkan/pipeline_seed.c -o "$WARM_PREP_OUT/pipeline_seed.o"
+clang "${FLAGS[@]}" -c runtime/nvn/vulkan/pipeline_state.c -o "$WARM_PREP_OUT/pipeline_state.o"
+clang "${FLAGS[@]}" -c runtime/nvn/vulkan/pipeline_warm.c -o "$WARM_PREP_OUT/pipeline_warm.o"
 clang "${FLAGS[@]}" -c runtime/nvn/maxwell/translate.c -o "$WARM_PREP_OUT/translate.o"
 clang "${FLAGS[@]}" -Ithird_party/d2r-digest/include -c third_party/d2r-digest/digest.c -o "$WARM_PREP_OUT/digest.o"
 clang++ -std=c++17 "${FLAGS[@]}" tools/test_shader_warm_plan.cpp "$WARM_PREP_OUT/translate.o" "$WARM_PREP_OUT/digest.o" \
@@ -17,8 +22,8 @@ clang++ -std=c++17 "${FLAGS[@]}" tools/test_shader_warm_receipt.cpp -Wl,--gc-sec
 "$WARM_PREP_OUT/test-receipt" "$WARM_PREP_OUT/receipt-unit"
 if [[ $# -ge 2 ]]; then
     python tools/build_shader_warm_manifest.py "$WARM_PREP_OUT/manifest.bin"
-    clang++ -std=c++17 "${FLAGS[@]}" tools/test_shader_warm_prepare.cpp runtime/nvn/vulkan/shader_warm.cpp \
-        "$WARM_PREP_OUT/shaders.o" "$WARM_PREP_OUT/translate.o" "$WARM_PREP_OUT/digest.o" \
+    clang++ -std=c++17 "${FLAGS[@]}" tools/test_shader_warm_prepare.cpp runtime/nvn/vulkan/shader_warm.cpp runtime/nvn/vulkan/shader_artifact.cpp runtime/nvn/vulkan/shader_artifact_storage.cpp \
+        "$WARM_PREP_OUT/shaders.o" "$WARM_PREP_OUT/compile_budget.o" "$WARM_PREP_OUT/shader_keys.o" "$WARM_PREP_OUT/pipeline_seed.o" "$WARM_PREP_OUT/pipeline_state.o" "$WARM_PREP_OUT/pipeline_warm.o" "$WARM_PREP_OUT/translate.o" "$WARM_PREP_OUT/digest.o" \
         -Wl,--gc-sections -lzstd -ldl -pthread -o "$WARM_PREP_OUT/test-prepare"
     export LARECOMP_NATIVE_LIB_DIR="$WARM_PREP_OUT"
     unset LARECOMP_VK_OPT

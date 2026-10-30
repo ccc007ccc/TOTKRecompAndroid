@@ -25,8 +25,8 @@ void main(){uvec3 p=gl_LocalInvocationID;uint i=gl_LocalInvocationIndex;value[i]
 GLSL
 glslc --target-env=vulkan1.1 "$PIPE_GPU_OUT/test.comp" -o "$PIPE_GPU_OUT/test.comp.spv"
 PIPE_GPU_CC=clang
-FLAGS=(-O2 -g -ffunction-sections -fdata-sections -Iandroid/deps/out/include)
-SOURCES=(tools/test_vk_pipeline_warm.c runtime/nvn/vulkan/pipeline_state.c runtime/nvn/vulkan/pipeline_warm.c runtime/nvn/vulkan/rpcompat.c)
+FLAGS=(-O2 -g -ffunction-sections -fdata-sections -Iandroid/deps/out/include -Ithird_party/d2r-digest/include)
+SOURCES=(tools/test_vk_pipeline_warm.c runtime/nvn/vulkan/pipeline_state.c runtime/nvn/vulkan/compile_budget.c runtime/nvn/vulkan/pipeline_warm.c runtime/nvn/vulkan/pipeline_seed.c third_party/d2r-digest/digest.c runtime/nvn/vulkan/rpcompat.c)
 LIBS=(-Wl,--gc-sections -lvulkan -pthread)
 if [[ ${2:-} == --android ]]; then
     source android/dev_env.sh
@@ -40,4 +40,10 @@ if [[ ${2:-} != --android ]]; then
     unset LARECOMP_SHADER_WARM LARECOMP_PIPELINE_WARM LARECOMP_NO_DYN_UBO
     "$PIPE_GPU_OUT/test-gpu" --record "$PIPE_GPU_OUT" "$PIPE_GPU_OUT/test.vert.spv" "$PIPE_GPU_OUT/test.frag.spv" "$PIPE_GPU_OUT/test.comp.spv"
     "$PIPE_GPU_OUT/test-gpu" --render "$PIPE_GPU_OUT" "$PIPE_GPU_OUT/test.vert.spv" "$PIPE_GPU_OUT/test.frag.spv" "$PIPE_GPU_OUT/test.comp.spv"
+    for stage in vert frag comp; do spirv-val --target-env vulkan1.1 "$PIPE_GPU_OUT/test.$stage.spv"; done
+    "$PIPE_GPU_CC" "${FLAGS[@]}" -Dvk_shader_cache_namespace=fixture_cache_namespace -Dvk_shader_cache_load_key=fixture_disk_load \
+        -c runtime/nvn/vulkan/shaders.c -o "$PIPE_GPU_OUT/shaders.o"
+    "$PIPE_GPU_CC" "${FLAGS[@]}" -DTOTK_TEST_MODULE_REUSE=1 "${SOURCES[@]}" runtime/nvn/vulkan/shader_module_cache.c "$PIPE_GPU_OUT/shaders.o" \
+        "${LIBS[@]}" -lzstd -ldl -o "$PIPE_GPU_OUT/test-reuse"
+    "$PIPE_GPU_OUT/test-reuse" --render-seed "$PIPE_GPU_OUT" "$PIPE_GPU_OUT/test.vert.spv" "$PIPE_GPU_OUT/test.frag.spv" "$PIPE_GPU_OUT/test.comp.spv"
 fi

@@ -3,7 +3,14 @@
 #include <assert.h>
 #include <stdatomic.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <stdbool.h>
+#include <errno.h>
+static bool fail_workers;
+static int test_create(pthread_t *thread,const pthread_attr_t *attr,void *(*run)(void*),void *arg){if(fail_workers)return EAGAIN;return pthread_create(thread,attr,run,arg);}
+#define pthread_create test_create
 #include "../runtime/nvn/vulkan/pipeline_warm.c"
+#undef pthread_create
 VkG g_vk;
 void rt_fatal_trace(void) { abort(); }
 const char *vk_shader_cache_namespace(void) { return "test-compiler"; }
@@ -96,4 +103,34 @@ int main(int argc,char **argv) {
     assert(count==RECIPE_MAX && records[0].shader[0]==6 && records[count-1].shader[0]==RECIPE_MAX+5);
     assert(vk_pipeline_warm_save());reload(NULL);assert(count==RECIPE_MAX);
     puts("PASS: recipe canonicalization/dedup, driver identity, corruption/trailing bytes, atomic write failure, cached/missing/failed builds, handle ownership, queued demand and cancellation race");
+    // Explicit portable wire format: independent offsets identify shader keys,
+    // local dimensions and attachment format, never host struct padding.
+    VkPipelineRecipe seeds[3]={recipe(0),recipe(1),recipe(2)},decoded[3];
+    VkPipelineSeedIdentity id=vk_pipeline_seed_identity(143);
+    assert(vk_pipeline_seed_save("seed.bin",&id,seeds,3));
+    assert(vk_pipeline_seed_load("seed.bin",&id,decoded,3)==3 && !memcmp(seeds,decoded,sizeof seeds));
+    f=fopen("seed.bin","rb");unsigned char wire[251];assert(f && fread(wire,1,sizeof wire,f)==sizeof wire && !fclose(f));
+    assert(!memcmp(wire,"TKPSEED1",8) && wire[8]==1 && wire[12]==3 && wire[16]==143 && wire[219]==1 && wire[227]==9 && wire[247]==VK_FORMAT_R8G8B8A8_UNORM);
+    VkPipelineSeedIdentity other=id;++other.game;assert(!vk_pipeline_seed_load("seed.bin",&other,decoded,3));
+    other=id;other.features^=1;assert(!vk_pipeline_seed_load("seed.bin",&other,decoded,3));
+    other=id;other.translation[0]^=1;assert(!vk_pipeline_seed_load("seed.bin",&other,decoded,3));
+    assert(!vk_pipeline_seed_load("seed.bin",&id,decoded,2));
+    assert(!mkdir("seed.bin.part",0755));assert(!vk_pipeline_seed_save("seed.bin",&id,seeds,3));assert(!rmdir("seed.bin.part"));
+    assert(vk_pipeline_seed_load("seed.bin",&id,decoded,3)==3);
+    copy_file("seed.bin","good-seed.bin");assert(!truncate("seed.bin",250));assert(!vk_pipeline_seed_load("seed.bin",&id,decoded,3));
+    copy_file("good-seed.bin","seed.bin");f=fopen("seed.bin","ab");assert(f && fputc(1,f)!=EOF && !fclose(f));assert(!vk_pipeline_seed_load("seed.bin",&id,decoded,3));
+    copy_file("good-seed.bin","seed.bin");
+    // Fresh installation: no observed file, seed-only builds are queued. A
+    // finite loading wait is not a completion claim for missing/failed products.
+    assert(!remove("cache/vk_pipeline_recipes.bin"));initialized=false;unsetenv("LARECOMP_PIPELINE_WARM");
+    vk_pipeline_warm_start_seed(build,"seed.bin",143);assert(vk_pipeline_warm_wait(1000));
+    s=vk_pipeline_warm_stats();assert(s.seeded==3 && s.prepared==1 && s.missing==1 && s.failed==1);
+    assert(vk_pipeline_warm_take(&seeds[0],&p));vk_pipeline_warm_discard(&p);vk_pipeline_warm_stop();
+    gate=entered=0;initialized=false;vk_pipeline_warm_start_seed(gated_build,"seed.bin",143);
+    while(!entered)usleep(100);assert(vk_pipeline_warm_waiting() && !vk_pipeline_warm_wait(1));vk_pipeline_warm_cancel_async();assert(!vk_pipeline_warm_waiting() && !vk_pipeline_warm_wait(1));gate=1;vk_pipeline_warm_stop();
+    puts("PASS: portable seed golden fields, identity/bounds/damage rejection, atomic replacement, fresh-cache seed import, bounded loading wait and failure accounting");
+    fail_workers=true;initialized=false;vk_pipeline_warm_start_seed(build,"seed.bin",143);
+    assert(!thread_count && !vk_pipeline_warm_waiting() && !vk_pipeline_warm_wait(1) && !vk_pipeline_warm_take(&seeds[0],&p));
+    assert(build(&seeds[0],&p)==VK_SUCCESS && p.pipeline);vk_pipeline_warm_discard(&p);vk_pipeline_warm_stop();
+    puts("PASS: failed warm worker creation retains queued-demand fallback without a false loading completion");
 }

@@ -2,11 +2,15 @@
 // contain source keys and fixed-function state, never game code or raw handles.
 #include "pipeline_warm.h"
 #include "shader_prepare.h"
+#include "compile_budget.h"
+#include "pipeline_seed.h"
+#include <stdatomic.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #ifndef _WIN32
 #include <sys/resource.h>
 #include <unistd.h>
@@ -14,10 +18,13 @@
 #ifndef SHADER_BUILD_ID
 #define SHADER_BUILD_ID "development"
 #endif
+#ifndef PIPELINE_RECIPE_ID
+#define PIPELINE_RECIPE_ID SHADER_BUILD_ID
+#endif
 
 #define RECIPE_MAX 8192
 enum { QUEUED, BUILDING, READY, TAKEN, SKIPPED };
-typedef struct { VkPipelineRecipe recipe; uint64_t hash; VkPipelineWarmProduct product; unsigned state; } WarmEntry;
+typedef struct { VkPipelineRecipe recipe; uint64_t hash; VkPipelineWarmProduct product; unsigned state; _Atomic bool urgent; } WarmEntry;
 typedef struct {
     uint64_t magic, digest;
     uint32_t version, endian, record_bytes, count, vendor, device, driver, features;
@@ -30,15 +37,18 @@ static VkPipelineRecipe *records;
 static uint64_t *record_hashes;
 static unsigned count;
 static uint64_t generation, saved_generation;
-static bool initialized, cancel;
+static bool initialized;
+static _Atomic bool cancel;
 static RecipeHeader identity;
 static WarmEntry *entries;
 static unsigned entry_count, cursor;
 static unsigned readers;
 static pthread_t threads[64];
-static unsigned thread_count;
+static _Atomic unsigned thread_count;
 static VkPipelineWarmBuild builder;
 static VkPipelineWarmStats stats;
+static char seed_path[1200];
+static unsigned seed_game;
 
 static uint64_t hash_bytes(const void *data,size_t size) {
     uint64_t h=0xcbf29ce484222325ull;const uint8_t *p=data;
@@ -76,7 +86,7 @@ static RecipeHeader current_identity(void) {
     h.vendor=g_vk.props.vendorID;h.device=g_vk.props.deviceID;h.driver=g_vk.props.driverVersion;
     h.features=g_vk.dyn_render | (g_vk.eds<<1) | (g_vk.eds2<<2) | (g_vk.divisor<<3) | ((getenv("LARECOMP_NO_DYN_UBO")!=NULL)<<4);
     memcpy(h.uuid,g_vk.props.pipelineCacheUUID,sizeof h.uuid);
-    snprintf(h.build,sizeof h.build,"%s",SHADER_BUILD_ID);
+    snprintf(h.build,sizeof h.build,"%s",PIPELINE_RECIPE_ID);
     snprintf(h.compiler,sizeof h.compiler,"%s",vk_shader_cache_namespace());
     return h;
 }
@@ -92,8 +102,11 @@ static void read_records(void) { // lock held, called only with previous workers
     if(!ok){LOG("[pipeline-warm] incompatible or damaged recipe file ignored\n");return;}
     count=n;for(unsigned i=0;i<count;++i)record_hashes[i]=hash_bytes(&records[i],sizeof *records);
 }
+static bool warm_cancelled(void *unused) {(void)unused;return atomic_load(&cancel);}
+static bool warm_urgent(void *entry) {return atomic_load(&((WarmEntry*)entry)->urgent);}
 static void *warm_worker(void *unused) {
     (void)unused;
+    vk_compile_budget_background(true);
 #ifndef _WIN32
     setpriority(PRIO_PROCESS,0,10);
 #endif
@@ -103,7 +116,9 @@ static void *warm_worker(void *unused) {
         if(cancel || cursor==entry_count){pthread_mutex_unlock(&lock);break;}
         WarmEntry *entry=&entries[cursor++];entry->state=BUILDING;
         pthread_mutex_unlock(&lock);
+        vk_compile_budget_checks(warm_cancelled,warm_urgent,entry);
         VkPipelineWarmProduct product={0};VkResult result=builder(&entry->recipe,&product);
+        vk_compile_budget_checks(NULL,NULL,NULL);
         if(result!=VK_SUCCESS || !product.pipeline)vk_pipeline_warm_discard(&product);
         pthread_mutex_lock(&lock);
         if(result==VK_SUCCESS && product.pipeline){entry->product=product;entry->state=READY;++stats.prepared;}
@@ -139,7 +154,8 @@ void vk_pipeline_warm_stop(void) {
     free(entries);entries=NULL;entry_count=cursor=0;
     pthread_mutex_unlock(&lock);
 }
-void vk_pipeline_warm_start(VkPipelineWarmBuild build) {
+void vk_pipeline_warm_start(VkPipelineWarmBuild build) {vk_pipeline_warm_start_seed(build,NULL,0);}
+void vk_pipeline_warm_start_seed(VkPipelineWarmBuild build,const char *path,unsigned game) {
     vk_pipeline_warm_stop();
     pthread_mutex_lock(&save_lock);
     pthread_mutex_lock(&lock);
@@ -148,7 +164,22 @@ void vk_pipeline_warm_start(VkPipelineWarmBuild build) {
     if(!record_hashes)record_hashes=calloc(RECIPE_MAX,sizeof *record_hashes);
     if(!records || !record_hashes){pthread_mutex_unlock(&lock);pthread_mutex_unlock(&save_lock);return;}
     if(!initialized || memcmp(&now,&identity,sizeof now)) {identity=now;read_records();initialized=true;}
-    stats=(VkPipelineWarmStats){.loaded=count};cancel=false;builder=build;
+    stats=(VkPipelineWarmStats){0};cancel=false;builder=build;
+    seed_path[0]=0;seed_game=game;
+    if(path && strlen(path)<sizeof seed_path) {
+        snprintf(seed_path,sizeof seed_path,"%s",path);
+        VkPipelineRecipe *seeds=calloc(4096,sizeof *seeds);VkPipelineSeedIdentity id=vk_pipeline_seed_identity(game);
+        unsigned n=seeds?vk_pipeline_seed_load(path,&id,seeds,4096):0;
+        for(unsigned i=0;i<n && count<RECIPE_MAX;++i) {
+            if(seeds[i].shader[1]?!vk_pipeline_state_supported(&seeds[i].state):!vk_pipeline_local_size_supported(seeds[i].local))continue;
+            uint64_t hash=hash_bytes(&seeds[i],sizeof *seeds);bool found=false;
+            for(unsigned j=0;j<count;++j)if(record_hashes[j]==hash && !memcmp(&records[j],&seeds[i],sizeof *seeds)){found=true;break;}
+            if(found)continue;
+            records[count]=seeds[i];record_hashes[count++]=hash;++stats.seeded;++generation;
+        }
+        free(seeds);
+    }
+    stats.loaded=count;
     const char *option=getenv("LARECOMP_PIPELINE_WARM"),*general=getenv("LARECOMP_SHADER_WARM");
     bool enabled=(!option || atoi(option)!=0) && (!general || atoi(general)!=0);
     if(enabled && build && count) {
@@ -163,7 +194,7 @@ void vk_pipeline_warm_start(VkPipelineWarmBuild build) {
 #else
     long n=sysconf(_SC_NPROCESSORS_ONLN);unsigned online=n>0?(unsigned)n:1;
 #endif
-    if(online>64)online=64;if(online>entry_count)online=entry_count;
+    if(online>vk_compile_budget_workers())online=vk_compile_budget_workers();if(online>entry_count)online=entry_count;
     for(unsigned i=0;i<online;++i)if(!pthread_create(&threads[thread_count],NULL,warm_worker,NULL))++thread_count;
     LOG("[pipeline-warm] %u recorded pipelines, %u background workers\n",entry_count,thread_count);
 }
@@ -191,6 +222,7 @@ bool vk_pipeline_warm_take(const VkPipelineRecipe *recipe,VkPipelineWarmProduct 
         // rather than waiting behind the entire background list.
         if(entry->state==QUEUED){entry->state=SKIPPED;++stats.cancelled;break;}
         ++readers;
+        entry->urgent=true;
         while(!cancel && entry->state==BUILDING)pthread_cond_wait(&changed,&lock);
         if(!cancel && entry->state==READY){*product=entry->product;memset(&entry->product,0,sizeof entry->product);entry->state=TAKEN;++stats.used;}
         --readers;pthread_cond_broadcast(&changed);
@@ -202,6 +234,7 @@ bool vk_pipeline_warm_save(void) {
     pthread_mutex_lock(&save_lock);pthread_mutex_lock(&lock);
     if(!initialized || generation==saved_generation){pthread_mutex_unlock(&lock);pthread_mutex_unlock(&save_lock);return true;}
     RecipeHeader h=identity;h.count=count;uint64_t snapshot=generation;
+    char seed[1200];memcpy(seed,seed_path,sizeof seed);VkPipelineSeedIdentity seed_id=vk_pipeline_seed_identity(seed_game);
     size_t bytes=count*sizeof *records;void *data=malloc(bytes?bytes:1);
     if(data)memcpy(data,records,bytes);
     pthread_mutex_unlock(&lock);
@@ -212,9 +245,29 @@ bool vk_pipeline_warm_save(void) {
         if(f){ok=fwrite(&h,sizeof h,1,f)==1 && fwrite(data,1,bytes,f)==bytes;if(fclose(f))ok=false;}
         if(ok)ok=rename("cache/vk_pipeline_recipes.bin.part","cache/vk_pipeline_recipes.bin")==0;
         if(!ok && f)remove("cache/vk_pipeline_recipes.bin.part");
+        if(seed[0] && h.count) {
+            unsigned n=h.count>4096?4096:h.count;
+            if(!vk_pipeline_seed_save(seed,&seed_id,(VkPipelineRecipe*)data+h.count-n,n))LOG("[pipeline-warm] portable recipe seed could not be saved\n");
+        }
         free(data);
     }
     if(ok){pthread_mutex_lock(&lock);saved_generation=snapshot;pthread_mutex_unlock(&lock);LOG("[pipeline-warm] saved %u observed recipes\n",h.count);}
     pthread_mutex_unlock(&save_lock);return ok;
 }
 VkPipelineWarmStats vk_pipeline_warm_stats(void) {pthread_mutex_lock(&lock);VkPipelineWarmStats out=stats;pthread_mutex_unlock(&lock);return out;}
+bool vk_pipeline_warm_wait(unsigned milliseconds) {
+    struct timespec until;clock_gettime(CLOCK_REALTIME,&until);
+    until.tv_sec+=milliseconds/1000;until.tv_nsec+=(milliseconds%1000)*1000000;
+    if(until.tv_nsec>=1000000000){++until.tv_sec;until.tv_nsec-=1000000000;}
+    pthread_mutex_lock(&lock);
+    unsigned done=stats.prepared+stats.missing+stats.failed+stats.cancelled;
+    while(!cancel && thread_count && done<entry_count) {
+        if(pthread_cond_timedwait(&changed,&lock,&until))break;
+        done=stats.prepared+stats.missing+stats.failed+stats.cancelled;
+    }
+    bool ready=!cancel && done>=entry_count;pthread_mutex_unlock(&lock);return ready;
+}
+bool vk_pipeline_warm_waiting(void) {
+    pthread_mutex_lock(&lock);unsigned done=stats.prepared+stats.missing+stats.failed+stats.cancelled;
+    bool waiting=!cancel && thread_count && done<entry_count;pthread_mutex_unlock(&lock);return waiting;
+}

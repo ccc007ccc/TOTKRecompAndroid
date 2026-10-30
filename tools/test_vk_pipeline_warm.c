@@ -1,6 +1,8 @@
 // Persist recipes, reload them in a new process, warm using the production
 // pipeline builder, then render with a separately recreated compatible layout.
 #include "../runtime/nvn/vulkan/pipeline_warm.h"
+#include "../runtime/nvn/vulkan/pipeline_seed.h"
+#include "../runtime/nvn/vulkan/shader_module_cache.h"
 #include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -41,6 +43,13 @@ static VkShaderModule module(const char *name) {
     VkShaderModuleCreateInfo i={.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,.codeSize=(size_t)bytes,.pCode=words};
     VkShaderModule m;CHECK(vkCreateShaderModule(g_vk.dev,&i,NULL,&m));free(words);return m;
 }
+#ifdef TOTK_TEST_MODULE_REUSE
+uint32_t *vk_shader_cache_load_key(uint64_t key,bool base,size_t *n) {
+    assert(!base);const char *name=key==1?vertex_file:key==2?fragment_file:compute_file;
+    FILE *f=fopen(name,"rb");assert(f && !fseek(f,0,SEEK_END));long size=ftell(f);assert(size>20 && !(size%4));rewind(f);
+    uint32_t *words=malloc(size);assert(words && fread(words,1,size,f)==(size_t)size && !fclose(f));*n=size/4;return words;
+}
+#endif
 static VkPipelineLayout layout(VkDescriptorSetLayout sets[2]) {
     VkDescriptorSetLayoutBinding binding={0,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,1,VK_SHADER_STAGE_FRAGMENT_BIT,NULL};
     for(unsigned i=0;i<2;++i){VkDescriptorSetLayoutCreateInfo d={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,.bindingCount=i,.pBindings=&binding};CHECK(vkCreateDescriptorSetLayout(g_vk.dev,&d,NULL,&sets[i]));}
@@ -55,20 +64,42 @@ static VkPipelineLayout compute_layout(VkDescriptorSetLayout *set) {
 }
 static VkResult build(const VkPipelineRecipe *r,VkPipelineWarmProduct *product) {
     if(!r->shader[1]) {
-        VkShaderModule cs=module(compute_file);VkDescriptorSetLayout set;VkPipelineLayout p=compute_layout(&set);
+#ifdef TOTK_TEST_MODULE_REUSE
+        VkShaderModuleLease lease;assert(vk_shader_module_acquire(r->shader[0],5,NULL,0,&lease));
+        assert(lease.count==1 && lease.bindings[0].type==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        VkShaderModule cs=lease.module;
+#else
+        VkShaderModule cs=module(compute_file);
+#endif
+        VkDescriptorSetLayout set;VkPipelineLayout p=compute_layout(&set);
         VkResult result=vk_pipeline_compute_build(cs,p,r->local,&product->pipeline);
         product->layout=p;product->sets[0]=set;
+#ifdef TOTK_TEST_MODULE_REUSE
+        vk_shader_module_release(&lease);
+#else
         vkDestroyShaderModule(g_vk.dev,cs,NULL);
+#endif
         return result;
     }
-    VkShaderModule vs=module(vertex_file),fs=module(fragment_file);VkDescriptorSetLayout sets[2];VkPipelineLayout p=layout(sets);
+#ifdef TOTK_TEST_MODULE_REUSE
+    VkShaderModuleLease leases[2];assert(vk_shader_module_acquire(r->shader[0],0,NULL,0,&leases[0]));assert(vk_shader_module_acquire(r->shader[1],1,NULL,0,&leases[1]));
+    assert(leases[0].count==0 && leases[1].count==1 && leases[1].bindings[0].set==1 && leases[1].bindings[0].type==VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+    VkShaderModule vs=leases[0].module,fs=leases[1].module;
+#else
+    VkShaderModule vs=module(vertex_file),fs=module(fragment_file);
+#endif
+    VkDescriptorSetLayout sets[2];VkPipelineLayout p=layout(sets);
     VkResult result=vk_pipeline_state_build(&r->state,vs,fs,p,g_vk.eds?17:7,dynamic,0,&product->pipeline);
     product->layout=p;memcpy(product->sets,sets,sizeof sets);
+#ifdef TOTK_TEST_MODULE_REUSE
+    for(unsigned i=0;i<2;++i)vk_shader_module_release(&leases[i]);
+#else
     vkDestroyShaderModule(g_vk.dev,vs,NULL);vkDestroyShaderModule(g_vk.dev,fs,NULL);
+#endif
     return result;
 }
 int main(int argc,char **argv) {
-    assert(argc==6);bool write_only=!strcmp(argv[1],"--record");vertex_file=argv[3];fragment_file=argv[4];compute_file=argv[5];
+    assert(argc==6);bool write_only=!strcmp(argv[1],"--record"),seed_only=!strcmp(argv[1],"--render-seed");vertex_file=argv[3];fragment_file=argv[4];compute_file=argv[5];
 #ifdef __ANDROID__
     CHECK(volkInitialize());
 #endif
@@ -112,8 +143,9 @@ int main(int argc,char **argv) {
         if(state.fx.on)state.fx.topo=VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
         VkPipelineRecipe recipe;vk_pipeline_recipe_make(&recipe,1,2,&state);
         uint32_t local[3]={2,3,4};VkPipelineRecipe compute;vk_pipeline_recipe_compute(&compute,5,local);
-        vk_pipeline_warm_start(write_only?NULL:build);
-        if(write_only){vk_pipeline_warm_record(&recipe);vk_pipeline_warm_record(&compute);assert(vk_pipeline_warm_save());vk_pipeline_warm_stop();continue;}
+        if(seed_only){remove("cache/vk_pipeline_recipes.bin");vk_pipeline_warm_start_seed(build,"seed.bin",143);assert(vk_pipeline_warm_stats().seeded==2);}
+        else vk_pipeline_warm_start(write_only?NULL:build);
+        if(write_only){vk_pipeline_warm_record(&recipe);vk_pipeline_warm_record(&compute);assert(vk_pipeline_warm_save());VkPipelineRecipe seeds[]={recipe,compute};VkPipelineSeedIdentity id=vk_pipeline_seed_identity(143);assert(vk_pipeline_seed_save("seed.bin",&id,seeds,2));vk_pipeline_warm_stop();continue;}
         for(unsigned i=0;i<10000 && vk_pipeline_warm_stats().prepared<2;++i)usleep(1000);
         assert(vk_pipeline_warm_stats().prepared==2);VkPipelineWarmProduct graphics_product,compute_product;
         assert(vk_pipeline_warm_take(&recipe,&graphics_product));assert(vk_pipeline_warm_take(&compute,&compute_product));
@@ -159,6 +191,10 @@ int main(int argc,char **argv) {
         vkDestroyImageView(g_vk.dev,view,NULL);vkDestroyImage(g_vk.dev,image,NULL);vkFreeMemory(g_vk.dev,im,NULL);vkUnmapMemory(g_vk.dev,bm);vkDestroyBuffer(g_vk.dev,buffer,NULL);vkFreeMemory(g_vk.dev,bm,NULL);vkDestroyDescriptorPool(g_vk.dev,pool,NULL);vk_pipeline_warm_discard(&graphics_product);vkDestroyPipelineLayout(g_vk.dev,p,NULL);for(unsigned i=0;i<2;++i)vkDestroyDescriptorSetLayout(g_vk.dev,sets[i],NULL);
     }
     if(retained_pass)vkDestroyRenderPass(g_vk.dev,retained_pass,NULL);
+#ifdef TOTK_TEST_MODULE_REUSE
+    if(!write_only){VkShaderModuleCacheStats stats=vk_shader_module_cache_stats();assert(stats.builds==3 && stats.hits>=3*(modes-1));}
+    vk_shader_module_cache_reset();
+#endif
     vkDestroyPipelineCache(g_vk.dev,g_vk.pcache,NULL);vkDestroyDevice(g_vk.dev,NULL);
     if(messenger)((PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(g_vk.inst,"vkDestroyDebugUtilsMessengerEXT"))(g_vk.inst,messenger,NULL);
     vkDestroyInstance(g_vk.inst,NULL);

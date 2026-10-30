@@ -1,6 +1,8 @@
 // Bounded preparation-only workers. Each owns and closes its compiler session.
 #pragma once
 #include "shader_prepare.h"
+#include "compile_budget.h"
+#include <atomic>
 #include <algorithm>
 #include <condition_variable>
 #include <cstdio>
@@ -26,13 +28,21 @@ class ShaderPrepareQueue {
     size_t active=0,capacity;
     uint64_t completed=0;
     bool stopped=false;
+    bool background;
+    std::atomic<bool> budget_cancelled{false};
     std::function<void()> checkpoint;
     void fail(const std::string& why) {
-        std::lock_guard<std::mutex> lock(mutex);if(error.empty())error=why;stopped=true;pending.clear();changed.notify_all();
+        std::lock_guard<std::mutex> lock(mutex);if(error.empty())error=why;stopped=true;budget_cancelled=true;pending.clear();changed.notify_all();
     }
     void run() {
         char why[8192]{};
         bool began=false;
+        vk_compile_budget_background(background);
+        vk_compile_budget_checks([](void *p){
+            auto *queue=static_cast<ShaderPrepareQueue*>(p);
+            if(queue->budget_cancelled.load())return true;
+            try{if(queue->checkpoint)queue->checkpoint();return false;}catch(...){return true;}
+        },nullptr,this);
         try {
             if(checkpoint)checkpoint();
             for(;;) {
@@ -43,8 +53,11 @@ class ShaderPrepareQueue {
                     if(stopped)break;task=std::move(pending.front());pending.pop_front();++active;changed.notify_all();
                 }
                 if(checkpoint)checkpoint();
+                if(task.variants.empty() && vk_shader_cached(vk_shader_prepare_key(task.source.c_str(),task.stage))) {
+                    std::lock_guard<std::mutex> lock(mutex);--active;++completed;changed.notify_all();continue;
+                }
                 if(!began) {
-                    if(!vk_shader_prepare_begin(why,sizeof why)){fail(why);return;}
+                    if(!vk_shader_prepare_begin(why,sizeof why))throw std::runtime_error(why);
                     began=true;
                 }
                 bool ok=true;
@@ -66,19 +79,20 @@ class ShaderPrepareQueue {
                 }
                 {
                     std::lock_guard<std::mutex> lock(mutex);--active;
-                    if(!ok){if(error.empty())error=task.name+": "+why;stopped=true;pending.clear();}changed.notify_all();
+                    if(!ok){if(error.empty())error=task.name+": "+why;stopped=true;budget_cancelled=true;pending.clear();}changed.notify_all();
                 }
             }
         }catch(const std::exception& e){fail(e.what());}
         if(began)vk_shader_prepare_end();
+        vk_compile_budget_checks(nullptr,nullptr,nullptr);
     }
     void stop_and_join() {
-        {std::lock_guard<std::mutex> lock(mutex);stopped=true;pending.clear();changed.notify_all();}
+        {std::lock_guard<std::mutex> lock(mutex);stopped=true;budget_cancelled=true;pending.clear();changed.notify_all();}
         for(auto& thread:threads)if(thread.joinable())thread.join();
     }
 public:
-    explicit ShaderPrepareQueue(unsigned workers=0,std::function<void()> check={}):checkpoint(std::move(check)) {
-        if(!workers)workers=std::max(1u,std::thread::hardware_concurrency());capacity=workers*2;
+    explicit ShaderPrepareQueue(unsigned workers=0,std::function<void()> check={},bool low_priority=false):background(low_priority),checkpoint(std::move(check)) {
+        if(!workers)workers=vk_compile_budget_workers();workers=std::min(workers,vk_compile_budget_workers());capacity=workers*2;
         try{for(unsigned i=0;i<workers;++i)threads.emplace_back([this]{run();});}catch(...){stop_and_join();throw;}
     }
     ~ShaderPrepareQueue(){stop_and_join();}

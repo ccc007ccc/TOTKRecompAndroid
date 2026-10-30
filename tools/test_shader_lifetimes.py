@@ -26,6 +26,7 @@ preamble = r'''
 #include "runtime/nvn/vulkan/pipeline_warm.h"
 #include "runtime/nvn/vulkan/shader_object_cache.h"
 #include "runtime/nvn/vulkan/shader_code_state.h"
+#include "runtime/nvn/vulkan/shader_module_cache.h"
 #include "runtime/nvn/vulkan/descriptor_update.h"
 #include "runtime/nvn/maxwell/shader.h"
 #include <assert.h>
@@ -58,10 +59,15 @@ PFN_vkDestroyDescriptorUpdateTemplate vkDestroyDescriptorUpdateTemplate=destroy_
 PFN_vkUpdateDescriptorSetWithTemplate vkUpdateDescriptorSetWithTemplate;
 #endif
 void maxwell_free(ShaderInfo* p){if(p){++infos;free(p);}}
+void vk_shader_module_release(VkShaderModuleLease* p){assert(!p->entry);}
+void vk_shader_module_cache_reset(void){}
 static void program_cache_reset(void){shader_object_clear(&prog_tab);}
 '''
 test = r'''
 static void populate(Prog* p){
+    // A translated program can fail or reset before its prepared buffers have
+    // been consumed by the compiler. These remain owned by the program.
+    for(unsigned i=0;i<2;++i){p->prepared_words[i]=16;p->prepared_spirv[i]=calloc(16,4);assert(p->prepared_spirv[i]);}
     p->vs=(VkShaderModule)handle();p->fs=(VkShaderModule)handle();
     p->layout=(VkPipelineLayout)handle();
     for(unsigned i=0;i<2;++i)p->set_layout[i]=(VkDescriptorSetLayout)handle();

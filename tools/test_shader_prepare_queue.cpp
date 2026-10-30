@@ -8,6 +8,7 @@ static std::atomic<unsigned> sessions,opened,closed,compiled;
 static std::atomic<unsigned> base_opened,base_closed,derived;
 static std::atomic<bool> reject_begin;
 static const auto caller=std::this_thread::get_id();
+extern "C" bool vk_shader_cached(uint64_t){return false;}
 extern "C" bool vk_shader_prepare_begin(char* why,size_t size) {
     assert(!open && std::this_thread::get_id()!=caller);
     if(reject_begin){snprintf(why,size,"test compiler unavailable");return false;}

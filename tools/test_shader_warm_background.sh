@@ -17,7 +17,8 @@ clang++ "${FLAGS[@]}" tools/test_shader_warm_requests.cpp "$WARM_JOB_OUT/digest.
 clang++ "${FLAGS[@]}" -Iandroid/deps/out/include tools/test_shader_warm_observed.cpp runtime/nvn/vulkan/shader_warm_observed.cpp \
     "$WARM_JOB_OUT/digest.o" -lzstd -o "$WARM_JOB_OUT/test-observed"
 "$WARM_JOB_OUT/test-observed" "$WARM_JOB_OUT/observed"
-clang++ "${FLAGS[@]}" tools/test_shader_prepare_queue.cpp -o "$WARM_JOB_OUT/test-queue"
+clang -O1 -g -fsanitize=address,undefined -c runtime/nvn/vulkan/compile_budget.c -o "$WARM_JOB_OUT/compile_budget.o"
+clang++ "${FLAGS[@]}" tools/test_shader_prepare_queue.cpp "$WARM_JOB_OUT/compile_budget.o" -o "$WARM_JOB_OUT/test-queue"
 "$WARM_JOB_OUT/test-queue"
 if [[ $# -ge 2 ]]; then
     bash tools/test_shader_warm_prepare.sh "$WARM_JOB_OUT/integration" "$2" --cancel-background

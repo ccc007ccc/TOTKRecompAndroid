@@ -71,45 +71,17 @@ else()
         --header ${DEPS}/include/vulkan/vulkan_core.h --out ${CMAKE_CURRENT_BINARY_DIR}
         COMMAND_ERROR_IS_FATAL ANY)
 endif()
-set(SHADER_ID_INPUT "")
-foreach(source runtime/nvn/maxwell/translate.c runtime/nvn/maxwell/shader.h runtime/nvn/maxwell/soft64.inc
-        runtime/nvn/vulkan/shaders.c runtime/nvn/vulkan/shader_cache.h runtime/nvn/vulkan/deswizzle_shader.h
-        runtime/nvn/vulkan/shader_compiler.c runtime/nvn/vulkan/shader_precision.h
-        runtime/nvn/vulkan/shader_prepare.cpp runtime/nvn/vulkan/shader_archive.hpp
-        runtime/nvn/vulkan/shader_catalog.hpp runtime/nvn/vulkan/shader_material.hpp
-        runtime/nvn/vulkan/shader_variant_plan.hpp runtime/nvn/vertex_format.h
-        runtime/nvn/vulkan/shader_prepare_queue.hpp runtime/nvn/vulkan/shader_prepare.h
-        runtime/nvn/vulkan/shader_cache_receipt.hpp runtime/nvn/vulkan/shader_code_state.h
-        runtime/nvn/vulkan/shader_warm_state.hpp runtime/nvn/vulkan/shader_warm_job.hpp
-        runtime/nvn/vulkan/shader_interface.hpp runtime/nvn/vulkan/shader_interface.cpp
-        runtime/nvn/vulkan/exec.c runtime/nvn/vulkan/shader_object_cache.h
-        runtime/nvn/vulkan/pipeline_state.h runtime/nvn/vulkan/pipeline_state.c
-        runtime/nvn/vulkan/pipeline_warm.h runtime/nvn/vulkan/pipeline_warm.c
-        android/deps/out/lib/libshaderc_shared.so)
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${R}/${source})
-    file(SHA256 ${R}/${source} digest)
-    string(APPEND SHADER_ID_INPUT "${digest}")
-endforeach()
-string(SHA256 SHADER_BUILD_ID "${SHADER_ID_INPUT}")
+include(${R}/runtime/nvn/vulkan/shader_identity.cmake)
+totk_shader_identity("${R}")
+set(SHADER_BUILD_ID "${SHADER_PREPARE_ID}")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     ${R}/runtime/nvn/vulkan/shader_cache_compat.json)
 include(${R}/runtime/nvn/vulkan/shader_cache_contract.cmake)
 totk_generate_shader_cache_contract("${R}" "${CMAKE_CURRENT_BINARY_DIR}/shader_cache_contract.h")
 set_source_files_properties(${R}/runtime/nvn/vulkan/shaders.c PROPERTIES
     COMPILE_DEFINITIONS HAVE_SHADER_CACHE_CONTRACT=1)
-set(SHADER_WARM_INPUT "")
-foreach(source runtime/nvn/vulkan/shader_warm.cpp runtime/nvn/vulkan/shader_warm_manifest.hpp
-        runtime/nvn/vulkan/shader_warm_plan.hpp runtime/nvn/vulkan/shader_warm_observed.hpp
-        runtime/nvn/vulkan/shader_warm_state.hpp
-        runtime/nvn/vulkan/shader_warm_requests.hpp
-        tools/build_shader_warm_manifest.py)
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${R}/${source})
-    file(SHA256 ${R}/${source} digest)
-    string(APPEND SHADER_WARM_INPUT "${digest}")
-endforeach()
-string(SHA256 SHADER_WARM_ID "${SHADER_WARM_INPUT}")
 set_source_files_properties(${R}/runtime/nvn/vulkan/shader_warm.cpp PROPERTIES
-    COMPILE_DEFINITIONS "SHADER_WARM_ID=\"${SHADER_WARM_ID}\"")
+    COMPILE_DEFINITIONS "SHADER_WARM_ID=\"${SHADER_PLAN_ID}\"")
 file(GLOB UI_SRC CONFIGURE_DEPENDS ${R}/runtime/ui/*.mm)
 set(IMGUI ${R}/third_party/imgui)
 set(IMGUI_SRC ${IMGUI}/imgui.cpp ${IMGUI}/imgui_draw.cpp ${IMGUI}/imgui_tables.cpp ${IMGUI}/imgui_widgets.cpp
@@ -151,6 +123,8 @@ target_include_directories(main PRIVATE ${R}/runtime ${R}/runtime/nvn ${IMGUI} $
 target_compile_definitions(main PRIVATE
     TOTK_DIAGNOSTICS=$<BOOL:${TOTK_DIAGNOSTICS}>
     SHADER_BUILD_ID="${SHADER_BUILD_ID}"
+    SHADER_TRANSLATION_ID="${SHADER_TRANSLATION_ID}"
+    PIPELINE_RECIPE_ID="${PIPELINE_RECIPE_ID}"
     VK_NO_PROTOTYPES VK_USE_PLATFORM_ANDROID_KHR IMGUI_IMPL_VULKAN_USE_VOLK   # Vulkan from the loaded driver (volk)
     VMA_STATIC_VULKAN_FUNCTIONS=0 VMA_DYNAMIC_VULKAN_FUNCTIONS=1)
 if(HAVE_FFMPEG)

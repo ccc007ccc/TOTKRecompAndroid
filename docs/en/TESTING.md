@@ -27,6 +27,12 @@ Frame-timing checks execute generated controller interval/FPS stores and fade co
 and NVN window state. Add `test_totk_framepace.py --image <private main-image.bin>` for real instruction guards;
 see the [2026-10-30 record](../FRAMEPACE-20261030.md) for evidence and gameplay limits.
 Shader checks also need `cc`, `glslangValidator` and `spirv-val` in `dev`.
+
+Prepared interface metadata and production handoff checks run with `bash tools/test_shader_artifacts.sh <isolated-output>`.
+Use `TOTK_ARTIFACT_TSAN=1` for the separate storage concurrency run and
+`TOTK_SHADER_TSAN=1 bash tools/test_shader_scheduling.sh <isolated-output>` for shared admission, module leases, cancellation and source-key golden checks.
+Run `"$PYTHON" tools/test_shader_identity.py` for independent contract invalidation.
+`bash tools/test_vk_shader_seed.sh <prepare-result> <pipeline-seed.bin> <isolated-output>` rebuilds and takes actual prepared compute recipes on a host GPU; it does not dispatch game compute or access a phone.
 Other synthetic `tools/test_*.c` cases cover services, LDC, gather, packaged textures and partial texture updates;
 prior results are recorded in the [investigation history](../TOTK-PORT.md).
 BOTW version cases in the inherited RomFS suite do not establish TOTK resource completeness.

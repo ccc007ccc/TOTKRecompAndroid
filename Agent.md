@@ -270,6 +270,7 @@ CPU 渲染墙钟含等待，GPU 时间可能与它重叠；复制字节占比不
 | FP32 优先 | 开 | `shader_fp32`；`settings.c` / `exec.c`，关闭保留整数双精度路径 |
 | 缺失/损坏着色器运行时编译 | 开 | `shader_runtime_compile`；`LARECOMP_SHADER_RUNTIME_COMPILE` 优先覆盖，见 `shaders.c` |
 | 标题/后台 SPIR-V 准备 | 开 | `LARECOMP_SHADER_WARM=0` 关闭，见 `shader_warm_job.cpp` / `shader_warm_boot.cpp` |
+| 已准备的接口元数据与 SPIR-V 直接加载 | 开，完整校验后复用 | `LARECOMP_SHADER_ARTIFACTS=0` 对照原译码；诊断源码导出/替换/插桩自动走源码路径，见 `shader_artifact.cpp` |
 | 实际管线预热 | 开，有记录才工作 | `LARECOMP_PIPELINE_WARM=0`；总开关 `LARECOMP_SHADER_WARM=0` 也关闭，见 `pipeline_warm.c` |
 | 等待首次需要的着色器/管线 | 开 | 默认完成后执行绘制/计算；`LARECOMP_ASYNC_SKIP_DRAWS=1` 仅诊断旧跳过策略 |
 | 提交时内存快照 | 关 | `LARECOMP_VK_SUBMIT_SNAPSHOT=1`，`submit_snapshot.c` |
@@ -313,6 +314,15 @@ Turnip 对带 `MUTABLE_FORMAT` 却没有格式列表的颜色图像一律关闭 
 不伪造准备收据，不把单项映射当完成证明，不为提高命中率对不等价源码建立别名。
 准备元数据放应用可写 `cache/shader-warm/<规范化游戏路径摘要>/`，不要求输入游戏目录可写。
 损坏/缺失回退、原子落盘、取消/重启和旧缓存保留是必须维护的行为。
+接口元数据按完整 NVN 输入、状态、实际译码配置和编译 namespace 匹配；不持久化源码、guest 地址或 Vulkan handle。
+元数据独立写入线程最多排队 128 项，每个当前 namespace 最多保留 32,768 个文件；它是可重建的加速层，收据仍只证明所列 SPIR-V 完整。
+设备内模块/反射缓存最多保留 128 项、64 MiB SPIR-V；引用保护在途对象，超过保留预算的临时模块不额外留住 SPIR-V。
+shaderc、接口派生、shader module 和管线创建共用编译预算。8 核设备加载阶段最多 4 项、普通后台最多 3 项；游玩阶段最多 2 项、普通后台最多 1 项。
+前台所需的模块依赖/管线可提升优先级；取消后台依赖时前台接着构建。Maxwell 译码保持串行，不因预算改变而删除其锁。
+启动先准备标题与默认计算输入，补计算配方种子，再在加载阶段等待已排队管线最多 15 秒；取消或没有 worker 时立即回到正常首次使用等待。
+种子只记录完整源码键、实际 NVN workgroup 或已成功创建管线的固定状态，在当前设备重新创建；不证明覆盖所有场景。
+译码/接口键、准备范围、SPIR-V 编译 namespace、管线 recipe ABI 和设备身份分别约束复用；无关的录制/清除/调度改动不使准确映射失效。
+实现与本地验收见 [着色器运行时改造](docs/SHADER-RUNTIME-20261030.md)。
 完整准备使用同目录的 `full.receipt` 保存准确源码键集合，`full.log` 记录过程；旧 `.shaders-ready` 不再作为门禁。
 UI 只查询收据身份，独立可取消任务逐项检查模块和字典；每次启动在设置加载后重新验证。
 缓存验证只证明所记录模块完整，不证明覆盖全部运行时状态；默认保留运行时编译回退。

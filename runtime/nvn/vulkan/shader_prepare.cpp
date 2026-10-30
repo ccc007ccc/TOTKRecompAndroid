@@ -4,6 +4,8 @@
 #include "shader_catalog.hpp"
 #include "shader_variant_plan.hpp"
 #include "shader_prepare_queue.hpp"
+#include "shader_artifact.h"
+#include "shader_warm_manifest.hpp"
 #include "shader_prepare.h"
 #include "shader_cache_receipt.hpp"
 #include "shader_warm_state.hpp"
@@ -48,8 +50,13 @@ struct TranslationScope {
 };
 struct Record { Shader shader; uint32_t inputs = 0, outputs = 0; };
 Info translate(const Shader &s, const ShaderKey &key) {
-    return Info(maxwell_translate_bounded(s.binary.data(), s.constants,
+    Info info(maxwell_translate_bounded(s.binary.data(), s.constants,
         s.binary.size() - s.constants, s.stage, &key), maxwell_free);
+    if(info && info->msl) {
+        auto raw=shader_warm::raw_key(s);
+        vk_shader_artifact_store(raw.data(),&key,vk_shader_artifact_profile(vk_shader_prepare_profile()),info.get());
+    }
+    return info;
 }
 } // namespace
 namespace {
@@ -210,6 +217,7 @@ extern "C" bool vk_shader_prepare_game(const char *game, void (*progress)(double
         require(done==total && compilers.done()==total && identity(game)==id,"graphics profile or game data changed during preparation");
         auto keys=compilers.source_keys();
         require(!keys.empty() && keys.size()<=full_receipt_limit,"graphics receipt is too large");
+        vk_shader_artifact_flush();
         require(shader_receipt::save(ready,id,keys),"cannot save graphics completion receipt");
         require(verify_game(game,{},progress),"prepared graphics could not be verified");
         fprintf(log,"complete shaders=%zu variants=%llu\n",records.size(),(unsigned long long)done);

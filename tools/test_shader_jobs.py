@@ -18,8 +18,14 @@ preamble = r'''
 #include <time.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <errno.h>
+#include <string.h>
+static bool fail_creation;
+static int test_create(pthread_t *thread,const pthread_attr_t *attr,void *(*run)(void*),void *arg){if(fail_creation)return EAGAIN;return pthread_create(thread,attr,run,arg);}
+#define pthread_create test_create
 static int SDL_GetNumLogicalCPUCores(void) { return 8; }
 static void vk_shader_prepare_configure(void) {}
+static void vk_shader_artifact_flush(void) {}
 static uint64_t plat_now_ns(void) {struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return (uint64_t)t.tv_sec*1000000000+t.tv_nsec;}
 '''
 test = r'''
@@ -34,6 +40,12 @@ static void *request(void *p) { run_translate(translate,p);wait_built(p);assert(
 int main(int argc,char **argv) {
     (void)argv;setenv("LARECOMP_SHADER_WORKERS","2",1);
     assert(!async_skip_draws());
+    if(argc==2 && !strcmp(argv[1],"--no-workers")) {
+        fail_creation=true;_Atomic int state=0;
+        run_translate(translate,&state);wait_built(&state);assert(state==1 && !jobs_workers && !translator_started);
+        _Atomic int failed=0;run_job(fail_build,&failed);wait_built(&failed);assert(failed==2);
+        vk_shader_jobs_drain();puts("PASS: failed translator/worker creation uses synchronous first-use fallback and publishes success/failure");return 0;
+    }
     if(argc==2) {
         setenv("LARECOMP_SYNC_SHADERS","1",1);_Atomic int state=0;
         run_translate(translate,&state);assert(state==1 && !jobs_workers && !translator_started);wait_built(&state);
@@ -59,5 +71,5 @@ int main(int argc,char **argv) {
 (out / "jobs.c").write_text(preamble + queue + test)
 subprocess.run(["clang", "-O1", "-g", "-fsanitize=address,undefined", "-pthread", str(out / "jobs.c"),
                 "-o", str(out / "test-jobs")], check=True)
-for args in ([], ["--sync"]):
+for args in ([], ["--sync"], ["--no-workers"]):
     subprocess.run([str(out / "test-jobs"), *args], check=True, timeout=30)

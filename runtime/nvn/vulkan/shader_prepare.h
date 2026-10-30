@@ -30,6 +30,7 @@ uint64_t vk_shader_prepare_profile(void);
 void vk_shader_prepare_configure(void);
 unsigned vk_shader_prepare_gather(void);
 bool vk_shader_prepare_vertex_snap(void);
+bool vk_shader_prepare_compute_linear(void);
 bool vk_shader_prepare_game(const char *game, void (*progress)(double, const char *), char *why, size_t capacity);
 // Cheap UI metadata query; never proves module completeness.
 bool vk_shader_game_has_receipt(const char *game);

@@ -9,18 +9,23 @@ mkdir -p "$PHONE_WARM_OUT"
 PHONE_WARM_OUT=$(cd "$PHONE_WARM_OUT" && pwd)
 PHONE_WARM_CC="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang"
 PHONE_WARM_CXX="${PHONE_WARM_CC}++"
-FLAGS=(-O2 -ffunction-sections -fdata-sections -Wno-nullability-completeness -Iandroid/deps/out/include -Iandroid/deps/out/volk)
+FLAGS=(-O2 -ffunction-sections -fdata-sections -Wno-nullability-completeness -Iandroid/deps/out/include -Ithird_party/d2r-digest/include -Iandroid/deps/out/volk)
 cmake -DSHADER_CACHE_ROOT="$PWD" -DSHADER_CACHE_HEADER="$PHONE_WARM_OUT/shader_cache_contract.h" \
     -P tools/generate_shader_cache_contract.cmake
 "$PHONE_WARM_CC" "${FLAGS[@]}" -DHAVE_SHADER_CACHE_CONTRACT=1 -I"$PHONE_WARM_OUT" \
     -c runtime/nvn/vulkan/shaders.c -o "$PHONE_WARM_OUT/shaders.o"
+"$PHONE_WARM_CC" "${FLAGS[@]}" -c runtime/nvn/vulkan/compile_budget.c -o "$PHONE_WARM_OUT/compile_budget.o"
+"$PHONE_WARM_CC" "${FLAGS[@]}" -c runtime/nvn/vulkan/shader_keys.c -o "$PHONE_WARM_OUT/shader_keys.o"
+"$PHONE_WARM_CC" "${FLAGS[@]}" -c runtime/nvn/vulkan/pipeline_seed.c -o "$PHONE_WARM_OUT/pipeline_seed.o"
+"$PHONE_WARM_CC" "${FLAGS[@]}" -c runtime/nvn/vulkan/pipeline_state.c -o "$PHONE_WARM_OUT/pipeline_state.o"
+"$PHONE_WARM_CC" "${FLAGS[@]}" -c runtime/nvn/vulkan/pipeline_warm.c -o "$PHONE_WARM_OUT/pipeline_warm.o"
 "$PHONE_WARM_CC" "${FLAGS[@]}" -c runtime/nvn/maxwell/translate.c -o "$PHONE_WARM_OUT/translate.o"
 "$PHONE_WARM_CC" "${FLAGS[@]}" -Ithird_party/d2r-digest/include -c third_party/d2r-digest/digest.c -o "$PHONE_WARM_OUT/digest.o"
-"$PHONE_WARM_CXX" -std=c++17 "${FLAGS[@]}" tools/test_shader_warm_prepare.cpp runtime/nvn/vulkan/shader_warm.cpp \
-    "$PHONE_WARM_OUT/shaders.o" "$PHONE_WARM_OUT/translate.o" "$PHONE_WARM_OUT/digest.o" \
+"$PHONE_WARM_CXX" -std=c++17 "${FLAGS[@]}" tools/test_shader_warm_prepare.cpp runtime/nvn/vulkan/shader_warm.cpp runtime/nvn/vulkan/shader_artifact.cpp runtime/nvn/vulkan/shader_artifact_storage.cpp \
+    "$PHONE_WARM_OUT/shaders.o" "$PHONE_WARM_OUT/compile_budget.o" "$PHONE_WARM_OUT/shader_keys.o" "$PHONE_WARM_OUT/pipeline_seed.o" "$PHONE_WARM_OUT/pipeline_state.o" "$PHONE_WARM_OUT/pipeline_warm.o" "$PHONE_WARM_OUT/translate.o" "$PHONE_WARM_OUT/digest.o" \
     -Wl,--gc-sections -Landroid/deps/out/lib -lzstd -ldl -llog -o "$PHONE_WARM_OUT/test-warm"
 "$PHONE_WARM_CXX" -std=c++17 "${FLAGS[@]}" tools/audit_shader_warm_plan.cpp \
-    "$PHONE_WARM_OUT/shaders.o" "$PHONE_WARM_OUT/translate.o" "$PHONE_WARM_OUT/digest.o" \
+    "$PHONE_WARM_OUT/shaders.o" "$PHONE_WARM_OUT/compile_budget.o" "$PHONE_WARM_OUT/shader_keys.o" "$PHONE_WARM_OUT/pipeline_seed.o" "$PHONE_WARM_OUT/pipeline_state.o" "$PHONE_WARM_OUT/pipeline_warm.o" "$PHONE_WARM_OUT/translate.o" "$PHONE_WARM_OUT/digest.o" \
     -Wl,--gc-sections -Landroid/deps/out/lib -lzstd -ldl -llog -o "$PHONE_WARM_OUT/audit-warm-cache"
 "$PHONE_WARM_CC" "${FLAGS[@]}" -DHAVE_SHADER_CACHE_CONTRACT=1 -I"$PHONE_WARM_OUT" tools/audit_shader_cache.c \
     -Wl,--gc-sections -Landroid/deps/out/lib -lzstd -ldl -llog -o "$PHONE_WARM_OUT/audit-cache"

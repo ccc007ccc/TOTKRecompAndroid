@@ -12,7 +12,7 @@ case "$(uname -s)" in Linux*) VK=-lvulkan; DL=-ldl ;; *) VK=-lvulkan-1; DL= ;; e
 CC="$CC" CXX="$CXX" sh tools/build_host_shader_compiler.sh "$OUT"
 $CC -O2 -w -ffunction-sections -fdata-sections -Iruntime -Iruntime/nvn -Iandroid/deps/out/include \
     -D_FILE_OFFSET_BITS=64 tools/test_vk_pipelines.c runtime/nvn/maxwell/translate.c \
-    runtime/nvn/vulkan/shaders.c -Wl,--gc-sections -o "$OUT/test_vk_pipelines" $VK $DL -lzstd -lshaderc_shared -lSPIRV-Tools-shared
+    runtime/nvn/vulkan/shaders.c runtime/nvn/vulkan/compile_budget.c -Wl,--gc-sections -o "$OUT/test_vk_pipelines" $VK $DL -lzstd -lshaderc_shared -lSPIRV-Tools-shared
 export LARECOMP_NATIVE_LIB_DIR="$PWD/$OUT"
 if command -v cygpath >/dev/null; then export LARECOMP_NATIVE_LIB_DIR="$(cygpath -m "$LARECOMP_NATIVE_LIB_DIR")"; fi
 # the MSYS2 validation layer manifest lives next to its DLL
