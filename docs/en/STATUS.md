@@ -1,5 +1,10 @@
 # Status and known issues
 
+2026-10-30 code work: an opt-in Vulkan recording worker passed snapshot/thread/request-queue regressions, host Vulkan
+validation and diagnostic/ordinary Release builds. It remains off by default and excluded from ordinary Release.
+The phone was not accessed at the user's request; Android gameplay and FPS gains remain unverified.
+See the [worker record (Chinese)](../PERFORMANCE-VULKAN-WORKER-20261030.md). Descriptor update templates/category dirty flags and actual 2×60 remain unfinished.
+
 [简体中文](../STATUS.md) | English
 
 Updated 2026-10-28. The objective is correct, stable TOTK Switch 1.4.3 execution on Android ARM64.

@@ -34,6 +34,16 @@ bash tools/test_present_interval.sh
 只运行与变更相关的检查。APK 构建命令见 [构建指南](BUILD.md)。上游 `tools/test_lift.py` 依赖 macOS/ARM64，
 不能把在本机 x86_64 Linux 上未执行的测试记为通过。
 
+独立 Vulkan 录制线程的参数快照、背压、失败清理、实际 Android 请求队列与主机 GPU 验证执行：
+
+```bash
+TOTK_WORKER_TSAN=1 bash tools/test_vk_command_worker.sh .work/vk-worker-check
+```
+
+TSAN 为额外检查；宿主工具链/地址空间不支持时会报失败，可去掉该变量执行 ASan/UBSan 与 GPU 范围。
+GPU 部分需要 `glslc`、`spirv-val`、Vulkan 1.3 和验证层。`LARECOMP_VK_WORKER=1` 默认关闭，仅诊断包可启用；
+普通 Release 从构建中剔除。具体覆盖、产物与未实机验收边界见 [本轮记录](PERFORMANCE-VULKAN-WORKER-20261030.md)。
+
 共享着色器清单的上游解析/去重、选定游戏过滤、阶段与类型保留，以及缓存优先加载分别执行：
 
 ```bash

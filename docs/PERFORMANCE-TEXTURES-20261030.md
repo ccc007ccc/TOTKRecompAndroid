@@ -89,3 +89,6 @@ CPU 快照与命令录制为 2.06/1.98/2.04 ms；CPU 回退仅 4/24/10 个小层
 
 下一步仍包含描述符脏标记/更新模板和 Vulkan worker。当前 `stage_set` 已有逐提交描述符哈希缓存和可选
 descriptor plan，进一步复用必须同时维护 descriptor pool、transient UBO 和纹理/管线寿命，不能仅移除提交代次判断。
+
+同日后续：独立录制线程的代码与本地验证已完成，实验默认关闭且未操作手机，见
+[Vulkan worker 记录](PERFORMANCE-VULKAN-WORKER-20261030.md)。描述符更新模板仍待实现，上表手机结果不包含 worker。

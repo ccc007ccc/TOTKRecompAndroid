@@ -34,6 +34,18 @@ BOTW version cases in the inherited RomFS suite do not establish TOTK resource c
 Run checks relevant to the change. APK commands are in [building](BUILD.md).
 The inherited `tools/test_lift.py` depends on macOS/ARM64 and was not run successfully on this x86_64 Linux development host.
 
+The experimental Vulkan recording worker has pointer-snapshot, backpressure, failure/restart, actual Android request-queue,
+and host GPU checks:
+
+```bash
+TOTK_WORKER_TSAN=1 bash tools/test_vk_command_worker.sh .work/vk-worker-check
+```
+
+TSAN is an optional extra pass; remove that variable when the host cannot support it. The normal pass uses ASan/UBSan;
+GPU checks require `glslc`, `spirv-val`, Vulkan 1.3 and validation layers. `LARECOMP_VK_WORKER=1` is off by default and
+available only in diagnostic packages; ordinary Release excludes it. See the [2026-10-30 record (Chinese)](../PERFORMANCE-VULKAN-WORKER-20261030.md).
+These tests do not establish Android/Turnip gameplay correctness or FPS gains.
+
 For the automatic phone benchmark, `--gpu-profile-frame 1150` timestamps one absolute frame and
 `--timing-trace` records queue waits and GPU counter pairs. Both enable profiling; timestamp readback changes
 timing, so keep these results separate from ordinary FPS measurements. `--render-split-us 0..20000` overrides
