@@ -195,6 +195,7 @@ TOTK_STAGE=.work/totk-port/packages/debug-dev
 | 修改范围 | 现有入口 |
 | --- | --- |
 | 输入/生成器 | `"$PYTHON" tools/test_totk.py`、`"$PYTHON" tools/test_romfs_build.py`、`"$PYTHON" tools/test_exclusive_pair.py`、`"$PYTHON" tools/test_local_branches.py` |
+| 游戏计时/呈现间隔 | `"$PYTHON" tools/test_totk_framepace.py`（可传 `--image <私有 main-image.bin>`）、`bash tools/test_present_interval.sh` |
 | APK/库身份、端侧参数 | `"$PYTHON" tools/test_android_packages.py`；`"$PYTHON" tools/test_gamebuild_flags.py`；实际构建相关 variant/profile |
 | 诊断构建隔离 | `"$PYTHON" tools/check_android_diagnostics.py <实际 APK> --expect off\|on`；Release 的 off 和 Debug/测试包的 on 都须验收；编译运行 `tools/test_release_diagnostics.c` 验证调度抢占未被裁掉 |
 | 着色器缓存/编译 | `bash tools/test_shader_runtime.sh`；`bash tools/test_shader_cache_compat.sh`；`bash tools/test_shader_dictionaries.sh` |

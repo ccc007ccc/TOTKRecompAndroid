@@ -16,11 +16,16 @@ Generators, compilers, Python and Java use temporary storage under `.work/totk-p
 "$PYTHON" tools/test_romfs_build.py
 "$PYTHON" tools/test_exclusive_pair.py
 "$PYTHON" tools/test_local_branches.py
+"$PYTHON" tools/test_totk_framepace.py
+bash tools/test_present_interval.sh
 "$PYTHON" tools/test_shader_control_flow.py
 "$PYTHON" tools/test_shader_driver_constants.py
 ```
 
 These cover input contracts/streaming extraction, RomFS building, paired-exclusive instructions, local branches and shader control flow.
+Frame-timing checks execute generated controller interval/FPS stores and fade conversions, cutscene expiry/reset,
+and NVN window state. Add `test_totk_framepace.py --image <private main-image.bin>` for real instruction guards;
+see the [2026-10-30 record](../FRAMEPACE-20261030.md) for evidence and gameplay limits.
 Shader checks also need `cc`, `glslangValidator` and `spirv-val` in `dev`.
 Other synthetic `tools/test_*.c` cases cover services, LDC, gather, packaged textures and partial texture updates;
 prior results are recorded in the [investigation history](../TOTK-PORT.md).

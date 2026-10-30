@@ -1,5 +1,10 @@
 # Upstream integration and frame timing
 
+2026-10-30 follow-up: selected mamcjr/TOTK controller interval, fade and cutscene changes are adapted to our
+four-rate measured-time pacer. Its widescreen entry still supports only BOTW 1.8.2.
+Candidate cutscene marks also fired in our grassland test, so they remain diagnostic-only and disabled by default.
+See the [interval investigation](../FRAMEPACE-20261030.md); the older results below retain their original scope.
+
 2026-10-29 follow-up: the automatic-loading black grid is fixed. See [visual validation](../VISUAL-VALIDATION.md)
 for evidence and the short grassland check; the older record below retains its original status.
 

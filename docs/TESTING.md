@@ -18,11 +18,15 @@
 "$PYTHON" tools/test_romfs_build.py
 "$PYTHON" tools/test_exclusive_pair.py
 "$PYTHON" tools/test_local_branches.py
+"$PYTHON" tools/test_totk_framepace.py
+bash tools/test_present_interval.sh
 "$PYTHON" tools/test_shader_control_flow.py
 "$PYTHON" tools/test_shader_driver_constants.py
 ```
 
 这些检查分别覆盖输入契约／流式提取、RomFS 构建、成对独占指令、局部跳转、着色器控制流和驱动常量。
+帧率检查覆盖生成控制器保存的间隔/FPS、实测时钟、过场超时/重启、淡入淡出转换及 NVN 窗口一致性；
+追加 `test_totk_framepace.py --image <自己的 main-image.bin>` 才包含真实输入位置校验，见 [本轮记录](FRAMEPACE-20261030.md)。
 着色器测试还需要 `cc`、`glslangValidator`、`spirv-val`；它们应安装在 `dev`。
 服务、LDC、gather、打包纹理和局部纹理更新另有 `tools/test_*.c` 合成测试，历史结果见 [适配记录](TOTK-PORT.md)。
 上游 RomFS 测试中的 BOTW 版本检查是继承代码的回归验证，不能代替 TOTK 资源验收。
