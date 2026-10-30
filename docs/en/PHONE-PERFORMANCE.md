@@ -1,5 +1,8 @@
 # Phone performance sessions
 
+The 2026-10-30 shader/worker/descriptor/clear phone comparisons, including first/repeated runs, warm-up controls and
+temperature limits, are in the [phone record (Chinese)](../PHONE-SHADER-EXPERIMENTS-20261030.md). A 60 target and successful exit do not establish actual 2×60.
+
 The benchmark now respects the selected resolution (`--texture-scaling settings`) and normal runtime dynamic-resolution policy
 (`--game-dynres default`). Earlier runs forced `LARECOMP_NO_SCALE=1` and `LARECOMP_GAME_DYNRES=1`; their FPS numbers
 do not represent normal 2× gameplay. Use `--texture-scaling native` only for an explicitly labelled unscaled comparison.

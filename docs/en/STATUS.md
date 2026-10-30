@@ -1,8 +1,19 @@
 # Status and known issues
 
-2026-10-30 shader architecture review: checked D2R Mobile main/Android branches and Eden. Host measurements confirm
-that cached SPIR-V still requires GLSL translation on first use. Priorities are prepared runtime bundles, bounded reuse/shared
-compiler budgets, actual Vulkan seeds and narrower identities. Only audit/measurement tools changed; see the [record (Chinese)](../SHADER-ARCHITECTURE-20261030.md).
+2026-10-30 shader implementation: after the D2R Mobile / Eden review, prepared interfaces/SPIR-V now enter the runtime
+directly, with bounded module reuse, shared compilation budgets, a metadata writer, actual pipeline seeds and separate identities.
+Host concurrency/real-input/GPU checks and both Android Release builds passed; see the [implementation (Chinese)](../SHADER-RUNTIME-20261030.md).
+
+The user subsequently authorized phone tests. The new independent perftest package is installed on OnePlus 13.
+At actual 2× / 60 target with camera rotation, the old reference reached 23.95 FPS and the new first/repeated runs 18.30/22.40.
+Worker, descriptor-template and clear experiments reached about 20.7–21.4 without a demonstrated stable gain.
+Repeated interface loading on/off reached 20.46/19.95; the much slower first off run is insufficient to claim a stable percentage gain.
+Compilation hitches before sampling remain. The user reports water-related slowdowns across locations, more obvious underground.
+The opening underground scene reached 27.54 FPS over 60 seconds, with later windows at 22–25 while interval remained 1 and thermal status rose 2→3.
+A separate warm-off profiling run measured about 13.44 ms/frame of GPU synchronization waits and negligible frame-limit waits;
+its FPS is not a comparable ordinary result, and the water-related cause remains unidentified.
+See the [phone record (Chinese)](../PHONE-SHADER-EXPERIMENTS-20261030.md). Historical statements below about no phone access
+describe the earlier code stages. Actual 2×60 and the water route remain unverified.
 
 2026-10-30 clear experiment: none of 13,617 static fragment inputs uses the identity-depth fallback.
 The first full clear at a new pass can now use loadOp CLEAR. Production CPU regressions, 120 host GPU comparisons

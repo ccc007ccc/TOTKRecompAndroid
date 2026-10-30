@@ -84,3 +84,11 @@ Release / 8 Elite / perftest 与普通 Release / 8 Elite 均构建成功；实�
 
 同日后续：已实现并本地验证更新模板与按解析值分类比较，见 [描述符更新记录](PERFORMANCE-DESCRIPTOR-UPDATES-20261030.md)。
 两个实验仍默认关闭，上方 worker 阶段的产物/结果保留，不扩大为手机收益结论。
+
+## 同日手机补测
+
+用户恢复测试授权后，最新 667f3f3 测试包在一加 13 / Turnip 上完成真实 2×、60 目标、草地 15 秒转视角单项对照。
+同时关闭 shader/pipeline 后台预热，worker 开为 21.432 FPS、p95 57.736 ms，对照为 20.946 FPS、p95 61.571 ms；
+运行时正常退出、skipped=0，日志确认独立录制线程。样本先后/缓存/热状态不同，不足以批准默认开启。
+timed benchmark 直接结束进程，未覆盖游戏内 worker stop/reset 的批次与回退计数、画面或连续切换。
+最新产物身份、温度和完整范围见 [手机补测](PHONE-SHADER-EXPERIMENTS-20261030.md)，上文“未操作手机”为代码阶段历史。

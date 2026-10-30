@@ -79,3 +79,11 @@ TOTK_WORKER_TSAN=1 bash tools/test_vk_command_worker.sh .work/descriptor-updates
 本轮未查询或操作手机。Android/Turnip 的画面、长路线、连续切换和实际 FPS/长帧对照仍待用户允许实机测试时验收。
 分类脏位跳过资源解析、跨提交的持久缓存、push descriptors/descriptor buffers 没有实现；不把当前模板等价于整套后端优化。
 前序首次落水后的持久 20 FPS 仍待复现，真实 2×60 总目标尚未达成。
+
+## 同日手机补测
+
+用户恢复授权后，最新 667f3f3 测试包在一加 13 / Turnip 上完成真实 2×、60 目标、草地 15 秒转视角单项对照。
+关闭 shader/pipeline 后台预热，模板开为 20.935 FPS、p95 61.424 ms，原路径为 20.946 FPS、p95 61.571 ms。
+日志确认 template path active，skipped=0、运行时正常退出；当前没有明确性能收益，继续默认关闭。
+此为短会话完成证据，未代替实际画面、连续切换、长路线或游戏内重启验收。完整身份/温度见
+[手机补测](PHONE-SHADER-EXPERIMENTS-20261030.md)，上文“未操作手机”保留代码阶段历史范围。
