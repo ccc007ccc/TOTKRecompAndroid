@@ -686,6 +686,9 @@ void vk_textures_reset(void) {
     vk_alias_reset();
     while (g_nlive > 0) backend_texture_destroyed(g_live[g_nlive - 1]);
     vk_collect_dead();
+#ifdef __ANDROID__
+    vk_deswizzle_reset();
+#endif
     LOG("[vk] reboot: %d textures released\n", n);
 }
 
@@ -828,6 +831,58 @@ static void texture_trace_record(int kind, uint64_t source, uint64_t upload, uin
     }
     since = now;
 }
+// CPU wall time only: GPU mode includes the upload snapshot and command recording, not GPU execution.
+static void texture_layout_record(bool gpu, uint64_t bytes, uint64_t cpu_ns) {
+    if (!texture_trace_on()) return;
+    static uint64_t since, levels[2], total[2], elapsed[2];
+    uint64_t now = SDL_GetTicksNS();
+    if (!since) since = now;
+    levels[gpu]++; total[gpu] += bytes; elapsed[gpu] += cpu_ns;
+    if (now - since < 2000000000ull) return;
+    for (int i = 0; i < 2; i++) {
+        LOG("[texture-layout] window %.2fs kind %s levels %llu linear %.2fMiB cpu %.3fms\n",
+            (now - since) / 1e9, i ? "gpu-snapshot-record" : "cpu-deswizzle", (unsigned long long)levels[i],
+            total[i] / 1048576.0, elapsed[i] / 1e6);
+        levels[i] = total[i] = elapsed[i] = 0;
+    }
+    since = now;
+}
+// (LARECOMP_TEXTURE_TRACE) the textures read whole by the change checks: the largest every 2 s, with how often they
+// actually changed. Their descriptions are copied: a texture may be gone by the time the window is logged.
+static void texture_check_record(const NvnTexture *t, const TexBackend *b, uint64_t bytes, bool changed) {
+    if (!texture_trace_on()) return;
+    static struct {
+        const TexBackend *b; uint64_t bytes; unsigned checks, changes;
+        uint32_t w, h, d, levels, format, flags, target, pool; bool heap;
+    } top[64];
+    static uint64_t since;
+    int i = 0;
+    while (i < 64 && top[i].b && top[i].b != b) i++;
+    if (i < 64) {
+        if (!top[i].b) {
+            top[i].b = b;
+            top[i].w = t->width, top[i].h = t->height, top[i].d = t->depth, top[i].levels = t->levels;
+            top[i].format = t->format, top[i].flags = t->flags, top[i].target = t->target;
+            top[i].pool = t->pool ? t->pool->flags : 0, top[i].heap = t->addr >= HEAP_BASE;
+        }
+        top[i].bytes += bytes; top[i].checks++; top[i].changes += changed;
+    }
+    uint64_t now = SDL_GetTicksNS();
+    if (!since) since = now;
+    if (now - since < 2000000000ull) return;
+    since = now;
+    for (int k = 0; k < 8; k++) {
+        int best = -1;
+        for (int j = 0; j < 64; j++) if (top[j].b && (best < 0 || top[j].bytes > top[best].bytes)) best = j;
+        if (best < 0 || !top[best].bytes) break;
+        LOG("[texture-checks] %.1f MiB %u checks %u changed: %ux%ux%u levels %u fmt %#x flags %#x target %u pool %#x %s\n",
+            top[best].bytes / 1048576.0, top[best].checks, top[best].changes, top[best].w, top[best].h, top[best].d,
+            top[best].levels, top[best].format, top[best].flags, top[best].target, top[best].pool,
+            top[best].heap ? "heap" : "outside heap");
+        top[best].bytes = 0;
+    }
+    memset(top, 0, sizeof top);
+}
 static void upload_texture(NvnTexture *t, TexBackend *b) {
     if (!t->addr || t->target == 10) return;
     uint64_t frame = vk_frame_counter();
@@ -868,7 +923,10 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
             }
         }
     }
-    if (!notified && b->uploaded && b->dynamic && !always_full && !restyle && !periodic && texture_unchanged(b, mem, total)) return;
+    if (!notified && b->uploaded && b->dynamic && !always_full && !restyle && !periodic && texture_unchanged(b, mem, total)) {
+        texture_check_record(t, b, total, false);
+        return;
+    }
     if (!full && !restyle) {
         prof_tex_samples++;
         uint64_t sh = fnv_sample(mem, total);
@@ -876,11 +934,22 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     }
     prof_tex_full++; prof_tex_full_bytes += total; if (b->dynamic) prof_tex_dyn++;
     uint64_t h = hash_full(mem, total);
+    texture_check_record(t, b, total, !b->uploaded || h != b->data_hash);
     b->full_frame = frame;
     b->sample_hash = fnv_sample(mem, total);
     b->cpu_write_epoch = epoch;
     if (b->uploaded && h == b->data_hash && !restyle) return;
-    if (b->uploaded && h != b->data_hash) b->dynamic = true;
+    // In a CPU-cached pool (NVN 0x4) the CPU's texels reach the GPU only through a flush - WriteTexels, FlushTexels or a
+    // pool flush over them, each announced here - so a change seen with an announcement is checked again at the next
+    // one; only other changes make a texture dynamic, hashed whole every frame. (TotK's 5120x5120 BC4 texture, written
+    // in regions through WriteTexels, was hashed every frame for nothing: ~17 MB.)
+    static int flush_tracking = -1;
+    if (flush_tracking < 0) {
+        const char *e = getenv("LARECOMP_TEXTURE_FLUSH_TRACKING");
+        flush_tracking = e && atoi(e) != 0;  // Opt in until the phone comparison is accepted.
+    }
+    bool announced = flush_tracking && notified && t->pool && (t->pool->flags & 4);
+    if (b->uploaded && h != b->data_hash && !announced) b->dynamic = true;
     if (b->tp > 0) b->tp_gen = texpatch_generation();
     b->data_hash = h;
     b->uploaded = true;
@@ -945,14 +1014,26 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
             uint64_t sz = (uint64_t)row * l.hb * l.d;
             bool expand = mf.expand_rgb && fi->bpb == 3;
             uint32_t out_row = expand ? l.wb * 4 : row;
-            VkSpan s = vk_transient((uint64_t)out_row * l.hb * l.d, 16);
-            uint8_t *lin = expand ? texture_scratch(sz) : s.ptr;
             const uint8_t *src = (const uint8_t *)(uintptr_t)t->addr + layer * layer_size + l.offset;
-            if (linear) {
+            uint64_t layout_start = !linear && texture_trace_on() ? SDL_GetTicksNS() : 0;
+#ifdef __ANDROID__
+            // (texture patches rewrite linear texels on the CPU, and RGB8 widens there)
+            VkSpan s;
+            bool gpu = !linear && !expand && !(b->tp > 0 && layer == 0) && l.offset < layer_size &&
+                vk_deswizzle_upload(cb, src, layer_size - l.offset, row, l.hb, l.d,
+                                    l.block_height_log2, l.block_depth_log2, &s);
+            if (!gpu) s = vk_transient((uint64_t)out_row * l.hb * l.d, 16);
+#else
+            VkSpan s = vk_transient((uint64_t)out_row * l.hb * l.d, 16);
+            bool gpu = false;
+#endif
+            uint8_t *lin = expand ? texture_scratch(sz) : s.ptr;
+            if (!gpu && linear) {
                 for (uint32_t y = 0; y < l.hb; y++) memcpy(lin + (uint64_t)y * row, src + (uint64_t)y * pitch, row);
-            } else {
+            } else if (!gpu) {
                 tegra_deswizzle(src, lin, l.wb, l.hb, l.d, fi->bpb, l.block_height_log2, l.block_depth_log2);
             }
+            if (layout_start) texture_layout_record(gpu, sz, SDL_GetTicksNS() - layout_start);
             {   // LARECOMP_DUMP_TEX=<w>x<h>x<d>,<path prefix>: level 0 of each upload of that shape, guest bytes (.raw)
                 // and deswizzled (.lin), the first 8 (diagnosis)
                 static int dw = -1, dh, dd, ndump;
@@ -962,7 +1043,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                     const char *e = diag_getenv("LARECOMP_DUMP_TEX");
                     if (e && sscanf(e, "%dx%dx%d,%255s", &dw, &dh, &dd, dpre) != 4) dw = 0;
                 }
-                if (dw && lv == 0 && layer == 0 && (int)t->width == dw && (int)t->height == dh && (int)t->depth == dd &&
+                if (dw && !gpu && lv == 0 && layer == 0 && (int)t->width == dw && (int)t->height == dh && (int)t->depth == dd &&
                     ndump < 8) {
                     char p[300];
                     snprintf(p, sizeof p, "%s%d.lin", dpre, ndump);

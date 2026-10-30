@@ -23,6 +23,7 @@ static const char *dlerror(void) { return "cannot load shader preparation plugin
 #include "shader_cache.h"
 #include "shader_prepare.h"
 #include "shader_runtime.h"
+#include "deswizzle_shader.h"
 #ifdef __ANDROID__
 #include "../../settings.h"
 #endif
@@ -372,7 +373,7 @@ void vk_shaders_init(void) {
     // target/type combinations must be included, including the depth-only clear.
     static const char *names[] = {"present.vert", "present.frag", "present_a.frag", "post.vert",
         "smaa_edge.frag", "smaa_weight.frag", "smaa_blend.frag", "easu.frag", "rcas.frag",
-        "sgsr1.frag", "clear.vert", "clear.frag.none"};
+        "sgsr1.frag", "clear.vert", "clear.frag.none", "deswizzle.comp"};
     bool opened = false;
     for (size_t i = 0; i < sizeof names / sizeof *names; ++i) prepare_builtin(names[i], &opened);
     for (int target = 0; target < 8; ++target) for (int kind = 0; kind < 3; ++kind) {
@@ -475,6 +476,10 @@ VkDescriptorSetLayout vk_set_layout(const VkBindingInfo *b, int n, uint32_t set,
 
 // ================================================================== built-in shaders
 const char *vk_builtin_source(const char *name, int *stage) {
+    if (!strcmp(name, "deswizzle.comp")) {  // (deswizzle.c upload conversion)
+        *stage = STAGE_COMPUTE;
+        return VK_DESWIZZLE_GLSL;
+    }
     if (!strcmp(name, "present.vert")) {
         *stage = STAGE_VERTEX;
         // pv[0].x: flip (lower-left origin), pv[1]: uv crop (origin, size). Fullscreen triangle; Vulkan NDC y points down.

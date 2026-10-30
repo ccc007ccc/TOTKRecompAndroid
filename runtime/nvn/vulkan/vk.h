@@ -128,6 +128,11 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
 typedef struct { VkBuffer buf; uint64_t off; void *ptr; } VkSpan;
 VkSpan vk_transient(uint64_t size, uint64_t align);
 VkSpan vk_transient_copy(const void *data, uint64_t size, uint64_t align);
+// Upload command buffer only: snapshot a block-linear level and return GPU-linearized bytes in the transient ring.
+// False leaves dst unchanged for the CPU fallback. Reset requires an idle GPU and drained render thread.
+bool vk_deswizzle_upload(VkCommandBuffer cb, const void *src, uint64_t available, uint32_t row, uint32_t hb,
+                         uint32_t depth, uint32_t bh, uint32_t bd, VkSpan *dst);
+void vk_deswizzle_reset(void);
 // Shared, CPU-read-only staging. After recording copies, vk_readback_wait makes
 // them visible to the CPU. A caller submitting itself uses barrier, wait, invalidate.
 VkSpan vk_readback(uint64_t size);

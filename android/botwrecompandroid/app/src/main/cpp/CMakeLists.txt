@@ -62,7 +62,7 @@ if(NOT TOTK_DIAGNOSTICS)
 endif()
 set(SHADER_ID_INPUT "")
 foreach(source runtime/nvn/maxwell/translate.c runtime/nvn/maxwell/shader.h runtime/nvn/maxwell/soft64.inc
-        runtime/nvn/vulkan/shaders.c runtime/nvn/vulkan/shader_cache.h
+        runtime/nvn/vulkan/shaders.c runtime/nvn/vulkan/shader_cache.h runtime/nvn/vulkan/deswizzle_shader.h
         runtime/nvn/vulkan/shader_compiler.c runtime/nvn/vulkan/shader_precision.h
         runtime/nvn/vulkan/shader_prepare.cpp runtime/nvn/vulkan/shader_archive.hpp
         runtime/nvn/vulkan/shader_catalog.hpp runtime/nvn/vulkan/shader_material.hpp
