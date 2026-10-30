@@ -25,6 +25,10 @@ DXVK 为 zlib/libpng 许可，MIT 工程和 Mesa 文件的实际来源/许可仍
 
 ### 1. 对原样深度输出声明 `depth_unchanged`
 
+后续统计：自有 1.4.3 的 13,617 个片元输入中，73 个输出深度，原样回退路径为 **0**。
+这个窄候选暂不加开关；已转向新 pass 首次完整清除合并，见 [代码与验收记录](PERFORMANCE-PASS-CLEAR-20261030.md)。
+下文保留 Git 审查时的候选依据，不能当作后续已实现或实测收益。
+
 **最适合先做小范围代码实验。** 当前 `translate.c` 在 SPH 声明深度输出、对应寄存器没有使用时生成
 `gl_FragDepth = gl_FragCoord.z`，但没有 conservative-depth 声明。
 Turnip 基点与最新版本的 [`tu_lrz.cc`](https://gitlab.freedesktop.org/mesa/mesa/-/blob/ab1502fd1606633e910212da185e92fa6bd4cde1/src/freedreno/vulkan/tu_lrz.cc#L1352)

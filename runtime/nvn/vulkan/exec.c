@@ -35,6 +35,7 @@
 #include "../../test_session.h"
 #include "view_overlap.h"
 #include "feedback_identity.h"
+#include "pass_clear.h"
 #include "../submit_snapshot.h"
 
 // LARECOMP_AB (vk_ab, below): AB() costs no call while it is not set - it is asked per constant buffer and per pass
@@ -1904,8 +1905,9 @@ uint64_t vk_test_scene_frame(void) {
     return draws >= 600 ? g_test_scene_frame : 0;
 }
 
-static void begin_pass(void) {
-    if (in_pass && !st.rt_dirty) return;
+static VkRect2D scissor_rect(void);
+static bool begin_pass_with_clear(const VkPassClear *clear) {
+    if (in_pass && !st.rt_dirty) return false;
     pipeline_dirty = true;
     vk_end_pass();
     // Test readiness must also work with NO_SCALE, which assigns RS_NONE to all
@@ -2052,6 +2054,24 @@ static void begin_pass(void) {
     }
     if (!w) { pass_sx = pass_sy = 1; minw = minh = 16; }
     pass_w = minw; pass_h = minh;
+    bool folded = false;
+    if (clear) {
+        // Match the existing clear's actual scaled scissor and selected mip.
+        // Render views are single-layer 2D views, including array/cube slices.
+        // Reject a smaller render area; never clear the rest of a larger image.
+        NvnTexture *t = clear->index >= 0 && clear->index < st.rt.ncolor ? st.rt.color[clear->index] :
+                        clear->index < 0 ? st.rt.depth : NULL;
+        const NvnTextureView *view = clear->index >= 0 && clear->index < st.rt.ncolor ? &st.rt.cview[clear->index] : &st.rt.dview;
+        bool has_view = clear->index >= 0 && clear->index < st.rt.ncolor ? st.rt.has_cview[clear->index] : st.rt.has_dview;
+        uint32_t lv = has_view && (view->setmask & 1) ? view->base_level : 0;
+        TexBackend *b = t ? t->backend : NULL;
+        if (b && lv < b->levels && b->base_type != VK_IMAGE_VIEW_TYPE_3D) {
+            vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = vp_oy = 0;
+            VkExtent2D extent = {level_extent(b->width, lv), level_extent(b->height, lv)};
+            folded = vk_pass_clear_apply(clear, scissor_rect(), (VkExtent2D){minw, minh}, extent,
+                                        ca, pass_ncolor, has_d ? &da : NULL, has_s ? &sa : NULL);
+        }
+    }
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {minw, minh}}, .layerCount = 1,
                           .colorAttachmentCount = pass_ncolor, .pColorAttachments = ca,
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};
@@ -2081,7 +2101,10 @@ static void begin_pass(void) {
     pass_written = 0;
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
     stat_passes++;
+    return folded;
 }
+
+static void begin_pass(void) { (void)begin_pass_with_clear(NULL); }
 
 static void pass_size(int *w, int *h) {
     *w = *h = 0;
@@ -2277,11 +2300,45 @@ static VkPipeline clear_pipeline(int index, int kind, uint32_t mask, bool depth,
     return p;
 }
 
+static void pass_clear_note(unsigned path, int index, bool depth, bool stencil) {
+#if TOTK_DIAGNOSTICS
+    if (!diag_getenv("LARECOMP_LOG_PASS_CLEARS")) return;
+    static uint64_t count[3], aspects[3], last;
+    count[path]++;
+    if (!path) { aspects[0] += index >= 0; aspects[1] += depth; aspects[2] += stencil; }
+    uint64_t now = SDL_GetTicksNS();
+    if (!last) last = now;
+    if (now - last < 2000000000ull) return;
+    LOG("[pass-clear] loadop=%llu (color=%llu depth=%llu stencil=%llu) attachments=%llu masked_draw=%llu\n",
+        (unsigned long long)count[0], (unsigned long long)aspects[0], (unsigned long long)aspects[1],
+        (unsigned long long)aspects[2], (unsigned long long)count[1], (unsigned long long)count[2]);
+    memset(count, 0, sizeof count); memset(aspects, 0, sizeof aspects); last = now;
+#else
+    (void)path; (void)index; (void)depth; (void)stencil;
+#endif
+}
+
 static void clear(int index, int kind, const void *color, uint32_t mask, bool depth, float dval, bool stencil, uint32_t sval,
                   uint32_t smask) {
     vk_diag_log("clear group=%u slot=%d mask=%x depth=%d:%g stencil=%d:%u/%x\n",vk_diag_group(),index,mask,depth,dval,stencil,sval,smask);
     if(vk_diag_active()&&color){uint32_t c[4];memcpy(c,color,sizeof c);vk_diag_log(" clear_color kind=%d bits=%08x,%08x,%08x,%08x\n",kind,c[0],c[1],c[2],c[3]);}
-    begin_pass();
+    bool folded = false;
+#if TOTK_DIAGNOSTICS
+    const char *loadop = diag_getenv("LARECOMP_VK_LOADOP_CLEAR");
+    if (loadop && atoi(loadop) != 0) {
+        VkPassClear request = {.index = index, .color_mask = mask, .stencil_mask = smask,
+                               .depth = depth, .stencil = stencil};
+        if (index >= 0 && color) memcpy(&request.value.color, color, 16);
+        else request.value.depthStencil = (VkClearDepthStencilValue){dval, sval};
+        folded = begin_pass_with_clear(&request);
+    } else
+#endif
+        begin_pass();
+    if (folded) {
+        vk_diag_log("clear_loadop group=%u slot=%d depth=%d stencil=%d\n", vk_diag_group(), index, depth, stencil);
+        pass_clear_note(0, index, depth, stencil);
+        return;
+    }
     VkCommandBuffer cb = vk_cmd();
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
     VkRect2D rect = scissor_rect();
@@ -2299,7 +2356,7 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
         VkImageAspectFlags dsa = (depth && pass_depth ? VK_IMAGE_ASPECT_DEPTH_BIT : 0) | (stencil && pass_stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
         if (dsa) a[n++] = (VkClearAttachment){.aspectMask = dsa, .clearValue.depthStencil = {dval, sval}};
         VkClearRect cr = {rect, 0, 1};
-        if (n) vkCmdClearAttachments(cb, n, a, 1, &cr);
+        if (n) { vkCmdClearAttachments(cb, n, a, 1, &cr); pass_clear_note(1, index, depth, stencil); }
         return;
     }
     VkPipeline p = clear_pipeline(index, kind, mask, depth, stencil);
@@ -2326,6 +2383,7 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
     vkCmdPushConstants(cb, pc_layout(), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, pc);
     ss.known &= ~SS_SETS;  // (another layout: the draws' sets are bound again)
     vkCmdDraw(cb, 3, 1, 0, 0);
+    pass_clear_note(2, index, depth, stencil);
 }
 
 // ================================================================== programs

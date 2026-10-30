@@ -49,6 +49,11 @@ GPU 部分需要 `glslc`、`spirv-val`、Vulkan 1.3 和验证层。`LARECOMP_VK_
 `"$PYTHON" tools/test_shader_lifetimes.py` 另验普通/诊断构建的模板与程序重启回收。
 `LARECOMP_VK_DESCRIPTOR_UPDATES=1` 默认关闭且仅诊断包编入，覆盖与性能限制见 [描述符记录](PERFORMANCE-DESCRIPTOR-UPDATES-20261030.md)。
 
+首次完整清除合入 loadOp 的运行时边界/诊断隔离及传统/动态 pass + worker GPU 对照执行
+`bash tools/test_pass_clear.sh .work/pass-clear-check [自己的 romfs.bin]`；不传 RomFS 只运行合成范围。
+GPU 要求 Vulkan 1.3 与验证层成功，不会退回无验证模式。`LARECOMP_VK_LOADOP_CLEAR=1` 默认关闭且仅诊断构建可启用。
+`LARECOMP_LOG_PASS_CLEARS=1` 可记录执行路径计数；静态深度候选和测试边界见 [清除记录](PERFORMANCE-PASS-CLEAR-20261030.md)。
+
 共享着色器清单的上游解析/去重、选定游戏过滤、阶段与类型保留，以及缓存优先加载分别执行：
 
 ```bash

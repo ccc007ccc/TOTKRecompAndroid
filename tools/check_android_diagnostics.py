@@ -45,7 +45,8 @@ def main():
     switches = ['LARECOMP_TEST_SESSION', 'LARECOMP_FULL_GPU_CAPTURE', 'LARECOMP_FNPROF',
                 'LARECOMP_DUMP_VERTEX_OUTPUT', 'LARECOMP_AUDIO_DUMP', 'LARECOMP_TIMING_TRACE',
                 'LARECOMP_AUDIO_WAV', 'LARECOMP_AUDOUT_WAV', 'LARECOMP_VK_VALIDATION', 'LARECOMP_LAUNCHER_DELETE',
-                'LARECOMP_VK_WORKER', 'LARECOMP_VK_DESCRIPTOR_UPDATES']
+                'LARECOMP_VK_WORKER', 'LARECOMP_VK_DESCRIPTOR_UPDATES',
+                'LARECOMP_VK_LOADOP_CLEAR', 'LARECOMP_LOG_PASS_CLEARS']
     for name in switches:
         present = name.encode() + b'\0' in data
         if present != enabled:

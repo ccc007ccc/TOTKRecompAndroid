@@ -1,5 +1,9 @@
 # 当前状态与已知问题
 
+2026-10-30 清除代码阶段：静态 13,617 个片元输入中原样深度回退候选为 0；保留真实深度语义。
+已实现新 pass 第一项完整清除合入 loadOp CLEAR，运行时边界测试、120 组主机 GPU 比较及两档 Release 构建/隔离通过。
+仅诊断包可启用、默认关闭，未操作手机，批量延迟清除与真实 2×60 仍待推进，见 [本轮记录](PERFORMANCE-PASS-CLEAR-20261030.md)。
+
 2026-10-30 上游性能再审查：Git 核对 DXVK、Turnip、Eden、Ryujinx、MacNativeGames 和 TOTK Windows 分支，
 优先候选为原样深度的 conservative-depth 声明与完整清除合并；另查描述符 ring、验证索引和寻址。
 新清单匹配 1.4.3 增加 191 行管线元数据、没有新 variants。本轮只查证和记录，未改运行时或操作手机，见

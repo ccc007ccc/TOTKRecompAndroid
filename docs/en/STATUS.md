@@ -1,5 +1,10 @@
 # Status and known issues
 
+2026-10-30 clear experiment: none of 13,617 static fragment inputs uses the identity-depth fallback.
+The first full clear at a new pass can now use loadOp CLEAR. Production CPU regressions, 120 host GPU comparisons
+and both Release builds/isolation checks passed. Diagnostic-only, disabled by default; no phone was used.
+General deferred batching and actual 2×60 remain unfinished; see the [record (Chinese)](../PERFORMANCE-PASS-CLEAR-20261030.md).
+
 2026-10-30 Git performance review: DXVK, Turnip, Eden, Ryujinx, MacNativeGames and a TOTK Windows branch were checked
 against fixed commits. Identity-depth declarations and deferred full clears are the first GPU candidates; descriptor
 rings, validation indexes and address lookup follow. The latest list adds 191 matching 1.4.3 pipeline metadata rows,

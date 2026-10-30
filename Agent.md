@@ -207,6 +207,7 @@ TOTK_STAGE=.work/totk-port/packages/debug-dev
 | 纹理描述符注册/队列 | `bash tools/test_texture_registration.sh`（含真实请求队列、引用寿命和对象锁回归） |
 | 独立 Vulkan 录制 worker | `bash tools/test_vk_command_worker.sh`（参数快照/背压、实际请求队列、真实 Vulkan 同步验证；`TOTK_WORKER_TSAN=1` 追加线程检查，实验仅诊断包且默认关闭） |
 | 描述符更新模板/分类比较 | `bash tools/test_descriptor_updates.sh`（实际 stage_set、失败/生命周期与原写入/模板/worker 组合的真实 GPU 值；实验仅诊断包且默认关闭） |
+| 首次完整清除合入 loadOp / 深度统计 | `bash tools/test_pass_clear.sh <输出目录> [自己的 romfs.bin]`（实际 pass/scissor/clear 的 ASan/UBSan、传统/动态 pass 与 worker 的 GPU 比较；强制验证层；实验仅诊断包且默认关闭） |
 | GPU 纹理排布转换 / 写通知策略 | `bash tools/test_vk_deswizzle.sh`（真实 Vulkan、同步验证、快照与回收）；`"$PYTHON" tools/test_texture_change_policy.py <输出目录>` |
 | 可变图像格式列表（UBWC） | `"$PYTHON" tools/test_image_format_lists.py <输出目录>`（按独立尺寸表核对整类视图格式、E5B9G9R9 排除和默认设备条件） |
 | 清单/准备/生命周期 | `bash tools/test_shader_warm_list.sh`；`bash tools/test_shader_warm_prepare.sh`；`bash tools/test_shader_warm_background.sh` |
