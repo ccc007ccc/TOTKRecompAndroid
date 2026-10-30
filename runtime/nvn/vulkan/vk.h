@@ -23,6 +23,10 @@
 #include "../nvn.h"
 #include "../maxwell/shader.h"
 
+#if defined(__ANDROID__) && defined(TOTK_VK_COMMAND_WORKER)
+#include "command_worker.h"
+#endif
+
 void vk_device_fault_report(void);
 #ifdef __ANDROID__
 void vk_android_load(void);  // android_driver.c: the Vulkan driver (adrenotools / system) into volk
@@ -90,6 +94,8 @@ uint64_t vk_pending_seq(void);        // number the pending submission will get
 uint64_t vk_completed_seq(void);
 void vk_memory_written(uint64_t addr, uint64_t size); // render-thread invalidation after a CPU flush
 void vk_async_memory_written(uint64_t addr, uint64_t size); // order invalidation with queued command lists
+bool vk_async_is_render_thread(void);
+void vk_async_drain(void); // translation and pending driver recording before foreign-thread access
 void vk_async_call_sync(void (*call)(void *), void *arg);
 void vk_async_call(void (*call)(void *), void *arg); // ordered, nonblocking; payload must outlive callback (which may free it)
 bool vk_deferred_resources_default(void); // TotK + Turnip/Adreno 8xx: queued textures and GPU buffer copies

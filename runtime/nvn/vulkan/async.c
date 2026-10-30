@@ -15,6 +15,7 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -28,7 +29,7 @@
 #include "vk.h"
 #include "timing_trace.h"
 
-enum { REQ_EXEC, REQ_PRESENT, REQ_FENCE, REQ_MEMORY_WRITE, REQ_CALL };
+enum { REQ_EXEC, REQ_PRESENT, REQ_FENCE, REQ_MEMORY_WRITE, REQ_CALL, REQ_DRIVER_DRAIN };
 typedef struct { int type; uint64_t a; void *p; uint64_t id, b; } Req;
 typedef struct { uint8_t *list; SubmitSnapshot *snapshot; } ExecCopy;
 
@@ -41,7 +42,7 @@ static pthread_mutex_t q_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t q_more = PTHREAD_COND_INITIALIZER, q_less = PTHREAD_COND_INITIALIZER;
 static pthread_mutex_t p_lock = PTHREAD_MUTEX_INITIALIZER;  // producers: an id, its list's fences and its push together
 static pthread_t render_thread;
-static bool started;
+static _Atomic bool started;
 static int on = -1;
 
 // The game's thread may run this many frames ahead of the render thread (the translation of one frame overlaps the
@@ -107,7 +108,19 @@ static void *render_main(void *arg) {
         else if (r.type == REQ_PRESENT) vk_present_now((NvnTexture *)r.p);
         else if (r.type == REQ_FENCE) nvn_sync_set_seq(r.a, renderer_fence_seq());
         else if (r.type == REQ_MEMORY_WRITE) vk_memory_written(r.a, r.b);
-        else if (r.type == REQ_CALL) ((void (*)(void *))(uintptr_t)r.a)(r.p);
+        else if (r.type == REQ_CALL) {
+#ifdef TOTK_VK_COMMAND_WORKER
+            // Callbacks may free VMA objects through indirect driver functions, outside the recording wrappers.
+            vk_command_worker_flush();
+#endif
+            ((void (*)(void *))(uintptr_t)r.a)(r.p);
+#ifdef TOTK_VK_COMMAND_WORKER
+            vk_command_worker_flush();
+#endif
+        }
+#ifdef TOTK_VK_COMMAND_WORKER
+        else if (r.type == REQ_DRIVER_DRAIN) vk_command_worker_flush();
+#endif
         uint64_t elapsed = plat_now_ns() - t0;
         frame_cpu += cpu_timing ? render_cpu_ns() - cpu0 : elapsed;
         frame_work += elapsed;
@@ -138,8 +151,9 @@ static void *render_main(void *arg) {
 static uint64_t push(int type, uint64_t a, void *p, uint64_t b) {
     pthread_mutex_lock(&q_lock);
     if (!started) {
-        started = true;
-        pthread_create(&render_thread, NULL, render_main, NULL);
+        if (pthread_create(&render_thread, NULL, render_main, NULL))
+            FATAL("vk: could not start the render thread\n");
+        atomic_store_explicit(&started, true, memory_order_release);
     }
     if (q_tail - q_head >= QN || (type == REQ_PRESENT && q_presents >= ahead)) {
         pthread_mutex_unlock(&q_lock);
@@ -172,12 +186,28 @@ void vk_async_wait_id(uint64_t id) {
 
 // Until every request queued so far has run (the render thread is idle after it).
 void vk_async_drain(void) {
-    if (!started || vk_async_is_render_thread()) return;
+    if (!started) return;
+    if (vk_async_is_render_thread()) {
+#ifdef TOTK_VK_COMMAND_WORKER
+        vk_command_worker_flush();
+#endif
+        return;
+    }
     uint64_t wait_start = vk_timing_trace_on() ? plat_now_ns() : 0;
     pthread_mutex_lock(&q_lock);
     uint64_t id = q_tail;
     while (q_done < id) pthread_cond_wait(&q_less, &q_lock);
     pthread_mutex_unlock(&q_lock);
+#ifdef TOTK_VK_COMMAND_WORKER
+    // Recheck after translation: the requests we just waited for can have started the driver worker.
+    // Only the render producer may publish its staging bytes, so use an ordered queue barrier.
+    if (vk_command_worker_active()) {
+        pthread_mutex_lock(&p_lock);
+        uint64_t driver_id = push(REQ_DRIVER_DRAIN, 0, NULL, 0);
+        pthread_mutex_unlock(&p_lock);
+        vk_async_wait_id(driver_id);
+    }
+#endif
     if (wait_start) vk_timing_trace_wait(VK_TIMING_DRAIN, plat_now_ns() - wait_start);
 }
 
@@ -288,12 +318,21 @@ static uint64_t enqueue_call(void (*call)(void *), void *arg) {
     pthread_mutex_unlock(&p_lock);
     return id;
 }
+static void call_now(void (*call)(void *), void *arg) {
+#ifdef TOTK_VK_COMMAND_WORKER
+    vk_command_worker_flush();
+#endif
+    call(arg);
+#ifdef TOTK_VK_COMMAND_WORKER
+    vk_command_worker_flush();
+#endif
+}
 void vk_async_call(void (*call)(void *), void *arg) {
-    if (!vk_async_on() || vk_async_is_render_thread()) { call(arg); return; }
+    if (!vk_async_on() || vk_async_is_render_thread()) { call_now(call, arg); return; }
     enqueue_call(call, arg);
 }
 void vk_async_call_sync(void (*call)(void *), void *arg) {
-    if (!vk_async_on() || vk_async_is_render_thread()) { call(arg); return; }
+    if (!vk_async_on() || vk_async_is_render_thread()) { call_now(call, arg); return; }
     uint64_t id = enqueue_call(call, arg);
     kernel_blocking_begin();
     vk_async_wait_id(id);

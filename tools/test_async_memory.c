@@ -21,7 +21,58 @@ static void synchronous_call(void *arg) {
     uint64_t *value = arg; observe(3, *value, 0); vk_async_call_sync(nested_call, arg);
 }
 static VkResult idle(VkDevice device) { (void)device; return VK_SUCCESS; }
+#ifndef TOTK_VK_COMMAND_WORKER
 PFN_vkDeviceWaitIdle vkDeviceWaitIdle = idle;
+#else
+static bool worker_test;
+static pthread_t test_producer;
+static pthread_mutex_t start_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t start_cond = PTHREAD_COND_INITIALIZER;
+static bool start_released;
+static _Atomic bool start_race;
+static unsigned driver_draws;
+int __real_pthread_cond_wait(pthread_cond_t *, pthread_mutex_t *);
+int __wrap_pthread_cond_wait(pthread_cond_t *c, pthread_mutex_t *m) {
+    if (atomic_load(&start_race) && pthread_equal(pthread_self(), test_producer)) {
+        pthread_mutex_lock(&start_lock);
+        start_released = true; pthread_cond_broadcast(&start_cond);
+        pthread_mutex_unlock(&start_lock);
+    }
+    return __real_pthread_cond_wait(c, m);
+}
+static VKAPI_ATTR void VKAPI_CALL driver_draw(VkCommandBuffer cb, uint32_t count, uint32_t inst, uint32_t first, uint32_t base) {
+    (void)cb; (void)count; (void)inst; (void)base; assert(first == driver_draws++);
+}
+static VKAPI_ATTR void VKAPI_CALL driver_pipeline(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipeline p) { (void)cb; (void)bp; (void)p; }
+static VKAPI_ATTR void VKAPI_CALL driver_bind(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayout l,
+    uint32_t f, uint32_t n, const VkDescriptorSet *s, uint32_t nd, const uint32_t *d) {
+    (void)cb; (void)bp; (void)l; (void)f; (void)n; (void)s; (void)nd; (void)d;
+}
+static VKAPI_ATTR VkResult VKAPI_CALL driver_end(VkCommandBuffer cb) { (void)cb; return VK_SUCCESS; }
+static void worker_exec(void) {
+    if (!vk_command_worker_active()) {
+        pthread_mutex_lock(&start_lock);
+        while (!start_released) pthread_cond_wait(&start_cond, &start_lock);
+        pthread_mutex_unlock(&start_lock);
+        assert(vk_command_worker_start(false));
+    }
+    vkCmdDraw((VkCommandBuffer)(uintptr_t)1, 3, 1, 0, 0); // remains in an unpublished partial slot
+}
+static void worker_nested(void *unused) {
+    (void)unused; assert(driver_draws == 2);
+    vkCmdDraw((VkCommandBuffer)(uintptr_t)1, 3, 1, 2, 0);
+}
+static void worker_callback(void *unused) {
+    (void)unused; assert(driver_draws == 1); // queued callback drains preceding EXEC
+    vkCmdDraw((VkCommandBuffer)(uintptr_t)1, 3, 1, 1, 0);
+    vk_async_call_sync(worker_nested, NULL); // in-place reentry drains before and after
+    assert(driver_draws == 3);
+    vkCmdDraw((VkCommandBuffer)(uintptr_t)1, 3, 1, 3, 0);
+    vk_async_drain(); assert(driver_draws == 4); // render-thread drain must publish its own bytes
+    vkCmdDraw((VkCommandBuffer)(uintptr_t)1, 3, 1, 4, 0); // outer callback also drains on return
+}
+static void worker_stop(void *unused) { (void)unused; vk_command_worker_stop(); }
+#endif
 void rt_fatal_message(const char *format, ...) {
     va_list args; va_start(args, format); vfprintf(stderr, format, args); va_end(args); abort();
 }
@@ -38,7 +89,12 @@ void vk_timing_trace_wait(int kind, uint64_t ns) { (void)kind; (void)ns; }
 void test_session_frame(uint64_t frame, bool scene, void (*idle_fn)(void)) { (void)frame; (void)scene; (void)idle_fn; }
 uint64_t renderer_present_count(void) { return 0; }
 uint64_t vk_test_scene_frame(void) { return 0; }
-void vk_execute_now(uint64_t handle) { observe(1, ((const CmdRec *)(uintptr_t)handle)->x[0], 0); }
+void vk_execute_now(uint64_t handle) {
+#ifdef TOTK_VK_COMMAND_WORKER
+    if (worker_test) { worker_exec(); return; }
+#endif
+    observe(1, ((const CmdRec *)(uintptr_t)handle)->x[0], 0);
+}
 void vk_present_now(NvnTexture *texture) { (void)texture; abort(); }
 void nvn_sync_set_seq(uint64_t sync, uint64_t seq) { (void)sync; (void)seq; abort(); }
 uint64_t renderer_fence_seq(void) { return 0; }
@@ -67,6 +123,11 @@ static void held_call(void *arg) {
     vk_async_call(nested_call, arg); // render-thread reentry must run in place
 }
 int main(void) {
+#ifdef TOTK_VK_COMMAND_WORKER
+    vkDeviceWaitIdle = idle; vkCmdDraw = driver_draw; vkCmdBindPipeline = driver_pipeline;
+    vkCmdBindDescriptorSets = driver_bind; vkEndCommandBuffer = driver_end;
+    test_producer = pthread_self();
+#endif
     pid_t child = fork(); assert(child >= 0);
     if (!child) {
         setenv("LARECOMP_VK_ASYNC", "0", 1);
@@ -108,4 +169,16 @@ int main(void) {
     vk_async_drain();
     assert(value == 42 && observations == 8 && seen[6].kind == 4 && seen[6].a == 23 && seen[7].kind == 1);
     puts("PASS: CPU flush/callback order, nonblocking enqueue, render-thread reentry, 64-bit ranges and synchronous mode");
+#ifdef TOTK_VK_COMMAND_WORKER
+    worker_test = true;
+    atomic_store(&start_race, true);
+    vk_async_execute((uintptr_t)&first);
+    vk_async_drain(); // starts waiting while worker is inactive; that EXEC starts it later
+    atomic_store(&start_race, false);
+    assert(driver_draws == 1 && vk_command_worker_stats().commands == 1);
+    vk_async_call_sync(worker_callback, NULL);
+    assert(driver_draws == 5 && vk_command_worker_stats().commands == 5);
+    vk_async_call_sync(worker_stop, NULL); assert(!vk_command_worker_active());
+    puts("PASS: actual request queue drains a newly started worker, callback and render-thread handoffs, nested reentry and stop");
+#endif
 }

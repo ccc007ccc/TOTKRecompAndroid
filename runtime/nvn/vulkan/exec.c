@@ -7671,6 +7671,19 @@ void vk_execute_now(uint64_t handle) {
 void backend_execute(uint64_t handle) {
 #endif
     PROF_T0();
+#ifdef TOTK_VK_COMMAND_WORKER
+    static int worker_on = -1;
+    if (worker_on < 0) {
+        const char *e = diag_getenv("LARECOMP_VK_WORKER");
+        worker_on = e && atoi(e) != 0;
+    }
+    if (worker_on && g_vk.dev && vk_async_is_render_thread() && !vk_command_worker_active()) {
+        bool measure = diag_getenv("LARECOMP_VK_PROF") != NULL;
+        if (vk_command_worker_start(measure))
+            LOG("[vk-worker] recording on an independent thread (pointer snapshots, 1 MiB queue)\n");
+        else { worker_on = 0; LOG("[vk-worker] initialization failed; recording on the render thread\n"); }
+    }
+#endif
 #ifdef __ANDROID__
     if (submit_snapshot_enabled()) guest_copy_flush();  // distinct NVN captures can share one GPU submission
     game_pending = true;  // (renderer_fence_seq)

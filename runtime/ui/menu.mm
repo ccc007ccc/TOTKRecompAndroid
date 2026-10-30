@@ -18,6 +18,9 @@
 #include "imgui_internal.h"  // (NavCursorVisible)
 #include "osk.h"
 #include "../diagnostics_build.h"
+#ifdef TOTK_VK_COMMAND_WORKER
+#include "../nvn/vulkan/command_worker.h"
+#endif
 #ifdef __ANDROID__
 #include "../nvn/vulkan/flicker.h"
 #endif
@@ -1547,6 +1550,10 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cb, enc);
     [enc endEncoding];
 #else
+#ifdef TOTK_VK_COMMAND_WORKER
+    // ImGui records through its own Vulkan function pointers; transfer the command pool back first.
+    vk_command_worker_flush();
+#endif
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)cmd);  // inside the window image's rendering
 #endif
 }

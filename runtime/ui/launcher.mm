@@ -13,6 +13,9 @@
 #import <QuartzCore/CAMetalLayer.h>
 #endif
 #include "../diagnostics_build.h"
+#ifdef TOTK_VK_COMMAND_WORKER
+#include "../nvn/vulkan/command_worker.h"
+#endif
 #include <SDL3/SDL.h>
 #include <ctype.h>
 #include <dirent.h>
@@ -2217,6 +2220,9 @@ extern "C" void launcher_run(const char *root) {
                 exit(0);
             }
 #else
+#ifdef TOTK_VK_COMMAND_WORKER
+            vk_command_worker_flush();
+#endif
             ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)vk_frame_cmd());
             bool shot = shot_at && ++frame == shot_at;
             vk_frame_end(shot ? diag_getenv("LARECOMP_SHOT_PATH") ? diag_getenv("LARECOMP_SHOT_PATH") : "build/launcher.png" : NULL);

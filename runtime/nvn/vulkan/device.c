@@ -1880,10 +1880,24 @@ void backend_init(void) {
 }
 
 // ---- in-place reboot (runtime/main.c teardown; main thread, guest threads stopped)
+#ifdef TOTK_VK_COMMAND_WORKER
+static void command_worker_stop_call(void *unused) {
+    (void)unused;
+    vk_command_worker_stop();
+    VkCommandWorkerStats s = vk_command_worker_stats();
+    if (s.commands) LOG("[vk-worker] %llu commands, %llu batches, %llu synchronous fallbacks\n",
+        (unsigned long long)s.commands, (unsigned long long)s.batches, (unsigned long long)s.fallback);
+    if (s.measured) LOG("[vk-worker] measured driver CPU %.3f ms, drain wait %.3f ms\n", s.cpu_ns / 1e6, s.flush_wait_ns / 1e6);
+}
+#endif
 void backend_reset(void) {
     if (!g_vk.dev) return;
 #ifdef __ANDROID__
     vk_async_drain();
+#ifdef TOTK_VK_COMMAND_WORKER
+    // Stop/join on the packet producer before replacing game memory or releasing backend objects.
+    if (vk_command_worker_active()) vk_async_call_sync(command_worker_stop_call, NULL);
+#endif
     nvn_texture_updates_collect();
 #endif
     extern void vk_shader_jobs_drain(void);

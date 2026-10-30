@@ -44,11 +44,14 @@ def main():
         raise ValueError(f'Missing normal runtime interfaces: {sorted(required - exported)}')
     switches = ['LARECOMP_TEST_SESSION', 'LARECOMP_FULL_GPU_CAPTURE', 'LARECOMP_FNPROF',
                 'LARECOMP_DUMP_VERTEX_OUTPUT', 'LARECOMP_AUDIO_DUMP', 'LARECOMP_TIMING_TRACE',
-                'LARECOMP_AUDIO_WAV', 'LARECOMP_AUDOUT_WAV', 'LARECOMP_VK_VALIDATION', 'LARECOMP_LAUNCHER_DELETE']
+                'LARECOMP_AUDIO_WAV', 'LARECOMP_AUDOUT_WAV', 'LARECOMP_VK_VALIDATION', 'LARECOMP_LAUNCHER_DELETE',
+                'LARECOMP_VK_WORKER']
     for name in switches:
         present = name.encode() + b'\0' in data
         if present != enabled:
             raise ValueError(f'{name}: unexpected compiled diagnostic switch')
+    if any(n.startswith(('cw_vk', 'vk_command_worker_')) for n in exported):
+        raise ValueError('Internal command worker interfaces must not be exported by libmain')
     print(json.dumps(dict(package=package, profile=profile, gamelib_id=identity, diagnostics=enabled,
                           diagnostic_exports=sorted(diagnostic & exported)), indent=2))
 

@@ -58,7 +58,18 @@ list(REMOVE_ITEM VK_SRC ${R}/runtime/nvn/vulkan/shader_compiler.c ${R}/runtime/n
 if(NOT TOTK_DIAGNOSTICS)
     list(REMOVE_ITEM RT_SRC ${R}/runtime/test_session.c ${R}/runtime/test_boot.c)
     list(REMOVE_ITEM VK_SRC ${R}/runtime/nvn/vulkan/flicker.c ${R}/runtime/nvn/vulkan/diagnostic.c
-        ${R}/runtime/nvn/vulkan/renderdoc_bridge.c ${R}/runtime/nvn/vulkan/timing_trace.c)
+        ${R}/runtime/nvn/vulkan/renderdoc_bridge.c ${R}/runtime/nvn/vulkan/timing_trace.c
+        ${R}/runtime/nvn/vulkan/command_worker.c)
+else()
+    # Recording-thread experiment: wrappers are generated from the actual Vulkan declarations.
+    # Unknown pointer parameters fail generation instead of crossing a thread with caller-owned memory.
+    find_program(TOTK_WORKER_PYTHON NAMES python3 REQUIRED NO_CMAKE_FIND_ROOT_PATH)
+    file(GLOB VK_WORKER_HEADERS CONFIGURE_DEPENDS ${R}/runtime/nvn/vulkan/*.h)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${VK_SRC} ${VK_WORKER_HEADERS}
+        ${R}/tools/gen_vk_command_worker.py ${DEPS}/include/vulkan/vulkan_core.h)
+    execute_process(COMMAND ${TOTK_WORKER_PYTHON} ${R}/tools/gen_vk_command_worker.py
+        --header ${DEPS}/include/vulkan/vulkan_core.h --out ${CMAKE_CURRENT_BINARY_DIR}
+        COMMAND_ERROR_IS_FATAL ANY)
 endif()
 set(SHADER_ID_INPUT "")
 foreach(source runtime/nvn/maxwell/translate.c runtime/nvn/maxwell/shader.h runtime/nvn/maxwell/soft64.inc
@@ -106,6 +117,10 @@ set(IMGUI_SRC ${IMGUI}/imgui.cpp ${IMGUI}/imgui_draw.cpp ${IMGUI}/imgui_tables.c
 
 add_library(main SHARED ${RT_SRC} ${R}/runtime/platform/android.c ${VK_SRC} ${UI_SRC} ${IMGUI_SRC}
             ${DEPS}/volk/volk.c ${R}/android/common/guest_window.c ${R}/third_party/d2r-digest/digest.c)
+if(TOTK_DIAGNOSTICS)
+    target_compile_definitions(main PRIVATE TOTK_VK_COMMAND_WORKER=1)
+    target_include_directories(main PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+endif()
 # the UI sources are plain C++ apart from __APPLE__ blocks (compiled as C++ on Android)
 set_source_files_properties(${UI_SRC} PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-xc++")
 set_source_files_properties(${R}/runtime/gamelib.c PROPERTIES COMPILE_DEFINITIONS
