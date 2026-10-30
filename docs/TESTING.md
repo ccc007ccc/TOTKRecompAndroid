@@ -8,6 +8,10 @@
 
 ## 常用检查
 
+着色器首次使用的主机 CPU 分阶段测量执行 `bash tools/benchmark_shader_firstuse.sh <自己的 romfs.bin> <隔离输出目录>`。
+覆盖正式译码/准备、严格已准备 SPIR-V 加载和反射；输出是否原已缓存。它只取各阶段最大的静态输入，
+不测 driver pipeline/FPS，不触碰玩家缓存。配置、结果和架构差距见 [本轮审查](SHADER-ARCHITECTURE-20261030.md)。
+
 普通 Release 的 `TOTK_DIAGNOSTICS=0`；本页抓帧、Intent `env`、自动输入、内存/着色器探针只适用于 Debug 或独立测试包。
 诊断代码不应依赖玩家手动关闭。实际 APK 可用 `tools/check_android_diagnostics.py <apk> --expect off|on` 核验，
 并在 dev 编译运行 `clang -O2 -D__ANDROID__ -DTOTK_DIAGNOSTICS=0 tools/test_release_diagnostics.c runtime/fnprof.c -o <测试输出>`，

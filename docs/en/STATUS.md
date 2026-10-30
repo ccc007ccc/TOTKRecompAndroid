@@ -1,5 +1,9 @@
 # Status and known issues
 
+2026-10-30 shader architecture review: checked D2R Mobile main/Android branches and Eden. Host measurements confirm
+that cached SPIR-V still requires GLSL translation on first use. Priorities are prepared runtime bundles, bounded reuse/shared
+compiler budgets, actual Vulkan seeds and narrower identities. Only audit/measurement tools changed; see the [record (Chinese)](../SHADER-ARCHITECTURE-20261030.md).
+
 2026-10-30 clear experiment: none of 13,617 static fragment inputs uses the identity-depth fallback.
 The first full clear at a new pass can now use loadOp CLEAR. Production CPU regressions, 120 host GPU comparisons
 and both Release builds/isolation checks passed. Diagnostic-only, disabled by default; no phone was used.
