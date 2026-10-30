@@ -1,9 +1,15 @@
 # Status and known issues
 
+2026-10-30 follow-up: descriptor update templates and category comparison of resolved values passed actual `stage_set`,
+failure/restart and host GPU legacy/template/template+worker regressions, plus both Release builds and isolation checks.
+The experiment remains disabled by default and diagnostic-only; no phone access or FPS gain was measured.
+See the [descriptor record (Chinese)](../PERFORMANCE-DESCRIPTOR-UPDATES-20261030.md). Skipping input resolution from NVN dirty bits,
+persistent cross-submission reuse and actual 2×60 remain unachieved.
+
 2026-10-30 code work: an opt-in Vulkan recording worker passed snapshot/thread/request-queue regressions, host Vulkan
 validation and diagnostic/ordinary Release builds. It remains off by default and excluded from ordinary Release.
 The phone was not accessed at the user's request; Android gameplay and FPS gains remain unverified.
-See the [worker record (Chinese)](../PERFORMANCE-VULKAN-WORKER-20261030.md). Descriptor update templates/category dirty flags and actual 2×60 remain unfinished.
+See the [worker record (Chinese)](../PERFORMANCE-VULKAN-WORKER-20261030.md). Descriptor work subsequently progressed as described above; actual 2×60 remains unfinished.
 
 [简体中文](../STATUS.md) | English
 

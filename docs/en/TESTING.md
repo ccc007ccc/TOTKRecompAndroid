@@ -46,6 +46,12 @@ GPU checks require `glslc`, `spirv-val`, Vulkan 1.3 and validation layers. `LARE
 available only in diagnostic packages; ordinary Release excludes it. See the [2026-10-30 record (Chinese)](../PERFORMANCE-VULKAN-WORKER-20261030.md).
 These tests do not establish Android/Turnip gameplay correctness or FPS gains.
 
+Run `bash tools/test_descriptor_updates.sh .work/descriptor-update-check` for the actual `stage_set`, failure fallback and
+GPU equivalence of legacy writes, templates and templates plus the recording worker (same GPU dependencies).
+`"$PYTHON" tools/test_shader_lifetimes.py` also checks template/program cleanup in ordinary and diagnostic builds.
+`LARECOMP_VK_DESCRIPTOR_UPDATES=1` is disabled by default and compiled only into diagnostic packages;
+see the [descriptor record (Chinese)](../PERFORMANCE-DESCRIPTOR-UPDATES-20261030.md) for remaining performance/gameplay acceptance.
+
 For the automatic phone benchmark, `--gpu-profile-frame 1150` timestamps one absolute frame and
 `--timing-trace` records queue waits and GPU counter pairs. Both enable profiling; timestamp readback changes
 timing, so keep these results separate from ordinary FPS measurements. `--render-split-us 0..20000` overrides
