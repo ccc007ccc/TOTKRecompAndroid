@@ -95,6 +95,27 @@ static bool in_event(void) {
     return evt && *(uint64_t *)(uintptr_t)(evt + 0x1d2b8);
 }
 
+// mamcjr/TOTKRecompAndroid da06d5a7f3fb1378eeefbcb13dc2276096a1aebc (MIT): four
+// candidate cutscene call chains. main+0x42c3bc also runs in our grassland gameplay, so these marks are
+// diagnostic-only until a reliable game-state detector replaces them. Do not cap normal gameplay with them.
+static _Atomic uint64_t totk_cutscene_ns;
+static bool totk_cutscene_marks_on(void) {
+    static _Atomic int on = -1;
+    int value = atomic_load_explicit(&on, memory_order_relaxed);
+    if (value < 0) {
+        const char *e = diag_getenv("LARECOMP_TOTK_CUTSCENE_MARKS");
+        value = e && atoi(e) != 0;
+        atomic_store_explicit(&on, value, memory_order_relaxed);
+    }
+    return value != 0;
+}
+static bool totk_in_cutscene(void) {
+    uint64_t t = atomic_load_explicit(&totk_cutscene_ns, memory_order_relaxed);
+    if (!t) return false;
+    uint64_t now = plat_now_ns();
+    return now >= t && now - t < 200000000ull;
+}
+
 int framepace_target(void) {
     static int forced = -2, movie = -2, menu = -2, event = -2;
     if (forced == -2) forced = env_int("LARECOMP_FPS", -1);
@@ -109,6 +130,7 @@ int framepace_target(void) {
     if (movie > 0 && __atomic_load_n(&g_movie_playing, __ATOMIC_RELAXED) > 0 && (fps == 0 || fps > movie)) fps = movie;
     if (g_game_version == 182 && menu > 0 && (fps == 0 || fps > menu) && in_menu()) fps = menu;
     if (g_game_version == 182 && event > 0 && (fps == 0 || fps > event) && in_event()) fps = event;
+    if (g_game_version == 143 && event > 0 && fps > event && totk_in_cutscene()) fps = event;
     return fps;
 }
 
@@ -119,6 +141,14 @@ int framepace_target(void) {
 uint64_t framepace_period_ns(void) {
     int fps = framepace_target();
     return 1000000000ull / (uint64_t)(fps > 0 ? fps : FPS_CEILING);
+}
+
+int framepace_present_interval(int requested) {
+    if (g_game_version != 143 || !framepace_on()) return requested;
+    int fps = framepace_target();
+    if (fps <= 0) return requested;
+    int interval = 60 / fps;
+    return interval > 0 ? interval : 1;
 }
 
 // The frame loop's vsync wait: the present keeps the pace instead (1: skipped; 0: the game's own wait).
@@ -138,10 +168,14 @@ static int g_grid_streak;  // presents in a row that kept the pace
 static FrameClock totk_clock;
 static _Atomic float totk_seconds = 1.0f / 30.0f;
 static _Atomic unsigned totk_hook_seen;
+static _Atomic int totk_requested_interval, totk_effective_interval;
 RT_ON_RESET(framepace_totk_reset) {
     totk_clock = (FrameClock){0};
     atomic_store_explicit(&totk_seconds, 1.0f / 30.0f, memory_order_relaxed);
     atomic_store_explicit(&totk_hook_seen, 0, memory_order_relaxed);
+    atomic_store_explicit(&totk_cutscene_ns, 0, memory_order_relaxed);
+    atomic_store_explicit(&totk_requested_interval, 0, memory_order_relaxed);
+    atomic_store_explicit(&totk_effective_interval, 0, memory_order_relaxed);
 }
 
 static float frame_s(const Cpu *c, unsigned reg) {
@@ -153,7 +187,8 @@ static void frame_set_s(Cpu *c, unsigned reg, float value) {
 
 void rt_totk_frame_hook(Cpu *c, int site) {
     if (g_game_version != 143 || !framepace_on()) return;
-    if (site < 0 || site > 5) return;
+    if (site < 0 || site > 12) return;
+    if (site >= 7 && site <= 10 && !totk_cutscene_marks_on()) return;
     unsigned bit = 1u << site;
     if (!(atomic_load_explicit(&totk_hook_seen, memory_order_relaxed) & bit) &&
         !(atomic_fetch_or_explicit(&totk_hook_seen, bit, memory_order_relaxed) & bit))
@@ -187,6 +222,22 @@ void rt_totk_frame_hook(Cpu *c, int site) {
         frame_set_s(c, 0, frame_s(c, 0) * step);
         break;
     }
+    case 6: { // main+0x2db238: every interval choice meets here BEFORE the game's state stores and NVN call.
+        int requested = (int)(uint32_t)c->x[21];
+        int effective = framepace_present_interval(requested);
+        c->x[21] = (uint32_t)effective;
+        atomic_store_explicit(&totk_requested_interval, requested, memory_order_relaxed);
+        atomic_store_explicit(&totk_effective_interval, effective, memory_order_relaxed);
+        break;
+    }
+    case 7: case 8: case 9: case 10: // original cutscene entry instruction still executes after this mark
+        atomic_store_explicit(&totk_cutscene_ns, plat_now_ns(), memory_order_relaxed);
+        break;
+    case 11: case 12: { // AFTER the original FCVTZS: a positive fade step cannot truncate to zero.
+        unsigned rd = site == 11 ? 8 : 10;
+        if ((uint32_t)c->x[rd] == 0 && frame_s(c, 0) > 0) c->x[rd] = 1;
+        break;
+    }
     }
 }
 
@@ -199,8 +250,10 @@ void framepace_presented(uint64_t t, bool on_grid) {
         static uint64_t frames;
         if (every < 0) every = env_int("LARECOMP_LOG_FRAMEPACE", 0);
         if (every > 0 && frames++ % (uint64_t)every == 0)
-            LOG("[framepace] TotK target %d fps, measured step %.3f ms, ratio %.4f%s\n",
-                framepace_target(), seconds * 1000.0, seconds * 30.0, on_grid ? ", on grid" : "");
+            LOG("[framepace] TotK target %d fps, measured step %.3f ms, ratio %.4f, interval %d -> %d%s\n",
+                framepace_target(), seconds * 1000.0, seconds * 30.0,
+                atomic_load_explicit(&totk_requested_interval, memory_order_relaxed),
+                atomic_load_explicit(&totk_effective_interval, memory_order_relaxed), on_grid ? ", on grid" : "");
         return;
     }
     static uint64_t prev;

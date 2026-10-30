@@ -8,7 +8,11 @@
 int framepace_target(void);
 // The time between presents for it, nanoseconds (no limit: 1/300 s).
 uint64_t framepace_period_ns(void);
-// true: the runtime paces the presents and sets the game's clock (1.8.2; LARECOMP_FRAMEPACE=0: the game's own pacing)
+// TotK's effective NVN interval while this runtime owns pacing (60/45/120: 1, 30: 2).
+// Other games and disabled pacing keep the game's requested interval.
+int framepace_present_interval(int requested);
+// true: the runtime paces the presents and sets the game's clock (TotK 1.4.3 / BOTW 1.8.2).
+// LARECOMP_FRAMEPACE=0 keeps the game's own pacing.
 bool framepace_on(void);
 // 1.8.2: the game is paused (pause menu, map) or the title screen's menu is up
 bool framepace_in_menu(void);

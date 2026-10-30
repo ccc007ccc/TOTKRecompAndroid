@@ -1509,7 +1509,23 @@ NVN(nvnWindowGetNativeWindow) { RET(0); }
 NVN(nvnWindowGetNumTextures) { RET(WIN->num); }
 NVN(nvnWindowGetNumActiveTextures) { RET(WIN->active); }
 NVN(nvnWindowSetNumActiveTextures) { WIN->active = (int)A(1); }
-NVN(nvnWindowGetPresentInterval) { RET(WIN->interval); }
+// mamcjr/TOTKRecompAndroid da06d5a: explicit 60 FPS must not retain the game's 2/3-vsync fallback.
+// Our measured-time pacer already waits independently of that interval. Keep the NVN state and the legacy
+// counter diagnostics consistent with its target too, including a target change without another SetInterval.
+static int window_present_interval(int requested) {
+#ifdef __ANDROID__
+    static int force = -1;
+    if (force < 0) {
+        const char *e = diag_getenv("LARECOMP_FORCE_INTERVAL");
+        force = e ? atoi(e) : 0;
+    }
+    if (force > 0) return force;
+    return framepace_present_interval(requested);
+#else
+    return requested;
+#endif
+}
+NVN(nvnWindowGetPresentInterval) { RET(window_present_interval(WIN->interval)); }
 // The last frame's duration as sead's frame loop reads it to pick the present interval (tools/patches.py,
 // 0x7000c4f4d4: Switch ticks, 19.2 MHz). A fixed frame rate in the menu caps it under 1.9 vsyncs, so the game keeps its
 // 30 fps mode (interval 2; BOTW never goes under 2) instead of dropping to 20 - where our GPU's clocks settle low and
@@ -1523,19 +1539,19 @@ int64_t rt_frame_ticks(int64_t ticks) {
 #ifdef __ANDROID__
 int g_present_interval = 1;  // the game's latest (1: 60 fps, 2: 30 fps): the frame pacer (vulkan/exec.c)
 NVN(nvnWindowSetPresentInterval) {
-    static int force = -1;  // (LARECOMP_FORCE_INTERVAL=<n>, diagnosis: the game's choice replaced - slow motion if it doesn't fit)
-    if (force < 0) force = getenv("LARECOMP_FORCE_INTERVAL") ? atoi(getenv("LARECOMP_FORCE_INTERVAL")) : 0;
-    if (force > 0) c->x[1] = (uint64_t)force;
+    int requested = (int)A(1);
+    c->x[1] = (uint64_t)window_present_interval(requested);
     // BOTW 1.8.2's frame loop (lr 0x7001012a34, x19 = the framework; [fw+0x234] the highest interval it may pick):
     // never 3 while the runtime sets the game's clock (runtime/hle/framepace.c), as SavageWindRecomp does
     if (g_game_version == 182 && framepace_on() && c->x[30] == GUEST_LO + 0x1012a34ull) {
         uint32_t *max_iv = (uint32_t *)(uintptr_t)(c->x[19] + 0x234);
         if (*max_iv > 2) *max_iv = 2;
     }
-    if ((int)A(1) != g_present_interval)
-        LOG("[pace] the game sets its present interval to %d (lr %llx, x19 %llx [+0x240] %lld)\n", (int)A(1),
-            (unsigned long long)c->x[30], (unsigned long long)c->x[19],
-            c->x[19] > 0x100000000ull ? (long long)*(const int64_t *)(uintptr_t)(c->x[19] + 0x240) : 0ll);
+    static int last_requested = -1;
+    if ((int)A(1) != g_present_interval || requested != last_requested)
+        LOG("[pace] present interval requested %d effective %d target %d fps (lr %llx)\n", requested, (int)A(1),
+            framepace_on() ? framepace_target() : 0, (unsigned long long)c->x[30]);
+    last_requested = requested;
     WIN->interval = g_present_interval = (int)A(1);
 }
 #else
@@ -1559,6 +1575,9 @@ NVN(nvnQueueAcquireTexture) {
 NVN(nvnQueuePresentTexture) {
     NvnWindow *w = HOST(NvnWindow, A(1));
     int i = (int)A(2);
+#ifdef __ANDROID__
+    w->interval = g_present_interval = window_present_interval(w->interval);
+#endif
     {   // Frame limiter: a present waits until N vsyncs have gone by since the previous one, as NVN does on the Switch -
         // N is the larger of the window's interval (BOTW asks for 2: its world steps 1/30 s a frame) and the Video
         // tab's cap (Frame rate 30: 2, 60: 1; Auto: 2 for now). Without it the menus ran at ~200 fps and the world

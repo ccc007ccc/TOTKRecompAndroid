@@ -7,7 +7,8 @@
 int g_game_version = 143;
 uint64_t g_guest_lo;
 Settings g_settings = {.fps_mode = 1};
-uint64_t plat_now_ns(void) { return 1; }
+static uint64_t test_now = 1000000000ull;
+uint64_t plat_now_ns(void) { return test_now; }
 static int test_fps;
 int test_session_target_fps(void) { return test_fps; }
 
@@ -15,6 +16,15 @@ static void near(double actual, double expected, double tolerance) { assert(fabs
 static void rate(int fps, int mode) {
     g_settings.fps_mode = mode;
     assert(framepace_target() == fps);
+    for (int requested = 0; requested <= 4; ++requested)
+        assert(framepace_present_interval(requested) == (fps == 30 ? 2 : 1));
+    for (int requested = 1; requested <= 4; ++requested) {
+        Cpu pick = {0}, before;
+        pick.x[21] = requested; pick.x[8] = 0x12345678; pick.nzcv = 0xa0000000;
+        before = pick; before.x[21] = fps == 30 ? 2 : 1;
+        rt_totk_frame_hook(&pick, 6);
+        assert(!memcmp(&pick, &before, sizeof pick));
+    }
     uint64_t period = framepace_period_ns(), t = 1000000000ull;
     near(period * 1e-9, 1.0 / fps, 1e-9);
     framepace_totk_reset();
@@ -63,20 +73,66 @@ static void rate(int fps, int mode) {
 }
 
 int main(int argc, char **argv) {
-    if (argc > 1) {
+    bool marks = argc > 1 && !strcmp(argv[1], "marks");
+    if (marks) setenv("LARECOMP_TOTK_CUTSCENE_MARKS", "1", 1);
+    if (argc > 1 && !marks) {
         // In a fresh process, the diagnostic off switch preserves every register and guest stack byte.
         setenv("LARECOMP_FRAMEPACE", "0", 1);
         Cpu c, before; memset(&c, 0xab, sizeof c); before = c;
-        for (int i = 0; i < 6; i++) rt_totk_frame_hook(&c, i);
+        for (int i = 0; i < 13; i++) rt_totk_frame_hook(&c, i);
         assert(!framepace_on() && !memcmp(&c, &before, sizeof c));
+        assert(framepace_present_interval(3) == 3);
         puts("TotK frame pacing off: original semantics preserved"); return 0;
     }
     assert(framepace_on());
     rate(30, 1); rate(45, 3); rate(60, 2); rate(120, 4);
-    test_fps=45; assert(framepace_target()==45); test_fps=0; assert(framepace_target()==120);
+    g_settings.fps_mode=1; test_fps=60;
+    assert(framepace_present_interval(3)==1); // The benchmark override takes precedence over a 30-FPS seed.
+    test_fps=45; assert(framepace_target()==45); test_fps=0;
+    g_settings.fps_mode=4; assert(framepace_target()==120);
     // Movie cap changes the target and resets sampling; returning to gameplay restores it.
     g_settings.fps_mode = 4; g_movie_playing = 1; assert(framepace_target() == 30);
+    assert(framepace_present_interval(1)==2);
     g_movie_playing = 0; assert(framepace_target() == 120);
+    assert(framepace_present_interval(2)==1);
+
+    // Each cutscene chain independently caps the same target/interval; no register, flag or stack changes.
+    for (int site = 7; marks && site <= 10; ++site) {
+        framepace_totk_reset();
+        Cpu mark = {0}, before; mark.x[0] = 0xabcdef; mark.nzcv = 0xa0000000; before = mark;
+        rt_totk_frame_hook(&mark, site);
+        assert(!memcmp(&mark, &before, sizeof mark));
+        assert(framepace_target() == 30 && framepace_present_interval(1) == 2);
+        Cpu pick = {0}; pick.x[21] = 3; rt_totk_frame_hook(&pick, 6); assert(pick.x[21] == 2);
+        test_now += 199999999;
+        assert(framepace_target() == 30);
+        test_now++;
+        assert(framepace_target() == 120 && framepace_present_interval(3) == 1);
+    }
+    Cpu mark = {0}; rt_totk_frame_hook(&mark, 7);
+    if (marks) {
+        test_now--; assert(framepace_target() == 120); // a backwards host clock does not extend the mark
+        test_now++; assert(framepace_target() == 30);
+    } else {
+        assert(framepace_target() == 120 && atomic_load(&totk_cutscene_ns) == 0);
+        for (int site = 7; site <= 10; ++site) rt_totk_frame_hook(&mark, site);
+        assert(framepace_target() == 120 && framepace_present_interval(3) == 1);
+    }
+    framepace_totk_reset(); assert(framepace_target() == 120); // no stale state on in-place reboot
+
+    // Only zero results of a positive fade are advanced; native conversion results and all other state survive.
+    for (int site = 11; site <= 12; ++site) {
+        unsigned rd = site == 11 ? 8 : 10;
+        const float values[] = {0, -0.0f, -0.5f, 0.25f, 0.99f, 1.5f, NAN};
+        const uint32_t results[] = {0, 0, 0, 0, 0, 1, 0};
+        const uint32_t expected[] = {0, 0, 0, 1, 1, 1, 0};
+        for (unsigned i = 0; i < sizeof values / sizeof *values; ++i) {
+            Cpu fade = {0}, before; fade.nzcv = 0xa0000000;
+            frame_set_s(&fade, 0, values[i]); fade.x[rd] = results[i];
+            before = fade; before.x[rd] = expected[i];
+            rt_totk_frame_hook(&fade, site); assert(!memcmp(&fade, &before, sizeof fade));
+        }
+    }
 
     FrameClock clock = {0};
     uint64_t t = 1000000000, period = 1000000000 / 120;
@@ -97,6 +153,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 10; i++) given = frame_clock_update(&clock, t += 40000000, 22222222);
     near(given, 0.04, 1e-12); // 45 target, 25 actual: simulation follows achievable rate
     g_game_version = 999; assert(!framepace_on());
+    assert(framepace_present_interval(3)==3);
     Cpu c = {0}; frame_set_s(&c, 0, 7); rt_totk_frame_hook(&c, 0); assert(frame_s(&c, 0) == 7);
-    puts("TotK 30/45/60/120 passed: real clock, selector, controller, cloth, bounce, jitter, pause, low FPS, switching");
+    puts("TotK 30/45/60/120 passed: real clock, controller interval, cutscene expiry/reset, fades, cloth, bounce, jitter");
 }

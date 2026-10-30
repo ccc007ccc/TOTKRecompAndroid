@@ -21,6 +21,7 @@ BOTW v1.0.0 (the code addresses are that build's; docs/BOTW-PORT.md):
   crashed. A null heap now skips the destroy (the field and the flag are cleared as before).
 """
 import struct
+from lifter import emit_asm_batch
 
 PATCHES = {}      # v1.0.0 (main build 2094f152...)
 PATCHES_160 = {}  # v1.6.0 (main build 8e9978d5...): the same fixes at that build's addresses
@@ -191,3 +192,33 @@ PRE_PATCHES_143[0x700028bc98] = _totk_before(4, [(0x28bc98, 0x9400546a)])
 # Keep the slow-motion bounce threshold independent of FPS, including 120 FPS.
 PRE_PATCHES_143[0x7000562a68] = _totk_before(5, [
     (0x562a64, 0xbd402920), (0x562a68, 0x52a85909), (0x562a6c, 0x1e270121)])
+
+# mamcjr/TOTKRecompAndroid @ da06d5a7f3fb1378eeefbcb13dc2276096a1aebc (MIT).
+# Window-only replacement leaves the game's remembered 2/3-vsync choice intact. Override w21 at the
+# common merge point, before interval/FPS stores and the NVN call; keep the original MOV and all flags.
+PRE_PATCHES_143[0x70002db238] = _totk_before(6, [
+    (0x2db238, 0x52800788), (0x2db240, 0xb9004295), (0x2db244, 0x1ad50d09),
+    (0x2db280, 0xb9008a75), (0x2db2d0, 0x3902a115)])
+
+# Some cutscene animation counts the interval instead of measured seconds: present at 30 and tell the
+# controller 2 together. Preserve the original entry instruction and generator function/call discovery.
+for _site, (_off, _word) in enumerate(((0x45c700, 0xd10103ff), (0x2b23c7c, 0xd100c3ff),
+                                     (0x42c3bc, 0xd10283ff), (0xa5a188, 0xf9401008)), 7):
+    PRE_PATCHES_143[0x7000000000 + _off] = _totk_before(_site, [(_off, _word)])
+
+
+def _totk_fade_step(rd):
+    def patch(gen, a):
+        word = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+        assert word == (0x1e380000 | rd), f'TotK fade {a:#x}: {word:#x}'
+        ins = gen.lifter.lift(word, a)
+        assert ins.kind in ('op', 'asm')
+        # Retain the normal lifter's conversion (including saturation, NaNs and native FP behavior).
+        original = ins.code if ins.kind == 'op' else emit_asm_batch([ins.asm])
+        site = 11 if rd == 8 else 12
+        return '{ ' + original + f' extern void rt_totk_frame_hook(Cpu *, int); rt_totk_frame_hook(c, {site}); }}'
+    return patch
+
+
+for _off, _rd in ((0xa7ac4, 8), (0x95dd24, 8), (0x6155e4, 10), (0x615660, 10)):
+    PATCHES_143[0x7000000000 + _off] = _totk_fade_step(_rd)
