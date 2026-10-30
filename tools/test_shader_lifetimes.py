@@ -26,6 +26,7 @@ preamble = r'''
 #include "runtime/nvn/vulkan/pipeline_warm.h"
 #include "runtime/nvn/vulkan/shader_object_cache.h"
 #include "runtime/nvn/vulkan/shader_code_state.h"
+#include "runtime/nvn/vulkan/descriptor_update.h"
 #include "runtime/nvn/maxwell/shader.h"
 #include <assert.h>
 #include <stdatomic.h>
@@ -36,7 +37,10 @@ static ShaderObjectTable prog_tab={.initial_capacity=4};
 static bool pipeline_dirty;
 static int g_cs_n;
 static unsigned live, modules, pipelines, layouts, sets, infos;
+static unsigned templates;
+typedef struct { uint8_t regular[MAX_BIND], deferred[MAX_BIND]; int nregular, ndeferred; } DescriptorPlan;
 void rt_fatal_trace(void){abort();}
+void rt_fatal_message(const char* format,...){(void)format;abort();}
 static void* handle(void){++live;return malloc(1);}
 static void release(void* p){assert(p && live);--live;free(p);}
 static void module(VkDevice d,VkShaderModule p,const VkAllocationCallbacks* a){(void)d;(void)a;++modules;release((void*)p);}
@@ -47,6 +51,12 @@ PFN_vkDestroyShaderModule vkDestroyShaderModule=module;
 PFN_vkDestroyPipeline vkDestroyPipeline=pipeline;
 PFN_vkDestroyPipelineLayout vkDestroyPipelineLayout=layout;
 PFN_vkDestroyDescriptorSetLayout vkDestroyDescriptorSetLayout=set;
+#if defined(__ANDROID__) && TOTK_DIAGNOSTICS
+static void destroy_template(VkDevice d,VkDescriptorUpdateTemplate p,const VkAllocationCallbacks* a){(void)d;(void)a;++templates;release((void*)p);}
+PFN_vkCreateDescriptorUpdateTemplate vkCreateDescriptorUpdateTemplate;
+PFN_vkDestroyDescriptorUpdateTemplate vkDestroyDescriptorUpdateTemplate=destroy_template;
+PFN_vkUpdateDescriptorSetWithTemplate vkUpdateDescriptorSetWithTemplate;
+#endif
 void maxwell_free(ShaderInfo* p){if(p){++infos;free(p);}}
 static void program_cache_reset(void){shader_object_clear(&prog_tab);}
 '''
@@ -55,6 +65,9 @@ static void populate(Prog* p){
     p->vs=(VkShaderModule)handle();p->fs=(VkShaderModule)handle();
     p->layout=(VkPipelineLayout)handle();
     for(unsigned i=0;i<2;++i)p->set_layout[i]=(VkDescriptorSetLayout)handle();
+#if defined(__ANDROID__) && TOTK_DIAGNOSTICS
+    for(unsigned i=0;i<2;++i){p->descriptor_updates[i]=calloc(1,sizeof(VkDescriptorUpdate));p->descriptor_updates[i]->update=(VkDescriptorUpdateTemplate)handle();}
+#endif
     p->vi=calloc(1,sizeof *p->vi);p->fi=calloc(1,sizeof *p->fi);
 }
 static VkPipelineWarmProduct warmed(void){return (VkPipelineWarmProduct){(VkPipeline)handle(),(VkPipelineLayout)handle(),{(VkDescriptorSetLayout)handle(),(VkDescriptorSetLayout)handle()}};}
@@ -81,6 +94,9 @@ int main(void){
         shader_programs_destroy(); // repeat reset owns nothing
     }
     assert(pipelines==400 && modules==600 && layouts==500 && sets==1000 && infos==400);
+#if defined(__ANDROID__) && TOTK_DIAGNOSTICS
+    assert(templates==600);
+#endif
     puts("PASS: 100 reboots release graphics/compute programs, normal and warmed pipelines/layouts exactly once");
 }
 '''
@@ -93,3 +109,7 @@ subprocess.run(['clang', '-O1', '-g', '-fsanitize=address,undefined', '-I'+str(r
                 '-I'+str(root/'android/deps/out/include'), '-I'+str(root/'android/deps/out/volk'),
                 str(unit), '-o', str(out/'test-lifetimes')], check=True)
 subprocess.run([str(out/'test-lifetimes')], check=True, timeout=15)
+subprocess.run(['clang', '-O1', '-g', '-D__ANDROID__', '-DTOTK_DIAGNOSTICS=1', '-fsanitize=address,undefined', '-I'+str(root),
+                '-I'+str(root/'android/deps/out/include'), '-I'+str(root/'android/deps/out/volk'), str(unit),
+                str(root/'runtime/nvn/vulkan/descriptor_update.c'), '-o', str(out/'test-lifetimes-diagnostic')], check=True)
+subprocess.run([str(out/'test-lifetimes-diagnostic')], check=True, timeout=15)

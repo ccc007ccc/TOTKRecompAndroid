@@ -14,6 +14,9 @@
 
 #include "../../kernel.h"
 #include "shaders.h"
+#if defined(__ANDROID__) && TOTK_DIAGNOSTICS
+#include "descriptor_update.h"
+#endif
 #include "diagnostic.h"
 #include "shader_prepare.h"
 #include "shader_warm.h"
@@ -2359,6 +2362,9 @@ typedef struct {
     DescriptorPlan descriptor_plans[2];
 #endif
     VkDescriptorSetLayout set_layout[2];
+#if defined(__ANDROID__) && TOTK_DIAGNOSTICS
+    VkDescriptorUpdate *descriptor_updates[2]; // lazy render-producer state; never shared with pipeline warm jobs
+#endif
     VkPipelineLayout layout;
     bool vs_uses_vid;
     uint32_t fs_out_mask;  // fi->out_mask: the render targets the fragment shader writes (read by every draw; in
@@ -2436,6 +2442,12 @@ static void subst_glsl(ShaderInfo *si, uint64_t addr, const char *suffix) {
 #endif
 
 static void graphics_program_release(Prog *p) {
+#if defined(__ANDROID__) && TOTK_DIAGNOSTICS
+    for (unsigned i = 0; i < 2; i++) if (p->descriptor_updates[i]) {
+        vk_descriptor_update_destroy(p->descriptor_updates[i], g_vk.dev);
+        free(p->descriptor_updates[i]); p->descriptor_updates[i] = NULL;
+    }
+#endif
     if(p->vs)vkDestroyShaderModule(g_vk.dev,p->vs,NULL);
     if(p->fs)vkDestroyShaderModule(g_vk.dev,p->fs,NULL);
     if(p->layout)vkDestroyPipelineLayout(g_vk.dev,p->layout,NULL);
@@ -4907,6 +4919,39 @@ static VkDescriptorImageInfo storage_image_info(int stage,ShaderTexture *shader)
 }
 
 // dyn / ndyn: the set's dynamic uniform buffer offsets, in binding order (its bindings of that type: compile_program)
+#if defined(__ANDROID__) && TOTK_DIAGNOSTICS
+static bool descriptor_updates_enabled(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = diag_getenv("LARECOMP_VK_DESCRIPTOR_UPDATES"); on = e && atoi(e) != 0; }
+    return on != 0;
+}
+static VkDescriptorUpdate *descriptor_update_for(Prog *p, uint32_t set) {
+    VkDescriptorUpdate *s = p->descriptor_updates[set];
+    if (s) return s->ready ? s : NULL;
+    s = calloc(1, sizeof *s);
+    if (!s) return NULL; // allocation failure retains the original path
+    p->descriptor_updates[set] = s;
+    const DescriptorPlan *plan = &p->descriptor_plans[set];
+    uint32_t bindings[MAX_BIND]; VkDescriptorType types[MAX_BIND];
+    int count = plan->nregular + plan->ndeferred;
+    for (int i = 0; i < count; i++) {
+        int ix = i < plan->nregular ? plan->regular[i] : plan->deferred[i - plan->nregular];
+        bindings[i] = p->binds[ix].binding; types[i] = p->binds[ix].type;
+    }
+    VkResult result = vk_descriptor_update_init(s, g_vk.dev, p->set_layout[set], (uint32_t)count, bindings, types);
+    if (result != VK_SUCCESS) {
+        static unsigned reported;
+        if (reported++ < 4) LOG("[descriptor-update] template unavailable (%d); using descriptor writes\n", result);
+        return NULL;
+    }
+    static bool reported;
+    if (!reported && count) {
+        reported = true;
+        LOG("[descriptor-update] template path active (resolved categories, per-submission immutable sets)\n");
+    }
+    return s;
+}
+#endif
 static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t set, int stage, ShaderInfo *si, const float *rscale_row0,
                                  const float tint[8], uint32_t gx, uint32_t gy, uint32_t gz, const VkDescriptorImageInfo *pre_ii,
                                  uint32_t *dyn, uint32_t *ndyn) {
@@ -4918,6 +4963,13 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
     VkWriteDescriptorSet w[MAX_BIND];
     VkDescriptorBufferInfo bi[MAX_BIND];
     VkDescriptorImageInfo ii[MAX_BIND];
+#if defined(__ANDROID__) && TOTK_DIAGNOSTICS
+    const VkBindingInfo *resolved[MAX_BIND];
+    VkDescriptorUpdate *updates = descriptor_updates_enabled() ? descriptor_update_for(p, set) : NULL;
+    bool templated = updates != NULL;
+#else
+    const bool templated = false;
+#endif
     int n = 0;
     int sg = stage == 1 ? 1 : 0;
 #ifdef __ANDROID__
@@ -4947,12 +4999,15 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
         VkBindingInfo *b = &p->binds[i];
 #endif
         if (b->set != set) continue;
-        w[n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = b->binding,
+#if defined(__ANDROID__) && TOTK_DIAGNOSTICS
+        if (templated) resolved[n] = b;
+#endif
+        if (!templated) w[n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = b->binding,
                                       .descriptorCount = 1, .descriptorType = b->type};
         if(b->type==VK_DESCRIPTOR_TYPE_STORAGE_IMAGE && b->binding>=32){
             unsigned ti=b->binding-32;
             if(ti>=(unsigned)si->ntex || !si->tex[ti].is_image)FATAL("[vk] storage image reflection mismatch\n");
-            ii[n]=storage_image_info(stage,&si->tex[ti]);w[n].pImageInfo=&ii[n];
+            ii[n]=storage_image_info(stage,&si->tex[ti]); if (!templated) w[n].pImageInfo=&ii[n];
         } else if (b->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && b->binding >= 32) {
             int ti = (int)b->binding - 32;
             float sc[2]; uint32_t wh[2];
@@ -4963,7 +5018,7 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
                 tex_sc[sg][ti][0] = sc[0]; tex_sc[sg][ti][1] = sc[1];
                 tex_wh[sg][ti][0] = wh[0]; tex_wh[sg][ti][1] = wh[1];
             }
-            w[n].pImageInfo = &ii[n];
+            if (!templated) w[n].pImageInfo = &ii[n];
         } else if (is_ubo(b->type) && b->binding < 17) {
             uint64_t tc_ = prof > 0 ? plat_now_ns() : 0;
             bi[n] = cbuf_info(stage, si, (int)b->binding, gx, gy, gz);
@@ -4972,17 +5027,17 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
                 if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) vertex_debug_dynamic_cbufs |= 1u << b->binding;
             }
             if (prof > 0) prof_cbuf += plat_now_ns() - tc_;
-            w[n].pBufferInfo = &bi[n];
+            if (!templated) w[n].pBufferInfo = &bi[n];
         } else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && b->binding == VERTEX_DEBUG_BINDING) {
             bi[n] = vertex_debug_info();
-            w[n].pBufferInfo = &bi[n];
+            if (!templated) w[n].pBufferInfo = &bi[n];
         } else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
 #ifdef __ANDROID__
             if (b->binding == GMISS_BUFFER_INDEX) bi[n] = gmiss_info();
             else
 #endif
             bi[n] = b->binding == GFAST_BUFFER_INDEX ? gfast_info() : gmem_info();
-            w[n].pBufferInfo = &bi[n];
+            if (!templated) w[n].pBufferInfo = &bi[n];
 #ifdef __ANDROID__
             if (!gmem_buf && b->binding != GFAST_BUFFER_INDEX && b->binding != GMISS_BUFFER_INDEX) {  // (diagnostic: global memory without the heap import)
                 static const void *seen[256];
@@ -5011,7 +5066,10 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
 #endif
         if (b->set != set || !is_ubo(b->type) ||
             (b->binding != 18 && b->binding != 19 && b->binding != GMAP_BUFFER_INDEX)) continue;
-        w[n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = b->binding,
+#if defined(__ANDROID__) && TOTK_DIAGNOSTICS
+        if (templated) resolved[n] = b;
+#endif
+        if (!templated) w[n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = b->binding,
                                       .descriptorCount = 1, .descriptorType = b->type};
         if (b->binding == GMAP_BUFFER_INDEX) {  // (compute) this dispatch's fast-copy table: gfast_prepare
 #ifdef __ANDROID__
@@ -5032,22 +5090,55 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
             float zero[8] = {0};
             bi[n] = ubo_span(copy_dedupe(DEDUPE_TINT, tint ? tint : zero, 32, 256), 32);
         }
-        w[n].pBufferInfo = &bi[n];
+        if (!templated) w[n].pBufferInfo = &bi[n];
         n++;
     }
     {   // dynamic uniform buffers: their offsets out of the set (in binding order), the descriptors at offset 0
         uint32_t nd = 0, bind[MAX_BIND];
         for (int i = 0; i < n; i++) {
-            if (w[i].descriptorType != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) continue;
+#if defined(__ANDROID__) && TOTK_DIAGNOSTICS
+            VkDescriptorType type = templated ? resolved[i]->type : w[i].descriptorType;
+            uint32_t binding = templated ? resolved[i]->binding : w[i].dstBinding;
+#else
+            VkDescriptorType type = w[i].descriptorType;
+            uint32_t binding = w[i].dstBinding;
+#endif
+            if (type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) continue;
             uint32_t k = nd++;
-            while (k > 0 && bind[k - 1] > w[i].dstBinding) { bind[k] = bind[k - 1]; if (dyn) dyn[k] = dyn[k - 1]; k--; }
-            bind[k] = w[i].dstBinding;
+            while (k > 0 && bind[k - 1] > binding) { bind[k] = bind[k - 1]; if (dyn) dyn[k] = dyn[k - 1]; k--; }
+            bind[k] = binding;
             if (dyn) dyn[k] = (uint32_t)bi[i].offset;
             bi[i].offset = 0;
         }
         if (ndyn) *ndyn = nd;
     }
 #ifdef __ANDROID__
+#if TOTK_DIAGNOSTICS
+    if (templated) {
+        VkDescriptorValue values[MAX_BIND];
+        if ((unsigned)n != updates->count) FATAL("[descriptor-update] resolved binding count mismatch\n");
+        for (int i = 0; i < n; i++) {
+            const VkBindingInfo *b = resolved[i];
+            if (b->binding != updates->bindings[i] || b->type != updates->types[i])
+                FATAL("[descriptor-update] resolved binding order mismatch\n");
+            if (b->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || b->type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) values[i].image = ii[i];
+            else values[i].buffer = bi[i];
+        }
+        uint64_t seq = vk_pending_seq();
+        static int no_cache = -1;
+        if (no_cache < 0) no_cache = getenv("LARECOMP_NO_SET_CACHE") != NULL;
+        // Empty layouts also need a new set when the old pool's submission retires.
+        if (!no_cache && updates->set && updates->seq == seq && !vk_descriptor_update_dirty(updates, seq, values)) {
+            prof_set_hits++; return updates->set;
+        }
+        prof_set_miss++;
+        uint64_t tw = prof > 0 ? plat_now_ns() : 0;
+        ds = vk_alloc_set(layout);
+        vk_descriptor_update_write(updates, g_vk.dev, seq, ds, values);
+        if (prof > 0) prof_dsw += plat_now_ns() - tw;
+        return ds;
+    }
+#endif
     // Draws of one material in a row write the same set over and over (same buffers / offsets / views / samplers): a
     // set written this submission with the same contents (two independent 64-bit hashes of them) is bound again
     // instead of allocating and writing another - the descriptor writes were a good part of the driver's time per

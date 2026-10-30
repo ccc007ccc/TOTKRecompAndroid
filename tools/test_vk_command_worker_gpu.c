@@ -1,6 +1,9 @@
 // Real Vulkan / synchronization validation: command recording on/off must deliver
 // the same independent compute + image-clear values through submit, reuse and stop.
 #include "../runtime/nvn/vulkan/command_worker.h"
+#ifdef TOTK_TEST_DESCRIPTOR_UPDATES
+#include "../runtime/nvn/vulkan/descriptor_update.h"
+#endif
 #include <assert.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -23,6 +26,12 @@ typedef struct { VkImage image; VkDeviceMemory memory; VkImageView view; } Image
 static Buffer output, input;
 static Image color, depth;
 static uint64_t uniform_stride;
+#ifdef TOTK_TEST_DESCRIPTOR_UPDATES
+static bool use_templates;
+static VkDescriptorUpdate descriptor_state;
+static Image sampled, storage;
+static VkSampler sampler;
+#endif
 static VKAPI_ATTR VkBool32 VKAPI_CALL report(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
     VkDebugUtilsMessageTypeFlagsEXT type, const VkDebugUtilsMessengerCallbackDataEXT *data, void *user) {
     (void)severity; (void)type; (void)user; atomic_fetch_add(&validation_messages, 1);
@@ -82,9 +91,22 @@ static void initialize(const char *path) {
     input = buffer(8 * uniform_stride, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
     color = image(VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
     depth = image(VK_FORMAT_D32_SFLOAT_S8_UINT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
+#ifdef TOTK_TEST_DESCRIPTOR_UPDATES
+    sampled = image(VK_FORMAT_R32_UINT, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+    storage = image(VK_FORMAT_R32_UINT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+    VkSamplerCreateInfo sci = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_NEAREST, .minFilter = VK_FILTER_NEAREST,
+        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST, .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE};
+    CHECK(vkCreateSampler(device, &sci, NULL, &sampler));
+#endif
     VkDescriptorSetLayoutBinding bindings[] = {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
-        {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}};
-    VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 2, .pBindings = bindings};
+        {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+#ifdef TOTK_TEST_DESCRIPTOR_UPDATES
+        {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+        {3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+#endif
+    };
+    VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = sizeof bindings / sizeof bindings[0], .pBindings = bindings};
     CHECK(vkCreateDescriptorSetLayout(device, &li, NULL, &set_layout));
     VkPushConstantRange push = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 8};
     VkPipelineLayoutCreateInfo pl = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &set_layout, .pushConstantRangeCount = 1, .pPushConstantRanges = &push};
@@ -96,8 +118,12 @@ static void initialize(const char *path) {
     VkComputePipelineCreateInfo pc = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
         .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = shader, .pName = "main"}, .layout = layout};
     CHECK(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pc, NULL, &pipe)); vkDestroyShaderModule(device, shader, NULL);
-    VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}, {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1}};
-    VkDescriptorPoolCreateInfo dp = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 2, .pPoolSizes = sizes};
+    VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16}, {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 16},
+#ifdef TOTK_TEST_DESCRIPTOR_UPDATES
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 16}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 16},
+#endif
+    };
+    VkDescriptorPoolCreateInfo dp = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 16, .poolSizeCount = sizeof sizes / sizeof sizes[0], .pPoolSizes = sizes};
     CHECK(vkCreateDescriptorPool(device, &dp, NULL, &descriptors));
 }
 static void memory_barrier(VkCommandBuffer cb, VkPipelineStageFlags2 src, VkAccessFlags2 sa, VkPipelineStageFlags2 dst, VkAccessFlags2 da) {
@@ -110,16 +136,70 @@ static void record(VkCommandBuffer cb, unsigned repetition) {
     VkDescriptorBufferInfo infos[] = {{output.buffer, 0, 4096}, {input.buffer, 0, 16}};
     VkWriteDescriptorSet writes[2]; for (unsigned i = 0; i < 2; i++) writes[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
         .dstSet = set, .dstBinding = i, .descriptorCount = 1, .descriptorType = i ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &infos[i]};
+#ifdef TOTK_TEST_DESCRIPTOR_UPDATES
+    VkImageMemoryBarrier2 init[2]; Image images[] = {sampled, storage};
+    for (unsigned i = 0; i < 2; i++) init[i] = (VkImageMemoryBarrier2){.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT, .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = images[i].image, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+    VkDependencyInfo initial = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 2, .pImageMemoryBarriers = init};
+    vkCmdPipelineBarrier2(cb, &initial);
+    VkClearColorValue value = {.uint32 = {13, 0, 0, 0}}, zero = {0}; VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdClearColorImage(cb, sampled.image, VK_IMAGE_LAYOUT_GENERAL, &value, 1, &range);
+    vkCmdClearColorImage(cb, storage.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
+    memory_barrier(cb, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+    VkDescriptorImageInfo image_infos[] = {{sampler, sampled.view, VK_IMAGE_LAYOUT_GENERAL}, {VK_NULL_HANDLE, storage.view, VK_IMAGE_LAYOUT_GENERAL}};
+    VkWriteDescriptorSet image_writes[2]; for (unsigned i = 0; i < 2; i++) image_writes[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = set, .dstBinding = i + 2, .descriptorCount = 1, .descriptorType = i ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &image_infos[i]};
+    VkDescriptorValue payload[4]; payload[0].buffer = infos[0]; payload[1].buffer = infos[1]; payload[2].image = image_infos[0]; payload[3].image = image_infos[1];
+    uint64_t descriptor_seq = repetition + 1;
+    if (use_templates) {
+        assert(vk_descriptor_update_dirty(&descriptor_state, descriptor_seq, payload) == 15);
+        vk_descriptor_update_write(&descriptor_state, device, descriptor_seq, set, payload);
+    }
+    else { vkUpdateDescriptorSets(device, 2, writes, 0, NULL); vkUpdateDescriptorSets(device, 2, image_writes, 0, NULL); }
+#else
     vkUpdateDescriptorSets(device, 2, writes, 0, NULL);
+#endif
     memory_barrier(cb, VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_UNIFORM_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
     for (unsigned i = 0; i < 8; i++) {
+#ifdef TOTK_TEST_DESCRIPTOR_UPDATES
+        if (i == 4) {
+            // A range change creates a new set while earlier binds may still be queued in the worker.
+            payload[1].buffer.range = 4;
+            CHECK(vkAllocateDescriptorSets(device, &ai, &set));
+            if (use_templates) {
+                assert(vk_descriptor_update_dirty(&descriptor_state, descriptor_seq, payload) == DESCRIPTOR_UNIFORM);
+                vk_descriptor_update_write(&descriptor_state, device, descriptor_seq, set, payload);
+            } else {
+                infos[1].range = 4; for (unsigned j = 0; j < 2; j++) { writes[j].dstSet = set; image_writes[j].dstSet = set; }
+                vkUpdateDescriptorSets(device, 2, writes, 0, NULL); vkUpdateDescriptorSets(device, 2, image_writes, 0, NULL);
+            }
+        }
+        if (use_templates) assert(!vk_descriptor_update_dirty(&descriptor_state, descriptor_seq, payload));
+#endif
         uint32_t offset = i * uniform_stride, pc[] = {i * 128, repetition * 100};
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &set, 1, &offset);
         vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc); vkCmdDispatch(cb, 4, 1, 1);
         offset = 0; memset(pc, 0, sizeof pc);
         memory_barrier(cb, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
     }
+#ifdef TOTK_TEST_DESCRIPTOR_UPDATES
+    VkImageMemoryBarrier2 storage_barrier = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT, .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_GENERAL, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = storage.image, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+    VkDependencyInfo storage_dep = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &storage_barrier};
+    vkCmdPipelineBarrier2(cb, &storage_dep);
+    VkBufferImageCopy storage_copy = {.bufferOffset = 4096, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {32, 16, 1}};
+    vkCmdCopyImageToBuffer(cb, storage.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, output.buffer, 1, &storage_copy);
+#endif
     // Repeated state packets force several published batches without changing output.
     VkViewport vp = {0, 0, 32, 16, 0, 1}; for (unsigned i = 0; i < 300; i++) vkCmdSetViewport(cb, 0, 1, &vp);
     VkImageMemoryBarrier2 barriers[2] = {{.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
@@ -149,6 +229,13 @@ static void record(VkCommandBuffer cb, unsigned repetition) {
         VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
 }
 static void run(bool worker_on) {
+#ifdef TOTK_TEST_DESCRIPTOR_UPDATES
+    if (use_templates) {
+        uint32_t bindings[] = {0, 1, 2, 3}; VkDescriptorType types[] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+        CHECK(vk_descriptor_update_init(&descriptor_state, device, set_layout, 4, bindings, types));
+    }
+#endif
     if (worker_on) assert(vk_command_worker_start(false));
     VkCommandBuffer buffers[2]; VkCommandBufferAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .commandPool = pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 2}; CHECK(vkAllocateCommandBuffers(device, &ai, buffers));
@@ -169,21 +256,40 @@ static void run(bool worker_on) {
             VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .commandBufferInfoCount = 2, .pCommandBufferInfos = cis}; CHECK(vkQueueSubmit2(queue, 1, &si, VK_NULL_HANDLE));
         }
         CHECK(vkQueueWaitIdle(queue));
-        for (unsigned i = 0; i < 1024; i++) assert(((uint32_t *)output.mapped)[i] == 1000 + 10 * (i / 128) + repetition * 100 + i % 128);
+        unsigned sample_add = 0;
+#ifdef TOTK_TEST_DESCRIPTOR_UPDATES
+        sample_add = 13;
+        for (unsigned i = 0; i < 512; i++) assert(((uint32_t *)(output.mapped + 4096))[i] == (i < 128 ? 1070 + repetition * 100 + i + sample_add : 0));
+#endif
+        for (unsigned i = 0; i < 1024; i++) assert(((uint32_t *)output.mapped)[i] == 1000 + 10 * (i / 128) + repetition * 100 + i % 128 + sample_add);
         for (unsigned i = 0; i < 512; i++) assert(((uint32_t *)(output.mapped + 8192))[i] == 0xffff00ffu);
         assert(!atomic_load(&validation_messages));
     }
     vkFreeCommandBuffers(device, pool, 2, buffers);
     if (worker_on) assert(vk_command_worker_stats().commands > 900);
+#ifdef TOTK_TEST_DESCRIPTOR_UPDATES
+    vk_descriptor_update_destroy(&descriptor_state, device);
+#endif
 }
 static void cleanup_image(Image im) { vkDestroyImageView(device, im.view, NULL); vkDestroyImage(device, im.image, NULL); vkFreeMemory(device, im.memory, NULL); }
 static void cleanup_buffer(Buffer b) { vkUnmapMemory(device, b.memory); vkDestroyBuffer(device, b.buffer, NULL); vkFreeMemory(device, b.memory, NULL); }
 int main(int argc, char **argv) {
-    assert(argc == 2); initialize(argv[1]); run(false); run(true);
+    assert(argc == 2); initialize(argv[1]); run(false);
+#ifdef TOTK_TEST_DESCRIPTOR_UPDATES
+    use_templates = true; run(false);
+#endif
+    run(true);
     CHECK(vkDeviceWaitIdle(device)); vkDestroyDescriptorPool(device, descriptors, NULL); vkDestroyCommandPool(device, pool, NULL);
     vkDestroyPipeline(device, pipe, NULL); vkDestroyPipelineLayout(device, layout, NULL); vkDestroyDescriptorSetLayout(device, set_layout, NULL);
     cleanup_image(color); cleanup_image(depth); cleanup_buffer(output); cleanup_buffer(input);
+#ifdef TOTK_TEST_DESCRIPTOR_UPDATES
+    cleanup_image(sampled); cleanup_image(storage); vkDestroySampler(device, sampler, NULL);
+#endif
     vkDestroyDevice(device, NULL); assert(!atomic_load(&validation_messages));
     vkDestroyDebugUtilsMessengerEXT(instance, messenger, NULL); vkDestroyInstance(instance, NULL);
+#ifdef TOTK_TEST_DESCRIPTOR_UPDATES
+    puts("PASS: legacy/template/template+worker GPU values, all four descriptor categories, immutable sets, dynamic offsets, submission reuse and stop; zero validation messages");
+#else
     puts("PASS: worker on/off compute and image values, dynamic offsets, shared command pool handoff, submit1/2, reuse and stop; zero validation messages");
+#endif
 }

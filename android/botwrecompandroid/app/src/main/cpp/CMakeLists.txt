@@ -59,7 +59,7 @@ if(NOT TOTK_DIAGNOSTICS)
     list(REMOVE_ITEM RT_SRC ${R}/runtime/test_session.c ${R}/runtime/test_boot.c)
     list(REMOVE_ITEM VK_SRC ${R}/runtime/nvn/vulkan/flicker.c ${R}/runtime/nvn/vulkan/diagnostic.c
         ${R}/runtime/nvn/vulkan/renderdoc_bridge.c ${R}/runtime/nvn/vulkan/timing_trace.c
-        ${R}/runtime/nvn/vulkan/command_worker.c)
+        ${R}/runtime/nvn/vulkan/command_worker.c ${R}/runtime/nvn/vulkan/descriptor_update.c)
 else()
     # Recording-thread experiment: wrappers are generated from the actual Vulkan declarations.
     # Unknown pointer parameters fail generation instead of crossing a thread with caller-owned memory.
