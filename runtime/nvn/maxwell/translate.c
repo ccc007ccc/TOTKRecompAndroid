@@ -101,7 +101,18 @@ typedef struct {
     bool structured;         // (maxwell_structured) the body is if / else / for, not the state machine
     int nbrx;                // jump tables read from cbuf 1 (brx_table): each BRX's possible targets
     struct { uint32_t at; int n; uint32_t t[256]; } brx[4];
+    uint32_t local_words;    // highest constant local-memory word reached after the existing wrap mask
+    bool local_dynamic;     // register-based addresses retain the complete local-memory window
 } Ctx;
+
+// Constant-address spills need only the words they can actually touch. Keep
+// the existing 1 KiB indexing/wrapping contract, including vector accesses
+// across its end; a dynamic address still gets the full window.
+// See mamcjr/TOTKRecompAndroid b0948bbf77099b133029668016b24ad0d1a1d120
+// for the original observation of 256 zeroed words for a one-word material spill.
+static uint32_t local_words(const Ctx *c) {
+    return c->local_dynamic ? LMEM_WORDS : c->local_words ? c->local_words : 1;
+}
 
 static uint64_t bits(uint64_t w, int lo, int n) { return (w >> lo) & ((n == 64) ? ~0ull : ((1ull << n) - 1)); }
 static int64_t sbits(uint64_t w, int lo, int n) {
@@ -2265,14 +2276,21 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         bool store = bits(w, 52, 1);
         int size = (int)bits(w, 48, 3);
         int32_t off = (int32_t)sbits(w, 20, 24);
+        int nw = size == 5 ? 2 : size >= 6 ? 4 : 1;
         if (shared) c->uses_shared = true;
-        else c->uses_local = true;
+        else {
+            c->uses_local = true;
+            if (a != RZ) c->local_dynamic = true;
+            else for (int k = 0; k < nw; k++) {
+                uint32_t words = (((uint32_t)off / 4 + (uint32_t)k) & (LMEM_WORDS - 1)) + 1;
+                if (words > c->local_words) c->local_words = words;
+            }
+        }
         const char *arr = shared ? "smem" : "lmem";
         uint32_t wmask = (shared ? SMEM_WORDS : LMEM_WORDS) - 1;
         char addr[128];
         if (a == RZ) sprintf(addr, "%du", off);
         else sprintf(addr, "(%s + %du)", R(a), (uint32_t)off);
-        int nw = size == 5 ? 2 : size >= 6 ? 4 : 1;
         sp(&c->body, "    { uint la = %s;\n", addr);
         if (!store) {
             if (size < 4) {
@@ -2849,10 +2867,15 @@ static void st_range_alt(SCtx *x, int a, int end, int opened, int depth, int alt
                 return;
             }
             sp(&x->out, "  if (!(%s)) {\n", b->cond);
-            st_range(x, k + 1, end, -1, depth + 1);
+            // The remaining nested branches may also reach the enclosing
+            // region's shared join. Keep that destination through this guard.
+            st_range_alt(x, k + 1, end, -1, depth + 1, alt);
             sp(&x->out, "  }\n");
             return;
         }
+        // Taken and untaken paths both reach the next block. This also covers
+        // an unconditional jump across a scheduling word after normalization.
+        if (t == k + 1) { k++; continue; }
         if (t <= k || t > end || always) { x->fail = true; return; }
         SBlk *last = &x->b[t - 1];
         int J = last->tgt;
@@ -3187,7 +3210,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         if (c->pred_used[i]) sp(&s, "  bool p%d = false;\n", i);
     if (c->uses_cc) sp(&s, "  uint cc = 0u; bool ccz = false, ccs = false;\n");
     if (c->uses_cco) sp(&s, "  bool cco = false;\n");
-    if (c->uses_local) sp(&s, "  uint lmem[%d]; for (int li_ = 0; li_ < %d; li_++) lmem[li_] = 0u;\n", LMEM_WORDS, LMEM_WORDS);
+    if (c->uses_local) sp(&s, "  uint lmem[%u]; for (uint li_ = 0u; li_ < %uu; li_++) lmem[li_] = 0u;\n", local_words(c), local_words(c));
     if (c->uses_shared && stage != STAGE_COMPUTE) sp(&s, "  uint smem[%d];\n", SMEM_WORDS);
     if (dbg) sp(&s, maxwell_dbg_pc == 0xffffffffu ? "  float dbgv = 1.0f;\n" : "  float dbgv = -1.0f;\n");
     if (any_branch && c->structured) {
@@ -3475,7 +3498,7 @@ ShaderInfo *maxwell_translate_bounded(const uint8_t *blob, size_t max_size, size
         if (c->pred_used[i]) sp(&s, "  bool p%d = false;\n", i);
     if (c->uses_cc) sp(&s, "  uint cc = 0; bool ccz = false, ccs = false;\n");
     if (c->uses_cco) sp(&s, "  bool cco = false;\n");
-    if (c->uses_local) sp(&s, "  uint lmem[%d] = {};\n", LMEM_WORDS);
+    if (c->uses_local) sp(&s, "  uint lmem[%u] = {};\n", local_words(c));
     if (c->uses_shared) sp(&s, "  threadgroup uint smem[%d];\n", SMEM_WORDS);
     if (dbg) sp(&s, maxwell_dbg_pc == 0xffffffffu ? "  float dbgv = 1.0f;\n" : "  float dbgv = -1.0f;\n");
     if (any_branch) {
