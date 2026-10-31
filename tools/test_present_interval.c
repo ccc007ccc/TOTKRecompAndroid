@@ -13,6 +13,8 @@ volatile uint64_t g_vsync_count;
 __thread uint64_t g_blocked_ns;
 #if TOTK_DIAGNOSTICS
 int test_session_target_fps(void) { return 0; }
+uint64_t renderer_present_count(void) { return 0; }
+void kernel_wait_probe_frame(uint64_t frame) { (void)frame; }
 #endif
 uint64_t plat_now_ns(void) { return 1000000000ull; }
 void plat_sleep_until_ns(uint64_t ns) { (void)ns; assert(!"test present waiting disabled"); }

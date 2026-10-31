@@ -1,9 +1,13 @@
 // A small Horizon kernel: handles, threads, synchronization, memory, and the SVC dispatcher.
 #include "diagnostics_build.h"
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#if TOTK_DIAGNOSTICS && defined(__linux__)
+#include <sys/syscall.h>
+#endif
 
 #include "hle.h"
 #include "kernel.h"
@@ -28,6 +32,9 @@
 
 pthread_mutex_t g_klock = PTHREAD_MUTEX_INITIALIZER;
 static __thread KThread *t_cur;
+// Priority also participates in the core-0 queue under c0_m. Keep the existing
+// field/layout, with atomic access across the two lock domains.
+static int thread_priority(const KThread *t) { return __atomic_load_n(&t->prio, __ATOMIC_RELAXED); }
 
 // ------------------------------------------------------------------ handle table
 #define MAX_HANDLES 4096
@@ -99,13 +106,164 @@ static pthread_cond_t g_nothread_cond = PTHREAD_COND_INITIALIZER;
 // takes the presenting thread's: a frame's busy time is its period minus this.
 __thread uint64_t g_blocked_ns;
 
+#if TOTK_DIAGNOSTICS
+enum { WAIT_PROBE_CORE0=0x80, WAIT_PROBE_HOST, WAIT_PROBE_COUNT };
+static __thread struct {
+    uint64_t ns[WAIT_PROBE_COUNT], calls[WAIT_PROBE_COUNT], max_ns[WAIT_PROBE_COUNT];
+    uint64_t lr[WAIT_PROBE_COUNT], args[WAIT_PROBE_COUNT][4], since, frame, cpu_ns;
+    uint64_t address_waker, address_waker_lr;
+    uint64_t service_ns[0x80], service_calls[0x80], service_body_ns[0x80];
+    uint64_t yields[3];
+} wait_probe;
+static _Atomic uint64_t wait_probe_presenter, wait_probe_signaler, wait_probe_signal_lr, wait_probe_frame, wait_probe_worker;
+// Accessed only under g_klock. An id check makes modulo collisions a missing
+// diagnostic, never a false attribution to an unrelated thread.
+static struct {uint64_t target,thread,lr;} wait_probe_wakers[256];
+static __thread uint64_t wait_probe_trace_addr[4], wait_probe_trace_pending;
+static __thread unsigned wait_probe_trace_count;
+static bool wait_probe_on(void) {
+    static _Atomic int enabled=-1;
+    int value=atomic_load_explicit(&enabled,memory_order_relaxed);
+    if(value<0){const char *e=diag_getenv("LARECOMP_LOG_KERNEL_WAITS");value=e&&atoi(e)!=0;atomic_store_explicit(&enabled,value,memory_order_relaxed);}
+    return value!=0;
+}
+// Keep only the longest condition wait of each SVC. Capture its wake identity
+// under g_klock, then print after svc_entry and the core-0 handoff have returned.
+static __thread struct {
+    uint64_t start, end, frame, thread, lr, address, waker, waker_lr;
+    unsigned svc, reports;
+} wait_probe_long;
+static uint64_t wait_probe_long_first(void) {
+    static _Atomic uint64_t configured=UINT64_MAX;
+    uint64_t value=atomic_load_explicit(&configured,memory_order_relaxed);
+    if(value==UINT64_MAX) {
+        const char *e=diag_getenv("LARECOMP_KERNEL_WAIT_TRACE_FRAME");
+        value=e?strtoull(e,NULL,10):UINT64_MAX-1;
+        atomic_store_explicit(&configured,value,memory_order_relaxed);
+    }
+    return value;
+}
+static void wait_probe_long_record(uint64_t start,uint64_t end) {
+    if(!wait_probe_on() || !t_cur || !t_cur->svc_now || end<start || end-start<50000000ull)return;
+    uint64_t frame=atomic_load_explicit(&wait_probe_frame,memory_order_relaxed);
+    if(frame<wait_probe_long_first() || wait_probe_long.reports>=128 ||
+       end-start<=wait_probe_long.end-wait_probe_long.start)return;
+    wait_probe_long.start=start;wait_probe_long.end=end;wait_probe_long.frame=frame;
+    wait_probe_long.thread=t_cur->id;wait_probe_long.svc=t_cur->svc_now-1;
+    wait_probe_long.lr=t_cur->svc_lr;wait_probe_long.address=t_cur->svc_args[0];
+    unsigned slot=(unsigned)(t_cur->id%256);
+    bool match=t_cur->svc_now==0x35 && wait_probe_wakers[slot].target==t_cur->id;
+    wait_probe_long.waker=match?wait_probe_wakers[slot].thread:0;
+    wait_probe_long.waker_lr=match?wait_probe_wakers[slot].lr:0;
+}
+static void wait_probe_long_flush(void) {
+    if(!wait_probe_long.end)return;
+    LOG("[kernel-long-wait] frame %llu thread %llu svc-%02x ns %llu..%llu wall %.3f ms lr %llx arg0 %llx waker %llu lr %llx\n",
+        (unsigned long long)wait_probe_long.frame,(unsigned long long)wait_probe_long.thread,wait_probe_long.svc,
+        (unsigned long long)wait_probe_long.start,(unsigned long long)wait_probe_long.end,
+        (wait_probe_long.end-wait_probe_long.start)/1e6,(unsigned long long)wait_probe_long.lr,
+        (unsigned long long)wait_probe_long.address,(unsigned long long)wait_probe_long.waker,
+        (unsigned long long)wait_probe_long.waker_lr);
+    ++wait_probe_long.reports;wait_probe_long.start=wait_probe_long.end=0;
+}
+static void wait_probe_add(unsigned kind,uint64_t ns) {
+    if(!wait_probe_on() || kind>=WAIT_PROBE_COUNT)return;
+    wait_probe.ns[kind]+=ns;wait_probe.calls[kind]++;
+    if(ns>wait_probe.max_ns[kind]) {
+        wait_probe.max_ns[kind]=ns;
+        if(t_cur && kind<0x80) {
+            wait_probe.lr[kind]=t_cur->svc_lr;
+            for(unsigned i=0;i<4;++i)wait_probe.args[kind][i]=t_cur->svc_args[i];
+            if(kind==0x34) { // kwait returned with g_klock held
+                unsigned slot=(unsigned)(t_cur->id%256);
+                bool match=wait_probe_wakers[slot].target==t_cur->id;
+                wait_probe.address_waker=match?wait_probe_wakers[slot].thread:0;
+                wait_probe.address_waker_lr=match?wait_probe_wakers[slot].lr:0;
+                if(t_cur->id==atomic_load_explicit(&wait_probe_signaler,memory_order_relaxed))
+                    atomic_store_explicit(&wait_probe_worker,wait_probe.address_waker,memory_order_relaxed);
+            }
+        }
+    }
+    if(kind==0x34 && ns>=30000000ull && t_cur &&
+       t_cur->id==atomic_load_explicit(&wait_probe_signaler,memory_order_relaxed))
+        wait_probe_trace_pending=t_cur->svc_args[0];
+}
+static void wait_probe_report(uint64_t frame) {
+    uint64_t now=plat_now_ns();
+    if(wait_probe.since && now-wait_probe.since<2000000000ull)return;
+    struct timespec cpu_time;
+    uint64_t cpu_ns=clock_gettime(CLOCK_THREAD_CPUTIME_ID,&cpu_time)==0 ?
+        (uint64_t)cpu_time.tv_sec*1000000000ull+(uint64_t)cpu_time.tv_nsec : 0;
+    if(!wait_probe.since){memset(&wait_probe,0,sizeof wait_probe);wait_probe.since=now;wait_probe.frame=frame;wait_probe.cpu_ns=cpu_ns;return;}
+    uint64_t frames=frame-wait_probe.frame;
+    long host_tid=0;
+#if defined(__linux__)
+    host_tid=syscall(SYS_gettid);
+#endif
+    double cpu_ms=cpu_ns && wait_probe.cpu_ns && cpu_ns>=wait_probe.cpu_ns ? (cpu_ns-wait_probe.cpu_ns)/1e6 : -1;
+    LOG("[kernel-work] frame %llu frames %llu thread %llu host %ld wall %.3f cpu %.3f ms per-frame %.3f\n",
+        (unsigned long long)frame,(unsigned long long)frames,(unsigned long long)(t_cur?t_cur->id:0),host_tid,
+        (now-wait_probe.since)/1e6,cpu_ms,frames && cpu_ms>=0?cpu_ms/frames:-1);
+    for(unsigned i=0;i<0x80;++i)if(wait_probe.service_calls[i])
+        LOG("[kernel-service] frame %llu frames %llu thread %llu svc-%02x calls %llu wall %.3f per-frame %.3f body %.3f ms\n",
+            (unsigned long long)frame,(unsigned long long)frames,(unsigned long long)(t_cur?t_cur->id:0),i,
+            (unsigned long long)wait_probe.service_calls[i],wait_probe.service_ns[i]/1e6,frames?wait_probe.service_ns[i]/1e6/frames:0,
+            frames?wait_probe.service_body_ns[i]/1e6/frames:0);
+    if(wait_probe.service_calls[0x0b])LOG("[kernel-yields] thread %llu negative %llu zero %llu positive %llu\n",
+        (unsigned long long)(t_cur?t_cur->id:0),(unsigned long long)wait_probe.yields[0],
+        (unsigned long long)wait_probe.yields[1],(unsigned long long)wait_probe.yields[2]);
+    for(unsigned i=0;i<WAIT_PROBE_COUNT;++i)if(wait_probe.calls[i]) {
+        LOG("[kernel-waits] frame %llu frames %llu thread %llu %s%02x calls %llu total %.3f per-frame %.3f max %.3f ms lr %llx args %llx,%llx,%llx,%llx\n",
+            (unsigned long long)frame,(unsigned long long)frames,(unsigned long long)(t_cur?t_cur->id:0),
+            i==WAIT_PROBE_CORE0?"core0-":i==WAIT_PROBE_HOST?"host-":"svc-",i,
+            (unsigned long long)wait_probe.calls[i],wait_probe.ns[i]/1e6,frames?wait_probe.ns[i]/1e6/frames:0,wait_probe.max_ns[i]/1e6,
+            (unsigned long long)wait_probe.lr[i],(unsigned long long)wait_probe.args[i][0],(unsigned long long)wait_probe.args[i][1],
+            (unsigned long long)wait_probe.args[i][2],(unsigned long long)wait_probe.args[i][3]);
+    }
+    if(wait_probe.calls[0x34])LOG("[kernel-edge] frame %llu thread %llu longest address wait %llx woken by thread %llu lr %llx\n",
+        (unsigned long long)frame,(unsigned long long)(t_cur?t_cur->id:0),(unsigned long long)wait_probe.args[0x34][0],
+        (unsigned long long)wait_probe.address_waker,(unsigned long long)wait_probe.address_waker_lr);
+    if(t_cur && t_cur->id==atomic_load_explicit(&wait_probe_presenter,memory_order_relaxed)) {
+        // arbiter_wake publishes both fields under g_klock. Read the pair there
+        // too, then log outside the kernel lock.
+        pthread_mutex_lock(&g_klock);
+        uint64_t signaler=atomic_load_explicit(&wait_probe_signaler,memory_order_relaxed);
+        uint64_t lr=atomic_load_explicit(&wait_probe_signal_lr,memory_order_relaxed);
+        pthread_mutex_unlock(&g_klock);
+        LOG("[kernel-wake] frame %llu last address signaler thread %llu lr %llx\n",
+            (unsigned long long)frame,(unsigned long long)signaler,(unsigned long long)lr);
+    }
+    memset(&wait_probe,0,sizeof wait_probe);
+    wait_probe.since=now;wait_probe.frame=frame;wait_probe.cpu_ns=cpu_ns;
+}
+void kernel_wait_probe_frame(uint64_t frame) {
+    if(!wait_probe_on())return;
+    atomic_store_explicit(&wait_probe_presenter,t_cur?t_cur->id:0,memory_order_relaxed);
+    atomic_store_explicit(&wait_probe_frame,frame,memory_order_relaxed);
+    wait_probe_report(frame);
+}
+#else
+#define WAIT_PROBE_CORE0 0x80
+#define WAIT_PROBE_HOST 0x81
+static inline void wait_probe_add(unsigned kind,uint64_t ns) { (void)kind;(void)ns; }
+#endif
+
 static bool kwait(int64_t timeout_ns, const struct timespec *ts) {
     pthread_cond_t *cv = t_cur ? &t_cur->cond : &g_nothread_cond;
     uint64_t t0 = plat_now_ns();
     bool r = true;
+#if TOTK_DIAGNOSTICS
+    if(wait_probe_on() && t_cur && t_cur->svc_now==0x35)
+        wait_probe_wakers[t_cur->id%256].target=0;
+#endif
     if (timeout_ns < 0) pthread_cond_wait(cv, &g_klock);
     else r = pthread_cond_timedwait(cv, &g_klock, ts) == 0;
-    g_blocked_ns += plat_now_ns() - t0;
+    uint64_t elapsed=plat_now_ns()-t0;
+    g_blocked_ns += elapsed;
+    if(t_cur && t_cur->svc_now)wait_probe_add(t_cur->svc_now-1,elapsed);
+#if TOTK_DIAGNOSTICS
+    wait_probe_long_record(t0,t0+elapsed);
+#endif
     return r;
 }
 
@@ -367,8 +525,20 @@ static pthread_mutex_t c0_m = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t c0_cv = PTHREAD_COND_INITIALIZER;
 static KThread *c0_head, *c0_tail;
 static int c0_on = -1;
+static bool c0_priority; // TotK policy; equal-priority threads remain FIFO
 static KThread *c0_holder;  // (c0_m) the thread that has core 0, since c0_since
+static KThread *c0_priority_preempted; // preserve an interrupted owner's place among equal-priority peers
 static uint64_t c0_since;
+// Private per-boot state avoids changing the game-library ABI. IDs only grow
+// within a boot, just like g_threads. Writers hold both g_klock and c0_m;
+// readers hold either lock. The thread pointer rejects stale/test-fixture IDs.
+typedef struct { KThread *thread; int value, previous; } CorePriority;
+static CorePriority *c0_priorities;
+static size_t c0_priority_capacity;
+static unsigned c0_mutex_waiters; // g_klock
+#if TOTK_DIAGNOSTICS
+static unsigned c0_hold_reports; // c0_m; normal-release diagnostics only
+#endif
 
 // Optional cooperative slices: request a handoff at the next function entry/SVC, never run two owners at once.
 // BOTW's busy waits depend on workers on other cores, handled by SetThreadCoreMask, not by forcing a handoff.
@@ -376,6 +546,104 @@ static uint64_t c0_since;
 extern volatile int g_fnprof;  // runtime/fnprof.c
 static int c0_nevicted;  // (c0_m)
 static uint64_t c0_slice_ns;  // affinity handles BOTW's cross-core waits; slicing is diagnostic only
+static int thread_effective_priority(const KThread *t) {
+    if (c0_priority && g_game_version == TOTK_VERSION && t->id < c0_priority_capacity &&
+        c0_priorities[t->id].thread == t) return c0_priorities[t->id].value;
+    return thread_priority(t);
+}
+// Both locks held. Recompute the minimum priority along actual mutex-owner
+// edges, including chains. Starting from base priorities also removes donations
+// after handoff, cancellation, timeout or a base-priority change.
+static void core0_update_inheritance(KThread *changed) {
+    if (!c0_priority || g_game_version != TOTK_VERSION) return;
+    size_t needed = 0, threads = 0;
+    for (KThread *t = g_threads; t; t = t->anext) {
+        if (t->id >= SIZE_MAX / sizeof(CorePriority)) FATAL("kernel: priority state is too large\n");
+        if (needed <= t->id) needed = (size_t)t->id + 1;
+        ++threads;
+    }
+    if (needed > c0_priority_capacity) {
+        size_t capacity = c0_priority_capacity ? c0_priority_capacity : 256;
+        while (capacity < needed) {
+            if (capacity > SIZE_MAX / sizeof(CorePriority) / 2) { capacity = needed; break; }
+            capacity *= 2;
+        }
+        CorePriority *entries = realloc(c0_priorities, capacity * sizeof *entries);
+        if (!entries) FATAL("kernel: cannot allocate priority state\n");
+        memset(entries + c0_priority_capacity, 0, (capacity - c0_priority_capacity) * sizeof *entries);
+        c0_priorities = entries;
+        c0_priority_capacity = capacity;
+    }
+    for (KThread *t = g_threads; t; t = t->anext) {
+        int previous = thread_effective_priority(t);
+        c0_priorities[t->id] = (CorePriority){t, thread_priority(t), previous};
+    }
+    c0_mutex_waiters = 0;
+    for (KThread *w = g_waitlist; w; w = w->wnext) c0_mutex_waiters += w->wait_kind == WAIT_MUTEX;
+    for (size_t pass = 0; pass < threads && c0_mutex_waiters; ++pass) {
+        bool updated = false;
+        for (KThread *w = g_waitlist; w; w = w->wnext) {
+            if (w->wait_kind != WAIT_MUTEX) continue;
+            uint32_t owner = __atomic_load_n((uint32_t *)(uintptr_t)w->wait_addr, __ATOMIC_SEQ_CST) & ~WAITERS_BIT;
+            KObject *object = handle_get(owner);
+            if (!object || object->type != KOBJ_THREAD) continue;
+            KThread *t = (KThread *)object;
+            if (t->id >= c0_priority_capacity || c0_priorities[t->id].thread != t) continue;
+            int priority = thread_effective_priority(w);
+            if (c0_priorities[t->id].value > priority) {
+                c0_priorities[t->id].value = priority;
+                updated = true;
+            }
+        }
+        if (!updated) break;
+    }
+    // Changed queued priorities join the end of their new group. The explicit
+    // SetThreadPriority target is handled by its caller, including new threads.
+    KThread *moved = NULL, *moved_tail = NULL, *kept_tail = NULL;
+    for (KThread **link = &c0_head; *link;) {
+        KThread *t = *link;
+        bool registered = t->id < c0_priority_capacity && c0_priorities[t->id].thread == t;
+        if (t != changed && registered && c0_priorities[t->id].previous != c0_priorities[t->id].value) {
+            *link = t->core0_next;t->core0_next = NULL;
+            if (moved_tail) moved_tail->core0_next = t;else moved = t;
+            moved_tail = t;
+        } else { kept_tail = t;link = &t->core0_next; }
+    }
+    if (kept_tail) kept_tail->core0_next = moved;else c0_head = moved;
+    c0_tail = moved_tail ? moved_tail : kept_tail;
+}
+// c0_m held. Ownership stays with the old thread until it reaches a safe point.
+static void core0_request_preempt(KThread *t) {
+    if (!t->core0_evicted) {
+        __atomic_store_n(&t->core0_evicted, true, __ATOMIC_RELEASE);
+        if (c0_nevicted++ == 0) __atomic_fetch_or(&g_fnprof, 2, __ATOMIC_SEQ_CST);
+    }
+}
+static KThread *core0_front(void) {
+    if (!c0_priority || g_game_version != TOTK_VERSION) return c0_head;
+    KThread *best = NULL;
+    for (KThread *t = c0_head; t; t = t->core0_next)
+        if (__atomic_load_n(&t->core, __ATOMIC_ACQUIRE) == 0 &&
+            (!best || thread_effective_priority(t) < thread_effective_priority(best))) best = t;
+    return best;
+}
+static void core0_reconsider(void) {
+    if (!c0_priority || g_game_version != TOTK_VERSION || !c0_holder) return;
+    KThread *next = core0_front();
+    if (next && thread_effective_priority(next) < thread_effective_priority(c0_holder)) {
+        if (!c0_holder->core0_evicted) c0_priority_preempted = c0_holder;
+        core0_request_preempt(c0_holder);
+    }
+}
+// g_klock held; never introduce c0_m -> g_klock acquisition.
+static void core0_refresh_inheritance(bool added) {
+    if (!c0_priority || g_game_version != TOTK_VERSION || (!added && !c0_mutex_waiters)) return;
+    pthread_mutex_lock(&c0_m);
+    core0_update_inheritance(NULL);
+    core0_reconsider();
+    pthread_cond_broadcast(&c0_cv);
+    pthread_mutex_unlock(&c0_m);
+}
 static void *core0_slicer(void *arg) {
     (void)arg;
     for (;;) {
@@ -387,8 +655,7 @@ static void *core0_slicer(void *arg) {
             if (n++ < 10 || DIAG_ENV("LARECOMP_LOG_C0"))
                 LOG("[kernel] core 0: t%llu ran %llums without blocking, handoff requested\n", (unsigned long long)c0_holder->id,
                     (unsigned long long)((plat_now_ns() - c0_since) / 1000000));
-            __atomic_store_n(&c0_holder->core0_evicted, true, __ATOMIC_RELEASE);
-            if (c0_nevicted++ == 0) __atomic_fetch_or(&g_fnprof, 2, __ATOMIC_SEQ_CST);
+            core0_request_preempt(c0_holder);
             // The old owner must reach a safe point before another thread can run. Merely clearing the owner
             // here lets both execute guest code at once, corrupting the game's supposedly serial work queues.
         }
@@ -400,6 +667,13 @@ static void *core0_slicer(void *arg) {
 static pthread_once_t c0_once = PTHREAD_ONCE_INIT;
 static void core0_init(void) {
     c0_on = !getenv("LARECOMP_NO_CORE0");
+    c0_priority = true; // Version checks stay at use sites, including after a game reboot.
+#if TOTK_DIAGNOSTICS
+    const char *priority = diag_getenv("LARECOMP_C0_PRIORITY");
+    if (priority) c0_priority = atoi(priority) != 0;
+#endif
+    if (c0_on && c0_priority && g_game_version == TOTK_VERSION)
+        LOG("[kernel] core 0: guest priority scheduling with safe-point preemption\n");
     const char *e = getenv("LARECOMP_C0_SLICE_MS");
     if (e && atoi(e) > 0) c0_slice_ns = (uint64_t)atoi(e) * 1000000;
     if (c0_on && c0_slice_ns) {
@@ -412,6 +686,8 @@ static void core0_acquire(KThread *t) {
     pthread_once(&c0_once, core0_init);
     if (!t || !c0_on) return;
     pthread_mutex_lock(&c0_m);
+    bool resume_priority = c0_priority_preempted == t;
+    if (resume_priority) c0_priority_preempted = NULL;
     if (t->core0_evicted) {
         __atomic_store_n(&t->core0_evicted, false, __ATOMIC_RELEASE);
         if (--c0_nevicted == 0) __atomic_fetch_and(&g_fnprof, ~2, __ATOMIC_SEQ_CST);
@@ -433,14 +709,23 @@ static void core0_acquire(KThread *t) {
     if (t->core0_held) { pthread_mutex_unlock(&c0_m); return; }
     // A removable queue lets SetThreadCoreMask move a waiter to another core without waiting for the current
     // owner to yield (that owner may itself be spinning for this worker).
-    t->core0_next = NULL;
-    if (c0_tail) c0_tail->core0_next = t;
-    else c0_head = t;
-    c0_tail = t;
+    if (resume_priority) {
+        t->core0_next = c0_head;
+        c0_head = t;
+        if (!c0_tail) c0_tail = t;
+    } else {
+        t->core0_next = NULL;
+        if (c0_tail) c0_tail->core0_next = t;
+        else c0_head = t;
+        c0_tail = t;
+    }
+    core0_reconsider();
     uint64_t t0 = plat_now_ns();
-    while ((c0_holder || c0_head != t) && __atomic_load_n(&t->core, __ATOMIC_ACQUIRE) == 0 && !g_rt_unwind)
+    while ((c0_holder || core0_front() != t) && __atomic_load_n(&t->core, __ATOMIC_ACQUIRE) == 0 && !g_rt_unwind)
         pthread_cond_wait(&c0_cv, &c0_m);
-    g_blocked_ns += plat_now_ns() - t0;
+    uint64_t elapsed=plat_now_ns()-t0;
+    g_blocked_ns += elapsed;
+    wait_probe_add(WAIT_PROBE_CORE0,elapsed);
     KThread **p = &c0_head, *prev = NULL;
     while (*p != t) { prev = *p; p = &(*p)->core0_next; }
     *p = t->core0_next;
@@ -465,17 +750,41 @@ void kernel_preempt_point(void) {
 
 static void core0_release(KThread *t) {
     if (!t) return;
+#if TOTK_DIAGNOSTICS
+    uint64_t trace_start=0,trace_end=0,trace_next=0,trace_frame=0;
+#endif
     pthread_mutex_lock(&c0_m);
+    if (c0_priority_preempted == t) c0_priority_preempted = NULL;
     if (t->core0_evicted) {
         __atomic_store_n(&t->core0_evicted, false, __ATOMIC_RELEASE);
         if (--c0_nevicted == 0) __atomic_fetch_and(&g_fnprof, ~2, __ATOMIC_SEQ_CST);
     }
     if (t->core0_held) {
         t->core0_held = false;
-        if (c0_holder == t) c0_holder = NULL;
+        if (c0_holder == t) {
+#if TOTK_DIAGNOSTICS
+            if(c0_head && c0_hold_reports<128 && wait_probe_on()) {
+                trace_frame=atomic_load_explicit(&wait_probe_frame,memory_order_relaxed);
+                if(trace_frame>=wait_probe_long_first()) {
+                    uint64_t now=plat_now_ns();
+                    if(now-c0_since>=10000000ull) {
+                        KThread *next=core0_front();
+                        trace_start=c0_since;trace_end=now;trace_next=next?next->id:0;
+                        ++c0_hold_reports;
+                    }
+                }
+            }
+#endif
+            c0_holder = NULL;
+        }
         pthread_cond_broadcast(&c0_cv);
     }
     pthread_mutex_unlock(&c0_m);
+#if TOTK_DIAGNOSTICS
+    if(trace_end)LOG("[kernel-core0-hold] frame %llu holder %llu next %llu ns %llu..%llu wall %.3f ms\n",
+        (unsigned long long)trace_frame,(unsigned long long)t->id,(unsigned long long)trace_next,
+        (unsigned long long)trace_start,(unsigned long long)trace_end,(trace_end-trace_start)/1e6);
+#endif
 }
 
 // The SVCs a thread blocks in on the Switch (the core goes to another of its threads meanwhile)
@@ -486,6 +795,30 @@ static bool svc_blocks(uint32_t imm) {
     }
 }
 
+// SleepThread(0/-1) yields to eligible guest threads. With a core-0-only
+// affinity, rt_svc's release/reacquire already queues this thread behind its
+// peers; there is no permitted guest migration for the host scheduler to do.
+// TotK's BaseProcExecutor0 polls with -1 hundreds of times per frame. The host
+// yield adds latency without changing this FIFO handoff. Other games retain
+// their existing path; diagnostics can compare either implementation.
+static bool core0_guest_yield(int64_t ns) {
+    bool enabled=g_game_version==TOTK_VERSION;
+#if TOTK_DIAGNOSTICS
+    static _Atomic int override=-2;
+    int value=atomic_load_explicit(&override,memory_order_relaxed);
+    if(value==-2) {
+        const char *e=diag_getenv("LARECOMP_C0_GUEST_YIELD");value=e?atoi(e)!=0:-1;
+        atomic_store_explicit(&override,value,memory_order_relaxed);
+    }
+    if(value>=0)enabled=value!=0;
+#endif
+    if(!enabled || !c0_on || !t_cur || (ns!=0 && ns!=-1))return false;
+    pthread_mutex_lock(&g_klock);
+    bool pinned=t_cur->core_mask==1 && __atomic_load_n(&t_cur->core,__ATOMIC_ACQUIRE)==0;
+    pthread_mutex_unlock(&g_klock);
+    return pinned;
+}
+
 // The host's own long waits on a guest thread (the GPU, the render thread): core 0 goes to its other threads meanwhile
 // (the wait counts as blocked, as a kernel wait: the frame pacer measures the presenting thread's own work)
 static __thread uint64_t blocking_t0;
@@ -494,10 +827,14 @@ void kernel_blocking_begin(void) {
     core0_release(t_cur);
 }
 void kernel_blocking_end(void) {
+    if(blocking_t0)wait_probe_add(WAIT_PROBE_HOST,plat_now_ns()-blocking_t0);
     core0_acquire(t_cur);
     if (blocking_t0) g_blocked_ns += plat_now_ns() - blocking_t0;
     blocking_t0 = 0;
 }
+#else
+static int thread_effective_priority(const KThread *t) { return thread_priority(t); }
+static void core0_refresh_inheritance(bool added) { (void)added; }
 #endif
 
 static void *thread_main(void *arg) {
@@ -531,19 +868,19 @@ static KThread *thread_new(uint64_t entry, uint64_t arg, uint64_t stack_top, int
     pthread_cond_init(&t->cond, NULL);
     t->obj.type = KOBJ_THREAD;
     t->entry = entry;
-    t->prio = prio;
+    __atomic_store_n(&t->prio, prio, __ATOMIC_RELAXED);
     t->core = core < 0 ? 0 : core;
     t->ideal_core = t->core;
     t->core_mask = 1ull << t->core;
-    t->id = next_thread_id++;
     t->cpu.x[0] = arg;
     t->cpu.sp = stack_top & ~15ull;
     t->cpu.excl_addr = ~0ull;
+    t->cpu.thread = t;
+    pthread_mutex_lock(&g_klock);
+    t->id = next_thread_id++;
     t->tlr = tls_next;
     tls_next += 0x200;
     t->cpu.tpidrro = t->tlr;
-    t->cpu.thread = t;
-    pthread_mutex_lock(&g_klock);
     t->anext = g_threads;
     g_threads = t;
     pthread_mutex_unlock(&g_klock);
@@ -568,14 +905,41 @@ static uint32_t thread_set_core_mask(KThread *t, int ideal, uint64_t mask) {
         __atomic_store_n(&t->core, core, __ATOMIC_RELEASE);
 #ifdef __ANDROID__
         if (core != old_core && t->started && c0_on && !t->core0_evicted) {
-            __atomic_store_n(&t->core0_evicted, true, __ATOMIC_RELEASE);
-            if (c0_nevicted++ == 0) __atomic_fetch_or(&g_fnprof, 2, __ATOMIC_SEQ_CST);
+            core0_request_preempt(t);
         }
+        core0_reconsider();
         pthread_cond_broadcast(&c0_cv);
         pthread_mutex_unlock(&c0_m);
 #endif
     }
     return result;
+}
+
+// Caller holds g_klock, matching the affinity update's g_klock -> c0_m order.
+static void thread_set_priority(KThread *t, int priority) {
+#ifdef __ANDROID__
+    pthread_mutex_lock(&c0_m);
+#endif
+    int previous = thread_effective_priority(t);
+    __atomic_store_n(&t->prio, priority, __ATOMIC_RELAXED);
+#ifdef __ANDROID__
+    core0_update_inheritance(t);
+    if (previous != thread_effective_priority(t) && c0_priority && g_game_version == TOTK_VERSION) {
+        // A queued priority change joins the end of its new priority group.
+        KThread **link = &c0_head;
+        while (*link && *link != t) link = &(*link)->core0_next;
+        if (*link && c0_tail != t) {
+            *link = t->core0_next;
+            c0_tail->core0_next = t;
+            c0_tail = t;
+            t->core0_next = NULL;
+        }
+    }
+    core0_reconsider();
+    pthread_cond_broadcast(&c0_cv);
+    pthread_mutex_unlock(&c0_m);
+#endif
+    (void)previous;
 }
 
 static void thread_start(KThread *t) {
@@ -630,26 +994,31 @@ static void mutex_release(uint64_t addr) {
     int count = 0;
     for (KThread *t = g_waitlist; t; t = t->wnext) {
         if (t->wait_kind == WAIT_MUTEX && t->wait_addr == addr) {
-            if (!next || t->prio < next->prio) next = t;
+            if (!next || thread_effective_priority(t) < thread_effective_priority(next)) next = t;
             count++;
         }
     }
     if (!next) {
         __atomic_store_n(u32p(addr), 0, __ATOMIC_SEQ_CST);
+        core0_refresh_inheritance(false);
         return;
     }
     __atomic_store_n(u32p(addr), next->handle | (count > 1 ? WAITERS_BIT : 0), __ATOMIC_SEQ_CST);
     next->wait_kind = WAIT_NONE;
     next->wait_result = R_OK;
     wake(next);
+    core0_refresh_inheritance(false);
 }
 
 KThread *g_waitlist;
 
-static void waitlist_add(KThread *t) { t->wnext = g_waitlist; g_waitlist = t; }
+static void waitlist_add(KThread *t) {
+    t->wnext = g_waitlist;g_waitlist = t;
+    if (t->wait_kind == WAIT_MUTEX) core0_refresh_inheritance(true);
+}
 static void waitlist_remove(KThread *t) {
     for (KThread **p = &g_waitlist; *p; p = &(*p)->wnext)
-        if (*p == t) { *p = t->wnext; return; }
+        if (*p == t) { *p = t->wnext;core0_refresh_inheritance(false);return; }
 }
 
 // Block until wait_kind is cleared by a waker, timeout, or cancel. Caller holds g_klock.
@@ -753,7 +1122,7 @@ static void svc_signal_process_wide_key(uint64_t key, int32_t count) {
         if (count > 0 && woken >= count) break;
         KThread *best = NULL;
         for (KThread *t = g_waitlist; t; t = t->wnext)
-            if (t->wait_kind == WAIT_CONDVAR && t->wait_addr == key && (!best || t->prio < best->prio)) best = t;
+            if (t->wait_kind == WAIT_CONDVAR && t->wait_addr == key && (!best || thread_effective_priority(t) < thread_effective_priority(best))) best = t;
         if (!best) break;
         woken++;
         // the woken thread must reacquire its mutex
@@ -770,6 +1139,7 @@ static void svc_signal_process_wide_key(uint64_t key, int32_t count) {
     for (KThread *t = g_waitlist; t; t = t->wnext)
         if (t->wait_kind == WAIT_CONDVAR && t->wait_addr == key) any_left = true;
     if (!any_left) __atomic_store_n(u32p(key), 0, __ATOMIC_SEQ_CST);
+    core0_refresh_inheritance(true);
     pthread_mutex_unlock(&g_klock);
 }
 
@@ -809,6 +1179,18 @@ static int arbiter_wake(uint64_t addr, int32_t count) {
         if (t->wait_kind == WAIT_ARBITER && t->wait_addr == addr) {
             t->wait_kind = WAIT_NONE;
             t->wait_result = R_OK;
+#if TOTK_DIAGNOSTICS
+            if(wait_probe_on() && t->id==atomic_load_explicit(&wait_probe_presenter,memory_order_relaxed)) {
+                atomic_store_explicit(&wait_probe_signaler,t_cur?t_cur->id:0,memory_order_relaxed);
+                atomic_store_explicit(&wait_probe_signal_lr,t_cur?t_cur->svc_lr:0,memory_order_relaxed);
+            }
+            if(wait_probe_on()) {
+                unsigned slot=(unsigned)(t->id%256);
+                wait_probe_wakers[slot].target=t->id;
+                wait_probe_wakers[slot].thread=t_cur?t_cur->id:0;
+                wait_probe_wakers[slot].lr=t_cur?t_cur->svc_lr:0;
+            }
+#endif
             wake(t);
             woken++;
         }
@@ -927,12 +1309,12 @@ static void *watchdog_main(void *arg) {
             uint32_t n = t->svc_now;
             if (n && now - t->svc_since > every * 1000000000ull)
                 LOG("[watchdog]  t%llu prio %d: svc %02x for %llus (%llx, %llx, %llx, %llx) from %llx; wait kind %d addr %llx\n",
-                    (unsigned long long)t->id, t->prio, n - 1, (unsigned long long)((now - t->svc_since) / 1000000000ull),
+                    (unsigned long long)t->id, thread_priority(t), n - 1, (unsigned long long)((now - t->svc_since) / 1000000000ull),
                     (unsigned long long)t->svc_args[0], (unsigned long long)t->svc_args[1],
                     (unsigned long long)t->svc_args[2], (unsigned long long)t->svc_args[3],
                     (unsigned long long)t->svc_lr, (int)t->wait_kind, (unsigned long long)t->wait_addr);
             else
-                LOG("[watchdog]  t%llu prio %d: running%s, pc %llx lr %llx\n", (unsigned long long)t->id, t->prio,
+                LOG("[watchdog]  t%llu prio %d: running%s, pc %llx lr %llx\n", (unsigned long long)t->id, thread_priority(t),
                     n ? " (short svc)" : "", (unsigned long long)t->cpu.pc, (unsigned long long)t->cpu.x[30]);
         }
     }
@@ -962,13 +1344,50 @@ void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) {
     kernel_preempt_point();
     bool blocks = svc_blocks(imm);
     if (blocks) core0_release(t_cur);
+#endif
+#if TOTK_DIAGNOSTICS
+    uint64_t probe_body_begin=wait_probe_on()?plat_now_ns():0;
+#endif
     svc_entry(c, imm, pc);
+#if TOTK_DIAGNOSTICS
+    if(probe_body_begin && imm<0x80)wait_probe.service_body_ns[imm]+=plat_now_ns()-probe_body_begin;
+#endif
+#ifdef __ANDROID__
     if (blocks) core0_acquire(t_cur);
     kernel_preempt_point();
-#else
-    svc_entry(c, imm, pc);
+#endif
+#if TOTK_DIAGNOSTICS
+    // Includes lock entry, cooperative handoff and nonpositive SleepThread
+    // yields omitted by the narrower wait buckets. Do not add the two totals.
+    if(wait_probe_on() && me && imm<0x80) {
+        wait_probe.service_ns[imm]+=plat_now_ns()-me->svc_since;
+        ++wait_probe.service_calls[imm];
+        if(imm==0x0b)++wait_probe.yields[(int64_t)me->svc_args[0]<0?0:me->svc_args[0]?2:1];
+    }
 #endif
     if (me) me->svc_now = 0;
+#if TOTK_DIAGNOSTICS
+    wait_probe_long_flush();
+    if(wait_probe_trace_pending) {
+        uint64_t address=wait_probe_trace_pending;wait_probe_trace_pending=0;
+        const char *at=diag_getenv("LARECOMP_KERNEL_WAIT_BT_FRAME");
+        if(at && wait_probe_trace_count<4 && atomic_load_explicit(&wait_probe_frame,memory_order_relaxed)>=strtoull(at,NULL,10)) {
+            bool seen=false;for(unsigned i=0;i<wait_probe_trace_count;++i)seen|=wait_probe_trace_addr[i]==address;
+            if(!seen) {
+                wait_probe_trace_addr[wait_probe_trace_count++]=address;
+                LOG("[kernel-wait-bt] thread %llu address %llx caller %llx\n",(unsigned long long)(me?me->id:0),
+                    (unsigned long long)address,(unsigned long long)(me?me->svc_lr:0));
+                plat_print_backtrace();
+            }
+        }
+    }
+    // Follow the presenter to its producer using that producer's own TLS
+    // counters. SVC locks are released here; no cross-thread counter reads.
+    if(wait_probe_on() && me && (me->id==atomic_load_explicit(&wait_probe_signaler,memory_order_relaxed) ||
+       me->id==atomic_load_explicit(&wait_probe_worker,memory_order_relaxed)) &&
+       me->id!=atomic_load_explicit(&wait_probe_presenter,memory_order_relaxed))
+        wait_probe_report(atomic_load_explicit(&wait_probe_frame,memory_order_relaxed));
+#endif
     rt_unwind_point();
 }
 
@@ -1090,25 +1509,38 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     case 0x0A: longjmp(t_cur->unwind, 1);  // ExitThread: back to thread_main, which signals the thread object
     case 0x0B: {  // SleepThread (in slices of at most 50 ms: a reboot doesn't wait out a long sleep)
         int64_t ns = (int64_t)x[0];
-        if (ns <= 0) { sched_yield(); break; }
+        if (ns <= 0) {
+#ifdef __ANDROID__
+            if(core0_guest_yield(ns))break;
+#endif
+            sched_yield();break;
+        }
         for (uint64_t end = plat_now_ns() + (uint64_t)ns, now; !g_rt_unwind && (now = plat_now_ns()) < end;) {
             uint64_t d = end - now < 50000000 ? end - now : 50000000;
             struct timespec ts = {(time_t)(d / 1000000000), (long)(d % 1000000000)};
             nanosleep(&ts, NULL);
-            g_blocked_ns += plat_now_ns() - now;
+            uint64_t elapsed=plat_now_ns()-now;
+            g_blocked_ns += elapsed;
+            wait_probe_add(0x0b,elapsed);
         }
         break;
     }
     case 0x0C: {  // GetThreadPriority(_, handle)
+        pthread_mutex_lock(&g_klock);
         KObject *o = handle_get((uint32_t)x[1]);
-        x[0] = o ? R_OK : R_INVALID_HANDLE;
-        x[1] = o ? (uint64_t)((KThread *)o)->prio : 0;
+        bool valid = o && o->type == KOBJ_THREAD;
+        x[0] = valid ? R_OK : R_INVALID_HANDLE;
+        x[1] = valid ? (uint64_t)thread_effective_priority((KThread *)o) : 0;
+        pthread_mutex_unlock(&g_klock);
         break;
     }
     case 0x0D: {  // SetThreadPriority
+        pthread_mutex_lock(&g_klock);
         KObject *o = handle_get((uint32_t)x[0]);
-        if (o) ((KThread *)o)->prio = (int)x[1];
-        x[0] = o ? R_OK : R_INVALID_HANDLE;
+        bool valid = o && o->type == KOBJ_THREAD;
+        if (valid) thread_set_priority((KThread *)o, (int)x[1]);
+        x[0] = valid ? R_OK : R_INVALID_HANDLE;
+        pthread_mutex_unlock(&g_klock);
         break;
     }
     case 0x0E: {  // GetThreadCoreMask(_, _, handle)
@@ -1350,10 +1782,23 @@ void kernel_stop_threads(void (*idle)(void)) {
 // can still point at some (vi.c's vsync event, signalled by its host timer thread).
 void kernel_reset(void) {
     pthread_mutex_lock(&g_klock);
+#if TOTK_DIAGNOSTICS
+    atomic_store(&wait_probe_presenter,0);atomic_store(&wait_probe_signaler,0);
+    atomic_store(&wait_probe_signal_lr,0);atomic_store(&wait_probe_frame,0);
+    atomic_store(&wait_probe_worker,0);
+    memset(wait_probe_wakers,0,sizeof wait_probe_wakers);
+    // Other guest threads have been joined; fresh threads start with fresh TLS.
+    memset(&wait_probe_long,0,sizeof wait_probe_long);
+#endif
 #ifdef __ANDROID__
     pthread_mutex_lock(&c0_m);
     c0_head = c0_tail = c0_holder = NULL;
+    c0_priority_preempted = NULL;
+    free(c0_priorities);c0_priorities = NULL;c0_priority_capacity = 0;c0_mutex_waiters = 0;
     c0_nevicted = 0;
+#if TOTK_DIAGNOSTICS
+    c0_hold_reports=0;
+#endif
     __atomic_fetch_and(&g_fnprof, ~2, __ATOMIC_SEQ_CST);
     pthread_mutex_unlock(&c0_m);
 #endif

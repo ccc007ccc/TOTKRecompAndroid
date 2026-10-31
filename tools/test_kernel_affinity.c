@@ -5,6 +5,8 @@
 #include "../runtime/kernel.c"
 
 volatile int g_fnprof = 1;  // profiling must survive scheduler requests
+int g_game_version = TOTK_VERSION;
+uint64_t g_guest_lo = 0x100000000ull;
 uint64_t plat_now_ns(void) {
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
@@ -40,8 +42,50 @@ static uint32_t set_mask(KThread *t, int ideal, uint64_t mask) {
     return r;
 }
 
-int main(void) {
+int main(int argc,char **argv) {
     alarm(15);
+    if(argc==2 && !strcmp(argv[1],"--trace-hold")) {
+        unsetenv("LARECOMP_C0_SLICE_MS");
+        setenv("LARECOMP_LOG_KERNEL_WAITS","1",1);
+        setenv("LARECOMP_KERNEL_WAIT_TRACE_FRAME","2000",1);
+#if TOTK_DIAGNOSTICS
+        atomic_store(&wait_probe_frame,2000);
+#endif
+        FILE *log=tmpfile();assert(log);int saved=dup(STDERR_FILENO);assert(saved>=0);
+        assert(dup2(fileno(log),STDERR_FILENO)==STDERR_FILENO);
+        KThread owner={.id=80,.core=0,.core_mask=1},waiter={.id=128,.core=0,.core_mask=1};
+        t_cur=&owner;core0_acquire(&owner);
+        pthread_t th;assert(!pthread_create(&th,NULL,worker,&waiter));wait_queued(&waiter);
+        usleep(15000);core0_release(&owner);pthread_join(th,NULL);
+        fflush(stderr);rewind(log);char text[1024]={0};size_t length=fread(text,1,sizeof text-1,log);
+#if TOTK_DIAGNOSTICS
+        assert(strstr(text,"[kernel-core0-hold] frame 2000 holder 80 next 128 ns "));
+        assert(c0_hold_reports==1);
+#else
+        assert(!strstr(text,"[kernel-core0-hold]"));
+#endif
+        (void)length;
+        assert(dup2(saved,STDERR_FILENO)==STDERR_FILENO);close(saved);fclose(log);
+        kernel_reset();
+#if TOTK_DIAGNOSTICS
+        assert(!c0_hold_reports);
+#endif
+        t_cur=NULL;puts("PASS: real queued core-0 holder trace, frame/owner identity, release isolation and reset");return 0;
+    }
+    if(argc>1) {
+        assert(argc==2 && (!strcmp(argv[1],"--disabled") || !strcmp(argv[1],"--no-core0") ||
+                          !strcmp(argv[1],"--default") || !strcmp(argv[1],"--other-game")));
+        unsetenv("LARECOMP_C0_GUEST_YIELD");
+        if(!strcmp(argv[1],"--disabled"))setenv("LARECOMP_C0_GUEST_YIELD","0",1);
+        if(!strcmp(argv[1],"--no-core0"))setenv("LARECOMP_NO_CORE0","1",1);
+        if(!strcmp(argv[1],"--other-game"))g_game_version=182;
+        KThread sole={.core=0,.ideal_core=0,.core_mask=1};t_cur=&sole;
+        core0_acquire(&sole);
+        bool expected=!strcmp(argv[1],"--default") || (!TOTK_DIAGNOSTICS && !strcmp(argv[1],"--disabled"));
+        assert(core0_guest_yield(0)==expected && core0_guest_yield(-1)==expected);
+        core0_release(&sole);
+        printf("PASS: yield policy %s (diagnostics=%d)\n",argv[1],TOTK_DIAGNOSTICS);return 0;
+    }
     setenv("LARECOMP_C0_SLICE_MS", "1", 1);
     KThread owner = {.core = 0, .ideal_core = 0, .core_mask = 1, .started = true};
     KThread t = {.core = 0, .ideal_core = 0, .core_mask = 1};
@@ -84,6 +128,23 @@ int main(void) {
     core0_release(&owner);
     assert(g_fnprof == 1 && c0_nevicted == 0);
 
+    setenv("LARECOMP_C0_GUEST_YIELD","1",1);
+    // The SVC release/reacquire must hand ownership to an already queued peer
+    // before returning, even with no intervening host sched_yield.
+    for(int kind=0;kind<2;++kind)for(int i=0;i<20;++i) {
+        core0_acquire(&owner);atomic_store(&ran,0);
+        assert(!pthread_create(&th,NULL,worker,&t));wait_queued(&t);
+        core0_release(&owner);
+        assert(core0_guest_yield(kind?-1:0));
+        core0_acquire(&owner);
+        assert(atomic_load(&ran)==1 && c0_holder==&owner);
+        pthread_join(th,NULL);core0_release(&owner);
+    }
+    assert(!core0_guest_yield(-2) && !core0_guest_yield(1));
+    assert(set_mask(&owner,-1,3)==R_OK && !core0_guest_yield(-1)); // migration remains eligible
+    assert(set_mask(&owner,1,2)==R_OK && !core0_guest_yield(-1)); // another guest core
+    assert(set_mask(&owner,0,1)==R_OK && core0_guest_yield(-1));
+
     // A reboot must let waiters leave the queue even if an owner is still unwinding.
     core0_acquire(&owner);
     atomic_store(&ran, 0);
@@ -96,5 +157,5 @@ int main(void) {
     pthread_join(th, NULL);
     core0_release(&owner);
     assert(!c0_head && !c0_tail && c0_nevicted == 0);
-    puts("PASS: affinity validation, 100 queued migrations, safe handoff, reboot wakeup");
+    puts("PASS: affinity validation, 100 queued migrations, 40 FIFO yields, safe handoff, reboot wakeup");
 }

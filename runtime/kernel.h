@@ -1,6 +1,7 @@
 // Kernel object types shared by kernel.c and the IPC/service layer.
 #pragma once
 #include <setjmp.h>
+#include "diagnostics_build.h"
 
 #include "rt.h"
 
@@ -76,6 +77,11 @@ uint32_t kernel_new_handle(KObject *o);
 void kernel_signal(KObject *o);  // caller holds g_klock
 KEvent *kernel_create_event_pair(uint32_t *writable, uint32_t *readable);
 KThread *kernel_current_thread(void);
+#if TOTK_DIAGNOSTICS
+void kernel_wait_probe_frame(uint64_t frame); // optional per-presenter wait breakdown, no scheduling changes
+#else
+static inline void kernel_wait_probe_frame(uint64_t frame) { (void)frame; }
+#endif
 uint64_t kernel_heap_size(void);  // bytes from HEAP_BASE set by SetHeapSize
 #ifdef __ANDROID__
 // Host waits on guest threads release core-0 ownership and count as idle time.

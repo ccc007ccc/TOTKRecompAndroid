@@ -16,6 +16,9 @@
 #endif
 
 void renderer_sync(void);
+#if TOTK_DIAGNOSTICS
+uint64_t renderer_present_count(void);
+#endif
 
 static uint64_t next_debug_id = 1;
 
@@ -1575,6 +1578,9 @@ NVN(nvnQueueAcquireTexture) {
 NVN(nvnQueuePresentTexture) {
     NvnWindow *w = HOST(NvnWindow, A(1));
     int i = (int)A(2);
+#if TOTK_DIAGNOSTICS
+    kernel_wait_probe_frame(renderer_present_count());
+#endif
 #ifdef __ANDROID__
     w->interval = g_present_interval = window_present_interval(w->interval);
 #endif
