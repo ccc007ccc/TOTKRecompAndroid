@@ -456,7 +456,7 @@ static void fill_state(Cpu *c) {
         if (g_inject_plus > 0) { until = renderer_present_count() + 10; g_inject_plus = 0; }
         if (renderer_present_count() < until) b |= 1ull << BTN_PLUS;
     }
-    int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx + TOUCH_LX) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly + TOUCH_LY) + script_ly);
+    int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx + TOUCH_LX) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly + TOUCH_LY + test_session_move_y()) + script_ly);
     int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx + TOUCH_RX + test_session_camera_x()) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry + TOUCH_RY) + script_ry);
     // stick directions also appear as buttons (bits 16-23)
     if (lx < -16000) b |= 1ull << 16;

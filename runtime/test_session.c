@@ -16,7 +16,7 @@ enum { LOADING, RUNNING, PAUSED, WARMUP, SAMPLING, DIAGNOSTIC, ENDED };
 static struct {
     pthread_mutex_t lock;
     pthread_cond_t wake;
-    bool enabled, auto_load, pause_when_ready, want_pause, gpu_request, shot_request, ready, camera_turn;
+    bool enabled, auto_load, pause_when_ready, want_pause, gpu_request, shot_request, ready, camera_turn, move_forward, attack_jump;
     unsigned phase, ready_frames, warm_left, sample_count, sample_goal, sample_id, diagnostic_left;
     uint64_t frame, request, last_ns, button_until, buttons, started_ns, duration_ns, sample_started_ns;
     double intervals[6000];
@@ -92,6 +92,8 @@ static void initialize(void) {
     }
     ts.save_slot=-1;
     ts.camera_turn=diag_getenv("LARECOMP_TEST_CAMERA_TURN")!=NULL;
+    ts.move_forward=diag_getenv("LARECOMP_TEST_MOVE_FORWARD")!=NULL;
+    ts.attack_jump=diag_getenv("LARECOMP_TEST_ATTACK_JUMP")!=NULL;
     const char *slot=diag_getenv("LARECOMP_TEST_SAVE_SLOT");
     const char *seed=diag_getenv("LARECOMP_TEST_SAVE_SEED");
     if(slot) {
@@ -129,26 +131,40 @@ const char *test_session_directory(void){return test_session_enabled()?ts.direct
 static void status(void) { // lock held; only transitions write to storage
     char path[1200],done[1200];snprintf(path,sizeof path,"%s/status.partial",ts.directory);
     snprintf(done,sizeof done,"%s/status.json",ts.directory);FILE *f=fopen(path,"w");if(!f)return;
-    fprintf(f,"{\"pid\":%d,\"phase\":\"%s\",\"frame\":%llu,\"request\":%llu,\"sample_id\":%u,\"sample_frames\":%u,\"ready\":%s,\"save_slot\":%d,\"target_fps\":%d,\"timed\":%s,\"camera_turn\":%s,\"requested_seconds\":%.6f,\"error\":\"%s\"}\n",
+    fprintf(f,"{\"pid\":%d,\"phase\":\"%s\",\"frame\":%llu,\"request\":%llu,\"sample_id\":%u,\"sample_frames\":%u,\"ready\":%s,\"save_slot\":%d,\"target_fps\":%d,\"timed\":%s,\"camera_turn\":%s,\"camera_turn_x\":%d,\"move_forward\":%s,\"attack_jump\":%s,\"requested_seconds\":%.6f,\"error\":\"%s\"}\n",
         getpid(),phases[ts.phase],(unsigned long long)ts.frame,(unsigned long long)ts.request,ts.sample_id,ts.sample_count,
-        ts.ready?"true":"false",ts.save_slot,test_session_target_fps(),ts.duration_ns?"true":"false",ts.camera_turn?"true":"false",ts.duration_ns/1e9,ts.error);
+        ts.ready?"true":"false",ts.save_slot,test_session_target_fps(),ts.duration_ns?"true":"false",ts.camera_turn?"true":"false",ts.camera_turn?32767:0,ts.move_forward?"true":"false",ts.attack_jump?"true":"false",ts.duration_ns/1e9,ts.error);
     if(!fclose(f))rename(path,done);
 }
 static int compare(const void *a,const void *b){double x=*(const double*)a,y=*(const double*)b;return(x>y)-(x<y);}
 static bool result(uint64_t now) {
     double sum=0;for(unsigned i=0;i<ts.sample_count;i++)sum+=ts.intervals[i];
-    qsort(ts.intervals,ts.sample_count,sizeof(double),compare);
+    // Keep the recorded order for locating low frames. This bounded scratch copy
+    // and all report I/O run after sampling, adding no work to the frame path.
+    double sorted[sizeof ts.intervals/sizeof ts.intervals[0]];
+    memcpy(sorted,ts.intervals,ts.sample_count*sizeof(double));
+    qsort(sorted,ts.sample_count,sizeof(double),compare);
     char path[1200],done[1200];++ts.sample_id;
     snprintf(path,sizeof path,"%s/sample-%04u.partial",ts.directory,ts.sample_id);
     snprintf(done,sizeof done,"%s/sample-%04u.json",ts.directory,ts.sample_id);
     FILE *f=fopen(path,"w");if(!f)return false;
     unsigned n=ts.sample_count;
-    double median=n?(ts.intervals[(n-1)/2]+ts.intervals[n/2])/2:0, p95=n?ts.intervals[(95*n+99)/100-1]:0;
+    double median=n?(sorted[(n-1)/2]+sorted[n/2])/2:0, p95=n?sorted[(95*n+99)/100-1]:0;
+    double p99=n?sorted[(99*n+99)/100-1]:0, longest=n?sorted[n-1]:0, tail_ms=0;
+    unsigned tail_count=(n+99)/100, over_50=0, over_100=0, over_200=0;
+    for(unsigned i=0;i<n;++i) {
+        over_50+=sorted[i]>50;over_100+=sorted[i]>100;over_200+=sorted[i]>200;
+        if(i>=n-tail_count)tail_ms+=sorted[i];
+    }
+    // 1% low = reciprocal of the mean of the slowest ceil(1% * n) completed frames.
+    double low_1pct=tail_ms>0?1000.0*tail_count/tail_ms:0;
     double elapsed=ts.duration_ns?(now-ts.sample_started_ns)/1e9:sum/1000;
     double fps=elapsed>0?n/elapsed:0,mean=n?elapsed*1000/n:0;
-    fprintf(f,"{\"pid\":%d,\"frames\":%u,\"first_frame\":%llu,\"last_frame\":%llu,\"mean_ms\":%.6f,\"median_ms\":%.6f,\"p95_ms\":%.6f,\"fps\":%.6f,\"target_fps\":%d,\"mode\":\"%s\",\"requested_seconds\":%.6f,\"elapsed_seconds\":%.6f}\n",
+    fprintf(f,"{\"pid\":%d,\"frames\":%u,\"first_frame\":%llu,\"last_frame\":%llu,\"mean_ms\":%.6f,\"median_ms\":%.6f,\"p95_ms\":%.6f,\"fps\":%.6f,\"target_fps\":%d,\"mode\":\"%s\",\"requested_seconds\":%.6f,\"elapsed_seconds\":%.6f,\"p99_ms\":%.6f,\"max_ms\":%.6f,\"low_1pct_fps\":%.6f,\"frames_over_50ms\":%u,\"frames_over_100ms\":%u,\"frames_over_200ms\":%u,\"frame_times_ms\":[",
         getpid(),n,(unsigned long long)(n?ts.frame-n+1:0),(unsigned long long)(n?ts.frame:0),mean,median,p95,fps,test_session_target_fps(),
-        ts.duration_ns?"timed-benchmark":"frame-timing",ts.duration_ns/1e9,elapsed);
+        ts.duration_ns?"timed-benchmark":"frame-timing",ts.duration_ns/1e9,elapsed,p99,longest,low_1pct,over_50,over_100,over_200);
+    for(unsigned i=0;i<n;++i)fprintf(f,"%s%.6f",i?",":"",ts.intervals[i]);
+    fputs("]}\n",f);
     if(fclose(f)||rename(path,done))return false;
     fprintf(stderr,"[test-session] sample %u: %u frames %.2f fps, %.2f ms mean, %.2f ms p95\n",ts.sample_id,n,fps,mean,p95);
     return true;
@@ -220,13 +236,26 @@ uint64_t test_session_buttons(uint64_t frame) {
     if(!test_session_enabled())return 0;
     pthread_mutex_lock(&ts.lock);uint64_t b=frame<ts.button_until?ts.buttons:0;
     if(ts.auto_load&&ts.phase==LOADING&&frame>=120&&frame%60<2)b|=1;
+    if(ts.attack_jump&&ts.ready&&ts.duration_ns&&ts.phase==SAMPLING) {
+        // Switch Y: normal attack; X: jump. Short, separated presses avoid charge
+        // attacks and leave neutral input between actions, independent of FPS.
+        uint64_t at=(plat_now_ns()-ts.sample_started_ns)%8000000000ull;
+        if(at>=2000000000ull&&at<2120000000ull)b|=1ull<<3;
+        if(at>=6000000000ull&&at<6120000000ull)b|=1ull<<2;
+    }
     pthread_mutex_unlock(&ts.lock);return b;
 }
 int32_t test_session_camera_x(void) {
     if(!test_session_enabled())return 0;
     pthread_mutex_lock(&ts.lock);
-    int32_t x=ts.camera_turn&&ts.ready&&ts.duration_ns&&ts.phase==SAMPLING?16384:0;
+    int32_t x=ts.camera_turn&&ts.ready&&ts.duration_ns&&ts.phase==SAMPLING?32767:0;
     pthread_mutex_unlock(&ts.lock);return x;
+}
+int32_t test_session_move_y(void) {
+    if(!test_session_enabled())return 0;
+    pthread_mutex_lock(&ts.lock);
+    int32_t y=ts.move_forward&&ts.ready&&ts.duration_ns&&ts.phase==SAMPLING?32767:0;
+    pthread_mutex_unlock(&ts.lock);return y;
 }
 void test_session_file_read(const char* path) {
     if(!path || !test_session_enabled() || ts.save_slot<0)return;

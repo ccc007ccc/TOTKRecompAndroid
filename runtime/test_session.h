@@ -17,6 +17,7 @@ void test_session_poll(void); // SDL/event thread, also while the renderer is pa
 void test_session_frame(uint64_t frame, bool scene, void (*gpu_idle)(void));
 uint64_t test_session_buttons(uint64_t frame);
 int32_t test_session_camera_x(void); // optional constant turn, only during a timed sample
+int32_t test_session_move_y(void); // optional forward movement, only during a timed sample
 bool test_session_take_gpu_request(void);
 bool test_session_take_shot_request(void);
 void test_session_end(void); // release the renderer before guest teardown/reboot
@@ -34,6 +35,7 @@ static inline void test_session_poll(void) {}
 static inline void test_session_frame(uint64_t frame, bool scene, void (*gpu_idle)(void)) { (void)frame; (void)scene; (void)gpu_idle; }
 static inline uint64_t test_session_buttons(uint64_t frame) { (void)frame; return 0; }
 static inline int32_t test_session_camera_x(void) { return 0; }
+static inline int32_t test_session_move_y(void) { return 0; }
 static inline bool test_session_take_gpu_request(void) { return false; }
 static inline bool test_session_take_shot_request(void) { return false; }
 static inline void test_session_end(void) {}

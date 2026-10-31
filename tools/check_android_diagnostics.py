@@ -46,11 +46,17 @@ def main():
                 'LARECOMP_DUMP_VERTEX_OUTPUT', 'LARECOMP_AUDIO_DUMP', 'LARECOMP_TIMING_TRACE',
                 'LARECOMP_AUDIO_WAV', 'LARECOMP_AUDOUT_WAV', 'LARECOMP_VK_VALIDATION', 'LARECOMP_LAUNCHER_DELETE',
                 'LARECOMP_VK_WORKER', 'LARECOMP_VK_DESCRIPTOR_UPDATES',
-                'LARECOMP_VK_LOADOP_CLEAR', 'LARECOMP_LOG_PASS_CLEARS']
+                'LARECOMP_VK_LOADOP_CLEAR', 'LARECOMP_LOG_PASS_CLEARS', 'LARECOMP_TEX_LEGACY_HASH',
+                'LARECOMP_LOG_BUILD_WAITS', 'LARECOMP_BUILD_WAIT_FRAME',
+                'LARECOMP_LOG_RENDER_FRAMES', 'LARECOMP_RENDER_TRACE_FRAME',
+                'LARECOMP_KERNEL_WAIT_TRACE_FRAME', 'LARECOMP_C0_PRIORITY']
     for name in switches:
         present = name.encode() + b'\0' in data
         if present != enabled:
             raise ValueError(f'{name}: unexpected compiled diagnostic switch')
+    for marker in (b'[kernel-long-wait]', b'[kernel-core0-hold]'):
+        if (marker in data) != enabled:
+            raise ValueError('Unexpected compiled kernel wait trace logger')
     if any(n.startswith(('cw_vk', 'vk_command_worker_', 'vk_descriptor_update_')) for n in exported):
         raise ValueError('Internal Vulkan experiment interfaces must not be exported by libmain')
     print(json.dumps(dict(package=package, profile=profile, gamelib_id=identity, diagnostics=enabled,

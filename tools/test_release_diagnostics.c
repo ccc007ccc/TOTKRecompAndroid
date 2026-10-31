@@ -21,6 +21,7 @@ int main(void) {
     assert(!test_session_enabled() && !test_session_timed());
     assert(test_session_save_slot() == -1 && test_session_target_fps() == 0);
     assert(!test_session_buttons(120) && !test_session_camera_x());
+    assert(!test_session_move_y());
     assert(!test_session_take_gpu_request() && !test_session_take_shot_request());
     assert(!test_boot_target("Sequence/OnLoadGameSaveData.module.ainb"));
     test_session_frame(100, true, NULL);

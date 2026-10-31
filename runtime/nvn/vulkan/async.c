@@ -29,7 +29,7 @@
 #include "vk.h"
 #include "timing_trace.h"
 
-enum { REQ_EXEC, REQ_PRESENT, REQ_FENCE, REQ_MEMORY_WRITE, REQ_CALL, REQ_DRIVER_DRAIN };
+enum { REQ_EXEC, REQ_PRESENT, REQ_FENCE, REQ_MEMORY_WRITE, REQ_CALL, REQ_DRIVER_DRAIN, REQ_COUNT };
 typedef struct { int type; uint64_t a; void *p; uint64_t id, b; } Req;
 typedef struct { uint8_t *list; SubmitSnapshot *snapshot; } ExecCopy;
 
@@ -82,6 +82,53 @@ static uint64_t render_cpu_ns(void) {
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+#if TOTK_DIAGNOSTICS
+static _Atomic unsigned render_trace_epoch;
+void vk_async_trace_reset(void) {
+    atomic_fetch_add_explicit(&render_trace_epoch, 1, memory_order_relaxed);
+}
+
+typedef struct {
+    bool enabled;
+    uint64_t first_frame, previous_frame, previous_ns, previous_cpu, ns[REQ_COUNT];
+    unsigned requests, reports, epoch;
+} RenderFrameTrace;
+
+static void render_trace_request(RenderFrameTrace *trace, int type, uint64_t elapsed,
+                                 uint64_t now, uint64_t frame, uint64_t cpu) {
+    if (!trace->enabled) return;
+    unsigned epoch = atomic_load_explicit(&render_trace_epoch, memory_order_relaxed);
+    if (trace->epoch != epoch) {
+        // The render queue and presentation count can both survive a reboot.
+        *trace = (RenderFrameTrace){.enabled = true, .first_frame = trace->first_frame, .epoch = epoch};
+    }
+    trace->ns[type] += elapsed;
+    ++trace->requests;
+    if (type != REQ_PRESENT) return;
+    if (trace->previous_ns && frame > trace->previous_frame && frame >= trace->first_frame &&
+        now >= trace->previous_ns && now - trace->previous_ns > 50000000 && trace->reports < 128) {
+        uint64_t wall = now - trace->previous_ns, work = 0;
+        for (unsigned i = 0; i < REQ_COUNT; ++i) work += trace->ns[i];
+        // The remainder includes queue waits and bookkeeping, not just CPU idle.
+        uint64_t gap = wall > work ? wall - work : 0;
+        uint64_t cpu_delta = cpu >= trace->previous_cpu ? cpu - trace->previous_cpu : 0;
+        LOG("[render-frame] frame %llu: wall %.3f work %.3f gap %.3f cpu %.3f ms; "
+            "exec %.3f present %.3f fence %.3f write %.3f call %.3f driver %.3f; requests %u; ns %llu..%llu\n",
+            (unsigned long long)frame, wall / 1e6, work / 1e6, gap / 1e6, cpu_delta / 1e6,
+            trace->ns[REQ_EXEC] / 1e6, trace->ns[REQ_PRESENT] / 1e6, trace->ns[REQ_FENCE] / 1e6,
+            trace->ns[REQ_MEMORY_WRITE] / 1e6, trace->ns[REQ_CALL] / 1e6,
+            trace->ns[REQ_DRIVER_DRAIN] / 1e6, trace->requests,
+            (unsigned long long)trace->previous_ns,(unsigned long long)now);
+        ++trace->reports;
+    }
+    memset(trace->ns, 0, sizeof trace->ns);
+    trace->requests = 0;
+    trace->previous_ns = now;
+    trace->previous_cpu = cpu;
+    trace->previous_frame = frame;
+}
+#endif
+
 static void test_gpu_idle(void) { vkDeviceWaitIdle(g_vk.dev); }
 
 static void *render_main(void *arg) {
@@ -92,6 +139,12 @@ static void *render_main(void *arg) {
     // excluding descheduling/waits can understate the work seen by Android's frequency governor.
     const char *timing = getenv("LARECOMP_ADPF_CPU_TIME");
     bool cpu_timing = timing && atoi(timing) != 0;
+#if TOTK_DIAGNOSTICS
+    const char *trace_option = diag_getenv("LARECOMP_LOG_RENDER_FRAMES");
+    const char *trace_first = diag_getenv("LARECOMP_RENDER_TRACE_FRAME");
+    RenderFrameTrace trace = {.enabled = trace_option && atoi(trace_option) != 0,
+        .first_frame = trace_first ? strtoull(trace_first, NULL, 10) : 0};
+#endif
     pthread_mutex_lock(&q_lock);
     for (;;) {
         while (q_head == q_tail) pthread_cond_wait(&q_more, &q_lock);
@@ -121,9 +174,17 @@ static void *render_main(void *arg) {
 #ifdef TOTK_VK_COMMAND_WORKER
         else if (r.type == REQ_DRIVER_DRAIN) vk_command_worker_flush();
 #endif
-        uint64_t elapsed = plat_now_ns() - t0;
+        uint64_t completed = plat_now_ns(), elapsed = completed - t0;
         frame_cpu += cpu_timing ? render_cpu_ns() - cpu0 : elapsed;
         frame_work += elapsed;
+#if TOTK_DIAGNOSTICS
+        if (trace.enabled) {
+            extern uint64_t renderer_present_count(void);
+            bool present = r.type == REQ_PRESENT;
+            render_trace_request(&trace, r.type, elapsed, completed,
+                present ? renderer_present_count() : 0, present ? render_cpu_ns() : 0);
+        }
+#endif
         if (r.type == REQ_PRESENT) {
             __atomic_store_n(&last_frame_work, frame_work, __ATOMIC_RELAXED);
             extern void plat_render_work(uint64_t work_ns, uint64_t target_ns);

@@ -28,10 +28,16 @@ def status():
     ended = s['polls'] >= 3 and mode != 'timeout'
     return {'pid':4242,'phase':'ended' if ended else 'sampling' if s['polls']>=2 else 'loading',
         'ready':s['polls']>=2,'sample_id':1 if ended else 0,'save_slot':s['slot'],'target_fps':60,
-        'timed':mode!='legacy','camera_turn':s.get('camera_turn',False) and mode!='old-camera','requested_seconds':s['seconds'],'error':''}
+        'timed':mode!='legacy','camera_turn':s.get('camera_turn',False) and mode!='old-camera',
+        'camera_turn_x':(16384 if mode=='old-strength' else 32767) if s.get('camera_turn',False) else 0,
+        'attack_jump':s.get('attack_jump',False) and mode!='old-actions',
+        'move_forward':s.get('move_forward',False) and mode!='old-forward','requested_seconds':s['seconds'],'error':''}
 def result():
-    return {'pid':4242,'frames':int(s['seconds']*60),'fps':60,'mean_ms':1000/60,'p95_ms':1000/60,
+    value = {'pid':4242,'frames':int(s['seconds']*60),'fps':60,'mean_ms':1000/60,'p95_ms':1000/60,
         'target_fps':60,'mode':'timed-benchmark','elapsed_seconds':s['seconds'],'requested_seconds':s['seconds']}
+    if mode == 'tail-result':
+        value.update(low_1pct_fps=9.5,p99_ms=64.2,max_ms=509.8,frames_over_200ms=1,frame_times_ms=[16.0,64.2,12.5,509.8])
+    return value
 if a[0] == 'exec-out':
     assert a[1:3] == ['run-as',package]
     at = a.index('-C'); names = a[at+2:]
@@ -50,13 +56,23 @@ elif c[:2] == ['am','force-stop']:
     assert c[2] == package;s['running']=False
 elif c[:2] == ['am','start']:
     assert c[3] == package+'/com.botwrecompandroid.BOTWRecompAndroidActivity'
-    env=dict(v.split('=',1) for v in c[-1].split(','));s['seconds']=float(env['LARECOMP_TEST_DURATION_SECONDS'])
+    env={};name=None
+    for v in c[-1].split(','):
+        if '=' in v:
+            name,value=v.split('=',1);env[name]=value
+        else:
+            assert name=='LARECOMP_GPUPROF_AT';env[name]+=','+v
+    s['seconds']=float(env['LARECOMP_TEST_DURATION_SECONDS'])
     s['camera_turn']=env.get('LARECOMP_TEST_CAMERA_TURN')=='1'
+    s['move_forward']=env.get('LARECOMP_TEST_MOVE_FORWARD')=='1'
+    s['attack_jump']=env.get('LARECOMP_TEST_ATTACK_JUMP')=='1'
     s['slot']=int(env['LARECOMP_TEST_SAVE_SLOT']);s['running']=True;s['polls']=0
 elif c[0] == 'pidof':
     if s['running']: print('4242')
 elif c[:2] == ['dumpsys','battery']: print('  temperature: 300\n  status: 3')
 elif c[:2] == ['dumpsys','thermalservice']: print('Thermal Status: 0')
+elif c[:2] == ['test','-d']:
+    assert c[2] == '/storage/emulated/0/latest-underground-save', c
 elif c[:2] == ['run-as',package]:
     if c[2] == 'cp':
         assert c[3] == '/storage/emulated/0/settings-seed.ini', c
@@ -69,7 +85,7 @@ elif c[:2] == ['run-as',package]:
         assert c[3].endswith(('status.json','sample-0001.json')), c
         if c[3].endswith('status.json'):
             s['polls']+=1
-            if s['polls']>=3 and mode=='success':s['running']=False
+            if s['polls']>=3 and mode in ('success','tail-result'):s['running']=False
             print(json.dumps(status()))
         else: print(json.dumps(result()))
     else: assert c[2] in ('mkdir','rm','test'), c
@@ -100,7 +116,7 @@ class PhoneBenchmarkTests(unittest.TestCase):
         launches=[shlex_call[1] for shlex_call in calls if shlex_call[0]=='shell' and shlex_call[1].startswith('am start ')]
         self.assertEqual(len(launches),1)
         self.assertIn('LARECOMP_FPS=60',launches[0])
-        profiling=any(option in extra for option in ('--profile','--compare-ubo','--gpu-profile-frame','--timing-trace','--shader-stats'))
+        profiling=any(option in extra for option in ('--profile','--compare-ubo','--gpu-profile-frame','--gpu-profile-frames','--timing-trace','--shader-stats'))
         self.assertEqual('LARECOMP_VK_PROF=1' in launches[0],profiling)
         self.assertEqual('LARECOMP_LOG_PACE=1' in launches[0],profiling)
         if '--compare-ubo' in extra:
@@ -123,6 +139,34 @@ class PhoneBenchmarkTests(unittest.TestCase):
         self.assertEqual(sample['requested_seconds'],15)
         self.assertEqual(sample['target_fps'],60)
         self.assertEqual(sample['closed_by'],'runtime')
+        self.assertNotIn('1% low',proc.stdout)  # Older runtimes still report their available statistics.
+
+    def test_tail_statistics_are_preserved_and_printed(self):
+        proc=self.run_cli('tail-result')
+        self.assertEqual(proc.returncode,0,proc.stderr)
+        sample=json.loads(next((self.path/'reports').glob('benchmark-*/sample-0001.json')).read_text())
+        self.assertEqual(sample['low_1pct_fps'],9.5)
+        self.assertEqual(sample['frames_over_200ms'],1)
+        self.assertEqual(sample['frame_times_ms'],[16.0,64.2,12.5,509.8])
+        self.assertIn('1% low 9.50 FPS; p99 64.20 ms; max 509.80 ms; frames >200 ms: 1',proc.stdout)
+
+    def test_full_circle_attack_jump_route_is_recorded(self):
+        proc=self.run_cli('success','--camera-turn','--move-forward','--attack-jump')
+        self.assertEqual(proc.returncode,0,proc.stderr)
+        manifest=json.loads(next((self.path/'reports').glob('benchmark-*/launch.json')).read_text())
+        self.assertEqual(manifest['camera_turn_x'],32767)
+        self.assertTrue(manifest['attack_jump'] and manifest['state']['attack_jump'])
+        self.assertIn('LARECOMP_TEST_ATTACK_JUMP=1',manifest['env'])
+
+    def test_old_half_strength_runtime_is_rejected(self):
+        proc=self.run_cli('old-strength','--camera-turn')
+        self.assertNotEqual(proc.returncode,0)
+        self.assertIn('does not support the requested camera turn',proc.stderr)
+
+    def test_runtime_without_attack_jump_is_rejected(self):
+        proc=self.run_cli('old-actions','--attack-jump')
+        self.assertNotEqual(proc.returncode,0)
+        self.assertIn('does not support the requested attack/jump sequence',proc.stderr)
 
     def test_competing_controller_cannot_force_stop_the_active_test(self):
         folder=ROOT/'.work/phone-test-locks';folder.mkdir(parents=True,exist_ok=True)
@@ -179,6 +223,23 @@ class PhoneBenchmarkTests(unittest.TestCase):
         self.assertNotEqual(proc.returncode,0)
         self.assertIn('does not support the requested camera turn',proc.stderr)
 
+    def test_forward_and_camera_route_preserves_selected_save_and_settings(self):
+        seed='/storage/emulated/0/latest-underground-save'
+        proc=self.run_cli('success','--camera-turn','--move-forward','--save-seed',seed,'--save-slot','0')
+        self.assertEqual(proc.returncode,0,proc.stderr)
+        manifest=json.loads(next((self.path/'reports').glob('benchmark-*/launch.json')).read_text())
+        self.assertTrue(manifest['camera_turn'] and manifest['move_forward'])
+        self.assertEqual(manifest['save_seed'],seed)
+        self.assertEqual(manifest['save_slot'],0)
+        self.assertIn('LARECOMP_TEST_MOVE_FORWARD=1',manifest['env'])
+        self.assertIn('LARECOMP_TEST_CAMERA_TURN=1',manifest['env'])
+        self.assertNotIn('LARECOMP_NO_SCALE=1',manifest['env'])
+
+    def test_runtime_without_forward_route_is_refused(self):
+        proc=self.run_cli('old-forward','--camera-turn','--move-forward')
+        self.assertNotEqual(proc.returncode,0)
+        self.assertIn('does not support the requested forward movement',proc.stderr)
+
     def test_profiling_remains_a_single_automatic_run(self):
         proc=self.run_cli('success','--profile')
         self.assertEqual(proc.returncode,0,proc.stderr)
@@ -202,6 +263,25 @@ class PhoneBenchmarkTests(unittest.TestCase):
         self.assertEqual(manifest['gpu_profile_frame'],1150)
         self.assertIn('LARECOMP_GPUPROF_AT=1150',manifest['env'])
         self.assertIn('LARECOMP_TIMING_TRACE=1',manifest['env'])
+
+    def test_gpu_frame_list_preserves_following_launch_options(self):
+        proc=self.run_cli('success','--gpu-profile-frames','1230,1150,1230','--timing-trace','--camera-turn','--move-forward')
+        self.assertEqual(proc.returncode,0,proc.stderr)
+        manifest=json.loads(next((self.path/'reports').glob('benchmark-*/launch.json')).read_text())
+        self.assertEqual(manifest['gpu_profile_frames'],[1150,1230])
+        self.assertIsNone(manifest['gpu_profile_frame'])
+        self.assertTrue(manifest['profiling'] and manifest['timing_trace'])
+        self.assertIn('LARECOMP_GPUPROF_AT=1150,1230',manifest['env'])
+        self.assertEqual(manifest['state']['save_slot'],0)
+        self.assertTrue(manifest['state']['move_forward'])
+
+    def test_invalid_gpu_frame_lists_are_rejected_before_adb(self):
+        for value in ('','0','1000001','1,','1,-2','1,abc',','.join(['1']*65)):
+            proc=subprocess.run([sys.executable,str(ROOT/'tools/phone_test_session.py'),'--serial','phone-benchmark-test',
+                'benchmark','--gpu-profile-frames',value],capture_output=True,text=True,timeout=5)
+            self.assertNotEqual(proc.returncode,0,value)
+            self.assertIn('gpu-profile-frames needs',proc.stderr)
+        self.assertFalse((self.path/'calls.jsonl').exists())
 
     def test_gpu_profile_frame_rejected_before_touching_device(self):
         for frame in ('0','-1','1000001'):

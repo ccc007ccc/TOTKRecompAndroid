@@ -670,7 +670,7 @@ VkCommandBuffer vk_cmd(void) {
             if (q->pool) vkCmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_NONE, q->pool, CQ_MAX);  // (the start)
 #endif
         }
-        gp_mark(s->main, "(submission start; includes GPU idle before it)");
+        gp_mark(s->main, "(submission start seq %llu; after uploads, may follow GPU idle)", (unsigned long long)s->seq);
         if (prof && prof_qp) {
             vkCmdResetQueryPool(s->main, prof_qp, (uint32_t)cur_sub * 2, 2);
             vkCmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_NONE, prof_qp, (uint32_t)cur_sub * 2);
@@ -703,7 +703,7 @@ static void ring_retire(void);
 void vc_flush(void);
 
 // ---- LARECOMP_GPUPROF_AT=<frame>: GPU time per pass / dispatch / copy of that frame, logged as "[gpuprof]".
-// A timestamp (ALL_COMMANDS: after everything before it) at each mark; a row = the work since the previous mark.
+// A timestamp (ALL_COMMANDS: after everything before it) at each mark; a row covers work until the next mark.
 bool g_gpuprof_frame;
 static VkQueryPool gp_qp;
 static int gp_n;
@@ -793,6 +793,7 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     }
 #endif
     if (s->ts) vkCmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, prof_qp, (uint32_t)cur_sub * 2 + 1);
+    gp_mark(s->main, "(submission end seq %llu; upload-cb %d)", (unsigned long long)s->seq, s->upload_begun);
     VK_CHECK(vkEndCommandBuffer(s->main));
     cbs[n++] = (VkCommandBufferSubmitInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = s->main};
     VkSemaphoreSubmitInfo sig[2] = {{.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = g_vk.timeline,
@@ -1289,14 +1290,41 @@ void vk_shader_jobs_drain(void) {
 // empty: no ground on the plateau). Draws into arrays, cubemaps, 3D textures and mipmapped targets wait for their
 // shader and pipeline instead (LARECOMP_WAIT_PERSISTENT=0: skip them like the rest).
 static _Atomic uint64_t stat_build_wait_ns;
-static void wait_built(_Atomic int *state) {
-    if (atomic_load(state)) return;
+uint64_t renderer_present_count(void);
+static uint64_t wait_built(_Atomic int *state) {
+    if (atomic_load(state)) return 0;
     uint64_t t0 = plat_now_ns();
     pthread_mutex_lock(&built_lock);
     while (!atomic_load(state)) pthread_cond_wait(&built_cond, &built_lock);
     pthread_mutex_unlock(&built_lock);
-    stat_build_wait_ns += plat_now_ns() - t0;
+    uint64_t elapsed = plat_now_ns() - t0;
+    stat_build_wait_ns += elapsed;
+    return elapsed;
 }
+#if TOTK_DIAGNOSTICS
+static unsigned build_wait_reports;
+static void trace_build_wait(uint64_t elapsed, const char *kind, const uint64_t code[2], const uint64_t source[2]) {
+    if (elapsed < 20000000 || build_wait_reports >= 128) return;
+    static int enabled = -1;
+    static uint64_t first_frame;
+    if (enabled < 0) {
+        enabled = diag_getenv("LARECOMP_LOG_BUILD_WAITS") != NULL;
+        const char *value = diag_getenv("LARECOMP_BUILD_WAIT_FRAME");
+        first_frame = value ? strtoull(value, NULL, 10) : 0;
+    }
+    uint64_t presented = renderer_present_count();
+    if (!enabled || presented < first_frame) return;
+    ++build_wait_reports;
+    // State publication has completed; source keys can now be read safely.
+    // This is the caller's blocked time, including queueing and dependencies.
+    LOG("[build-wait] presented=%llu kind=%s waited=%.3fms code=%llx,%llx source=%016llx,%016llx\n",
+        (unsigned long long)presented, kind, (double)elapsed / 1e6,
+        (unsigned long long)code[0], (unsigned long long)code[1],
+        (unsigned long long)source[0], (unsigned long long)source[1]);
+}
+#else
+#define trace_build_wait(elapsed, kind, code, source) ((void)(elapsed))
+#endif
 static bool async_skip_draws(void) {
     // Diagnostic comparison with the previous behavior, never the default.
     static int enabled = -1;
@@ -1534,7 +1562,6 @@ bool renderer_texture_first_write(NvnTexture *t);
 bool renderer_texture_level_fresh(NvnTexture *t);
 bool renderer_texture_frame_fresh(NvnTexture *t);
 void renderer_texture_mark_presented(NvnTexture *t);
-uint64_t renderer_present_count(void);
 void renderer_save_texture_tex(TexBackend *b, const char *path);
 static float pass_sx = 1, pass_sy = 1;
 static float vp_sx = 1, vp_sy = 1, vp_ox = 0, vp_oy = 0;
@@ -4802,6 +4829,13 @@ static void shader_programs_destroy(void);
 // In-place reboot: submission, translation, compilation and GPU work have all
 // drained in backend_reset. Release pipelines before their programs/layouts.
 void vk_exec_reset(void) {
+#if TOTK_DIAGNOSTICS
+    build_wait_reports = 0;
+#ifdef __ANDROID__
+    extern void vk_async_trace_reset(void);
+    vk_async_trace_reset();
+#endif
+#endif
 #ifdef __ANDROID__
     vk_shared_memory_reset();
     vk_buffer_copy_reset();
@@ -5368,6 +5402,9 @@ static void copy_stage_textures(int stage, ShaderInfo *si) {
 #endif
 
 static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
+    static int detailed_timestamps=-1;
+    if(detailed_timestamps<0)detailed_timestamps=diag_getenv("LARECOMP_GPUPROF_DISPATCHES")!=NULL;
+    bool detail=g_gpuprof_frame && detailed_timestamps;
     if(vk_diag_active())vk_diag_log("dispatch group=%u groups=%u,%u,%u shader=%llx\n",vk_diag_group(),gx,gy,gz,
         st.program?(unsigned long long)st.program->stages[5].code_addr:0ull);
     snap_reason = "compute"; snapshots_invalidate(NULL);
@@ -5386,7 +5423,8 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     }
     CsProg *cp = compute_program(st.program);
     if(cp && !async_skip_draws()) {
-        wait_built(&cp->p.state);
+        uint64_t waited = wait_built(&cp->p.state);
+        trace_build_wait(waited, "compute", ((const uint64_t[2]){cp->code_addr, 0}), cp->p.source_keys);
         if(atomic_load(&cp->p.state)==2)FATAL("Compute program or pipeline preparation failed (code %llx).\n",(unsigned long long)cp->code_addr);
     }
     if (!cp || atomic_load(&cp->p.state) != 1) {
@@ -5462,16 +5500,21 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     else
 #endif
     if (cp->si->uses_gmem_map) gfast_prepare(cb);
+    if(detail)gp_mark(cb,"dispatch descriptors cs %llx",(unsigned long long)cp->code_addr);
     VkDescriptorSet ds = stage_set(&cp->p, cp->p.set_layout[0], 0, 5, cp->si, NULL, NULL, gx, gy, gz, NULL, NULL, NULL);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p.layout, 0, 1, &ds, 0, NULL);
+    if(detail)gp_mark(cb,"dispatch execute cs %llx key %016llx map %d store %d",(unsigned long long)cp->code_addr,
+        (unsigned long long)cp->p.source_keys[0],cp->si->uses_gmem_map,cp->si->uses_gmem_store);
     vkCmdDispatch(cb, gx, gy, gz);
+    if(detail)gp_mark(cb,"dispatch publish cs %llx",(unsigned long long)cp->code_addr);
     for(int i=0;i<cp->p.nbinds;++i)if(cp->p.binds[i].type==VK_DESCRIPTOR_TYPE_STORAGE_IMAGE){
         ShaderTexture *image=&cp->si->tex[cp->p.binds[i].binding-32];
         if(image->image_write){NvnTexture *t=shader_texture_object(5,image);if(t)renderer_mark_gpu_owned(t);}
     }
     if (cp->si->uses_gmem_map && cp->si->uses_gmem_store) gfast_finish(cb);
     if (cp->si->uses_gmem_store) vc_mark_sbufs(5);
+    if(detail)gp_mark(cb,"after dispatch cs %llx",(unsigned long long)cp->code_addr);
     stat_dispatches++;
 }
 
@@ -5594,7 +5637,10 @@ static void draw_(CmdRec *r, bool indexed) {
         }
         keep = kkeep;
     }
-    if (pr && keep) wait_built(&pr->state);
+    if (pr && keep) {
+        uint64_t waited = wait_built(&pr->state);
+        trace_build_wait(waited, "graphics-program", pr->code, pr->source_keys);
+    }
     if (pr && keep && atomic_load(&pr->state) == 2)
         FATAL("Graphics program preparation failed (vs %llx, fs %llx).\n", (unsigned long long)pr->code[0], (unsigned long long)pr->code[1]);
     if (!pr || atomic_load(&pr->state) != 1) {
@@ -6006,7 +6052,10 @@ static void draw_(CmdRec *r, bool indexed) {
         last_pipeline = pp;
         pipeline_dirty = false;
     }
-    if (keep) wait_built(&pp->state);
+    if (keep) {
+        uint64_t waited = wait_built(&pp->state);
+        trace_build_wait(waited, "graphics-pipeline", pr->code, pr->source_keys);
+    }
     if (keep && atomic_load(&pp->state) == 2)
         FATAL("Graphics pipeline creation failed (vs %llx, fs %llx).\n", (unsigned long long)pr->code[0], (unsigned long long)pr->code[1]);
     if (atomic_load(&pp->state) != 1) {

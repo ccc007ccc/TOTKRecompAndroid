@@ -122,7 +122,42 @@ static void held_call(void *arg) {
     pthread_mutex_unlock(&gate_lock);
     vk_async_call(nested_call, arg); // render-thread reentry must run in place
 }
+static void test_render_trace(void) {
+    FILE *log = tmpfile(); assert(log);
+    int original = dup(STDERR_FILENO); assert(original >= 0);
+    assert(dup2(fileno(log), STDERR_FILENO) == STDERR_FILENO);
+    RenderFrameTrace trace = {.enabled = true, .first_frame = 2};
+    render_trace_request(&trace, REQ_PRESENT, 2000000, 1000000000, 1, 5000000);
+    assert(!trace.reports && !trace.requests);
+    render_trace_request(&trace, REQ_EXEC, 3000000, 0, 0, 0);
+    render_trace_request(&trace, REQ_CALL, 5000000, 0, 0, 0);
+    render_trace_request(&trace, REQ_PRESENT, 4000000, 1080000000, 2, 12000000);
+    assert(trace.reports == 1 && !trace.requests);
+    for (unsigned i = 0; i < REQ_COUNT; ++i) assert(!trace.ns[i]);
+    fflush(stderr); rewind(log);
+    char line[1024]; assert(fgets(line, sizeof line, log));
+    assert(strstr(line, "frame 2: wall 80.000 work 12.000 gap 68.000 cpu 7.000 ms"));
+    assert(strstr(line, "exec 3.000 present 4.000 fence 0.000 write 0.000 call 5.000 driver 0.000; requests 3"));
+    assert(strstr(line, "; ns 1000000000..1080000000"));
+    assert(fgetc(log) == EOF);
+    // The first-frame filter still advances the observation boundary.
+    trace.first_frame = 4;
+    render_trace_request(&trace, REQ_PRESENT, 1000000, 1180000000, 3, 15000000);
+    assert(trace.reports == 1 && trace.previous_frame == 3);
+    trace.reports = 128;
+    render_trace_request(&trace, REQ_PRESENT, 1000000, 1280000000, 4, 16000000);
+    assert(trace.reports == 128 && trace.previous_ns == 1280000000);
+    vk_async_trace_reset(); // real backend reset, with a continuing frame counter
+    render_trace_request(&trace, REQ_PRESENT, 1000000, 1380000000, 5, 17000000);
+    assert(trace.reports == 0 && trace.previous_frame == 5);
+    trace.enabled = false;
+    render_trace_request(&trace, REQ_EXEC, 1000000, 0, 0, 0);
+    assert(!trace.requests && !trace.ns[REQ_EXEC]);
+    assert(dup2(original, STDERR_FILENO) == STDERR_FILENO); close(original); fclose(log);
+    puts("PASS: render-frame request attribution, completed frame number, bounded logs, filter, reboot and disabled tracing");
+}
 int main(void) {
+    test_render_trace();
 #ifdef TOTK_VK_COMMAND_WORKER
     vkDeviceWaitIdle = idle; vkCmdDraw = driver_draw; vkCmdBindPipeline = driver_pipeline;
     vkCmdBindDescriptorSets = driver_bind; vkEndCommandBuffer = driver_end;

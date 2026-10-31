@@ -51,8 +51,12 @@ def main():
     benchmark.add_argument('--timeout',type=float,help='Overall startup and measurement timeout')
     benchmark.add_argument('--profile',action='store_true',help='Record CPU/GPU timing and constant-buffer copy counters during the automatic run')
     benchmark.add_argument('--shader-stats',action='store_true',help='Diagnostic only: collect driver instruction/register/spill statistics; enables profiling and changes pipeline creation flags')
-    benchmark.add_argument('--camera-turn',action='store_true',help='Turn right at half stick during the measured interval; use a runtime supporting this route')
-    benchmark.add_argument('--gpu-profile-frame',type=int,help='Diagnostic only: timestamp each GPU pass in this absolute frame; enables profiling')
+    benchmark.add_argument('--camera-turn',action='store_true',help='Turn right at full stick during the measured interval; requires a runtime reporting camera_turn_x=32767')
+    benchmark.add_argument('--attack-jump',action='store_true',help='During measurement, press Y at 2s and X at 6s of each 8s cycle for 120ms (normal attack/jump with default game controls)')
+    benchmark.add_argument('--move-forward',action='store_true',help='Hold the left stick fully forward during measurement; combine with --camera-turn for a circling route')
+    gpu_frames=benchmark.add_mutually_exclusive_group()
+    gpu_frames.add_argument('--gpu-profile-frame',type=int,help='Diagnostic only: timestamp each GPU pass in this absolute frame; enables profiling')
+    gpu_frames.add_argument('--gpu-profile-frames',help='Diagnostic only: comma-separated absolute frames, at most 64; enables profiling')
     benchmark.add_argument('--timing-trace',action='store_true',help='Diagnostic only: trace GPU counters and queue waits; enables profiling')
     benchmark.add_argument('--compare-ubo',type=int,metavar='FRAMES',help='Diagnostic only: alternate copied/shared uniform buffers every 30..600 frames; enables profiling')
     start.add_argument('--diagnostic-present-interval',type=int,choices=[1,2,3],
@@ -88,6 +92,12 @@ def main():
         if not math.isfinite(args.seconds) or not 1<=args.seconds<=60:ap.error('seconds must be 1..60')
         if args.gpu_profile_frame is not None:
             if not 1<=args.gpu_profile_frame<=1000000:ap.error('gpu-profile-frame must be 1..1000000')
+            args.profile=True
+        if args.gpu_profile_frames is not None:
+            values=args.gpu_profile_frames.split(',')
+            if not 1<=len(values)<=64 or any(not re.fullmatch(r'[0-9]{1,7}',v) or not 1<=int(v)<=1000000 for v in values):
+                ap.error('gpu-profile-frames needs 1..64 frame numbers in 1..1000000')
+            args.gpu_profile_frames=sorted(set(map(int,values)))
             args.profile=True
         if args.timing_trace or args.shader_stats:args.profile=True
         if args.compare_ubo is not None:
@@ -176,10 +186,13 @@ def main():
         if timed:
             env+=['LARECOMP_TEST_DURATION_SECONDS='+str(args.seconds),'LARECOMP_FPS=60','LARECOMP_NO_USER_INPUT=1']
             if args.camera_turn:env+=['LARECOMP_TEST_CAMERA_TURN=1']
+            if args.move_forward:env+=['LARECOMP_TEST_MOVE_FORWARD=1']
+            if args.attack_jump:env+=['LARECOMP_TEST_ATTACK_JUMP=1']
         else:env+=['LARECOMP_VK_PROF=1','LARECOMP_LOG_CBUF_BYTES=1','LARECOMP_TEXTURE_TRACE=1','LARECOMP_LOG_FRAMEPACE=120']
         if timed and args.profile:
             env+=['LARECOMP_VK_PROF=1','LARECOMP_LOG_CBUF_BYTES=1','LARECOMP_LOG_PACE=1']
         if timed and args.gpu_profile_frame is not None:env+=['LARECOMP_GPUPROF_AT='+str(args.gpu_profile_frame)]
+        if timed and args.gpu_profile_frames is not None:env+=['LARECOMP_GPUPROF_AT='+','.join(map(str,args.gpu_profile_frames))]
         if timed and args.timing_trace:env+=['LARECOMP_TIMING_TRACE=1']
         if timed and args.shader_stats:env+=['LARECOMP_SHADER_STATS=1']
         if timed and args.compare_ubo is not None:
@@ -225,6 +238,7 @@ def main():
                   'installed_from':str(args.apk.resolve()) if args.apk is not None else None,
                   'game_library':args.game_library,'game_library_sha256':library_sha,
                   'settings_seed':args.settings_seed,'settings_copy':settings_copy,'settings_sha256':settings_sha,
+                  'save_seed':args.save_seed,'save_slot':args.save_slot,
                   'shader_warm':args.shader_warm,'pipeline_warm':args.pipeline_warm,
                   'submit_snapshot':args.submit_snapshot,
                   'shared_alias':args.shared_alias,
@@ -234,10 +248,14 @@ def main():
                   'game_dynres':args.game_dynres,
                   'texture_scaling':args.texture_scaling,
                   'camera_turn':args.camera_turn if timed else False,
+                  'camera_turn_x':32767 if timed and args.camera_turn else 0,
+                  'move_forward':args.move_forward if timed else False,
+                  'attack_jump':args.attack_jump if timed else False,
                   'render_split_us':args.render_split_us,
                   'diagnostic_env':args.diagnostic_env,
                   'profiling':args.profile if timed else True,
                   'gpu_profile_frame':args.gpu_profile_frame if timed else None,
+                  'gpu_profile_frames':args.gpu_profile_frames if timed else None,
                   'timing_trace':args.timing_trace if timed else False,
                   'shader_stats':args.shader_stats if timed else False,
                   'ubo_ab_frames':args.compare_ubo if timed else None,
@@ -265,8 +283,12 @@ def main():
                         continue
                     if not state.get('timed') or state.get('target_fps')!=60 or state.get('save_slot')!=args.save_slot:
                         raise RuntimeError('Installed APK does not support this timed 60 FPS benchmark; rebuild/install it')
-                    if args.camera_turn and state.get('camera_turn') is not True:
+                    if args.camera_turn and (state.get('camera_turn') is not True or state.get('camera_turn_x')!=32767):
                         raise RuntimeError('Installed APK does not support the requested camera turn; rebuild/install it')
+                    if args.move_forward and state.get('move_forward') is not True:
+                        raise RuntimeError('Installed APK does not support the requested forward movement; rebuild/install it')
+                    if args.attack_jump and state.get('attack_jump') is not True:
+                        raise RuntimeError('Installed APK does not support the requested attack/jump sequence; rebuild/install it')
                     if state.get('error'):raise RuntimeError(state['error'])
                     if state['phase']=='ended':
                         if not state.get('ready') or state.get('sample_id')!=1:
@@ -307,6 +329,8 @@ def main():
             result['closed_by']=closed_by
             (args.output/'sample-0001.json').write_text(json.dumps(result,indent=2)+'\n')
             print(f"{result['fps']:.2f} FPS; {result['elapsed_seconds']:.2f}s; p95 {result['p95_ms']:.2f} ms. Game closed.")
+            if 'low_1pct_fps' in result:
+                print(f"1% low {result['low_1pct_fps']:.2f} FPS; p99 {result['p99_ms']:.2f} ms; max {result['max_ms']:.2f} ms; frames >200 ms: {result['frames_over_200ms']}")
             print(args.output)
             return
         print(shell('am','start','-n',package+'/com.botwrecompandroid.BOTWRecompAndroidActivity','--es','env',','.join(env)).stdout.strip())
