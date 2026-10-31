@@ -5,8 +5,11 @@
 #include "shader_warm_requests.hpp"
 #include "shader_prepare_queue.hpp"
 #include "shader_artifact.h"
+#include "shader_artifact_storage.hpp"
+#include "../../diagnostics_build.h"
 #include "pipeline_seed.h"
 #include "shader_cache_receipt.hpp"
+#include <algorithm>
 #include <chrono>
 #include <cerrno>
 #include <iomanip>
@@ -34,9 +37,14 @@ std::string warm_identity(const char* game,const char* manifest,bool title,const
         CC_SHA256_Update(&hash,buffer,static_cast<CC_LONG>(input.gcount()));
     }
     if(!input.eof())return {};
-    for(const auto& request:recent) {
-        auto bytes=shader_warm::encode(request);CC_SHA256_Update(&hash,bytes.data(),bytes.size());
-    }
+    // A receipt certifies completed coverage, independent of which already
+    // covered state was used most recently. Keep execution order unchanged;
+    // canonicalize only the identity of the bounded recent set.
+    std::vector<shader_archive::Bytes> covered;
+    for(const auto& request:recent)covered.push_back(shader_warm::encode(request));
+    std::sort(covered.begin(),covered.end());
+    covered.erase(std::unique(covered.begin(),covered.end()),covered.end());
+    for(const auto& bytes:covered)CC_SHA256_Update(&hash,bytes.data(),bytes.size());
     shader_warm::RawKey digest;CC_SHA256_Final(digest.data(),&hash);
     vk_shader_translate_begin();auto profile=vk_shader_prepare_profile();vk_shader_translate_end();
     if(captured_profile)*captured_profile=profile;
@@ -63,6 +71,21 @@ bool shader_warm::prepare(const char* game,const char* manifest,bool title_only,
     if(!guard.owns_lock()){snprintf(why,capacity,"graphics preparation is already running");return false;}
     FILE* log=nullptr;
     size_t cached_requests=0,cached_masks=0,translations=0;
+    const bool trace_reuse=diag_getenv("LARECOMP_LOG_SHADER_WARM_REUSE")!=nullptr;
+    size_t request_misses=0,artifact_misses=0,artifact_miss_cached=0,source_misses=0,metadata_deferred=0;
+#if TOTK_DIAGNOSTICS
+    const auto storage_before=shader_artifact_storage::stats();
+#endif
+    auto report_reuse=[&] {
+#if TOTK_DIAGNOSTICS
+        if(!trace_reuse)return;
+        const auto storage=shader_artifact_storage::stats();
+        fprintf(stderr,"[shader-warm-reuse] title=%d background=%d request_miss=%zu artifact_miss=%zu artifact_miss_spirv_cached=%zu source_miss=%zu stored=%llu failed=%llu metadata_deferred=%zu publication_deferred=%llu\n",
+                title_only,options.background,request_misses,artifact_misses,artifact_miss_cached,source_misses,
+                (unsigned long long)(storage.stored-storage_before.stored),(unsigned long long)(storage.failed-storage_before.failed),
+                metadata_deferred,(unsigned long long)(storage.deferred-storage_before.deferred));
+#endif
+    };
     auto close_log=[&]{if(log==stderr)fflush(log);else if(log)fclose(log);log=nullptr;};
     auto checkpoint=[&]{if(options.checkpoint)options.checkpoint();};
     try {
@@ -138,18 +161,31 @@ bool shader_warm::prepare(const char* game,const char* manifest,bool title_only,
                 if(progress)progress(0.2,"Preparing graphics used by the warm-up list...");
             }
         };
+        bool require_metadata=true;
         Reuse reuse;
         reuse.source=[&](unsigned record,const ShaderKey& key) {
             checkpoint();require_profile(profile);
             const auto& shader=catalog.records.at(record).shader;RequestCache::Result cached;
-            if(!request_cache.get(request_cache.key(shader,key),cached) || cached.stage!=shader.stage)return false;
+            bool deferred=false;
+            if(!request_cache.get(request_cache.key(shader,key),cached) || cached.stage!=shader.stage){++request_misses;return false;}
             if(!getenv("LARECOMP_SHADER_ARTIFACTS") || atoi(getenv("LARECOMP_SHADER_ARTIFACTS"))) {
                 auto raw=raw_key(shader);VkShaderArtifact artifact{};
                 vk_shader_translate_begin();auto artifact_profile=vk_shader_artifact_profile(vk_shader_prepare_profile());vk_shader_translate_end();
-                if(!vk_shader_artifact_load(raw.data(),&key,artifact_profile,shader.stage,&artifact))return false;
+                if(!vk_shader_artifact_load(raw.data(),&key,artifact_profile,shader.stage,&artifact)) {
+                    ++artifact_misses;
+                    if(trace_reuse && vk_shader_cached(cached.source))++artifact_miss_cached;
+                    // A complete request mapping can still prepare its exact
+                    // SPIR-V when optional metadata will not fit. Do not keep
+                    // translating the shared list only to evict it again.
+                    // Title/recent entries repair metadata normally; gameplay
+                    // still requires a real validated ShaderInfo on every load.
+                    if(require_metadata || !shader_artifact_storage::at_capacity() || vk_shader_artifact_source_required())return false;
+                    deferred=true;
+                }
                 vk_shader_artifact_free(&artifact);
             }
-            if(!verified.count(cached.source) && !vk_shader_cached(cached.source))return false;
+            if(!verified.count(cached.source) && !vk_shader_cached(cached.source)){++source_misses;return false;}
+            if(deferred)++metadata_deferred;
             seed_compute(record,cached.source);
             verified.insert(cached.source);keys.insert(cached.source);++cached_requests;report_queued();return true;
         };
@@ -158,7 +194,7 @@ bool shader_warm::prepare(const char* game,const char* manifest,bool title_only,
             if(!request_cache.get(request_cache.key(catalog.records.at(record).shader,key),cached) || cached.stage!=STAGE_VERTEX)return false;
             mask=cached.outputs;++cached_masks;return true;
         };
-        auto stats=shader_warm::plan(catalog,selection,config,[&](const shader_archive::Shader& shader,const ShaderKey& key){
+        auto translate=[&](const shader_archive::Shader& shader,const ShaderKey& key){
             checkpoint();
             vk_shader_translate_begin();
             if(vk_shader_prepare_profile()!=profile) {
@@ -175,12 +211,30 @@ bool shader_warm::prepare(const char* game,const char* manifest,bool title_only,
             ++translations;
             if(info && info->msl)request_cache.put(request_cache.key(shader,key),{vk_shader_prepare_key(info->msl,info->stage),info->out_mask,static_cast<uint8_t>(info->stage)});
             return info;
-        },[&](unsigned record,const ShaderKey&,const ShaderInfo& info){
+        };
+        auto emit=[&](unsigned record,const ShaderKey&,const ShaderInfo& info){
             keys.insert(vk_shader_prepare_key(info.msl,info.stage));
             seed_compute(record,vk_shader_prepare_key(info.msl,info.stage));
             queue.submit(info.msl,info.stage,"warm-"+std::to_string(record));
             report_queued();
-        },reuse);
+        };
+        shader_artifact_storage::BackgroundScope foreground(false);
+        const char* retain=diag_getenv("LARECOMP_SHADER_WARM_RETAIN");
+        const bool background_list=options.background && !title_only && (!retain || atoi(retain)!=0);
+        if(background_list) {
+            // Recent states and current compute inputs retain metadata even
+            // when the shared list is larger than the optional file budget.
+            auto priority=recent;priority.insert(priority.end(),compute.begin(),compute.end());
+            auto selected=shader_warm::select(catalog,priority,false);
+            shader_warm::require(selected.mismatched==0,"recent shader stage mismatch");
+            shader_warm::plan(catalog,selected,config,translate,emit,reuse);
+        }
+        require_metadata=!background_list;
+        shader_warm::Stats stats;
+        {
+            shader_artifact_storage::BackgroundScope background(background_list);
+            stats=shader_warm::plan(catalog,selection,config,translate,emit,reuse);
+        }
         if(progress)progress(0.8,"Preparing graphics used by the warm-up list...");
         queue.finish();
         vk_shader_artifact_flush();
@@ -206,12 +260,14 @@ bool shader_warm::prepare(const char* game,const char* manifest,bool title_only,
         fprintf(stderr,"[shader-warm] prepared title=%d requests=%zu source_requests=%zu modules=%zu seconds=%.3f\n",
                 title_only,stats.requests,stats.sources,keys.size(),seconds);
         fprintf(stderr,"[shader-warm] request-cache title=%d reused=%zu masks=%zu translated=%zu\n",title_only,cached_requests,cached_masks,translations);
+        report_reuse();
         // No .shaders-ready marker: a warm list is deliberately not exhaustive.
         if(progress)progress(1,"Graphics warm-up complete.");return true;
     } catch(const std::exception& error) {
         snprintf(why,capacity,"%s",error.what());
         if(log){fprintf(log,"request_cache reused=%zu masks=%zu translated=%zu\nfailed %s\n",cached_requests,cached_masks,translations,error.what());close_log();}
         fprintf(stderr,"[shader-warm] interrupted request-cache reused=%zu masks=%zu translated=%zu\n",cached_requests,cached_masks,translations);
+        report_reuse();
         return false;
     }
 }

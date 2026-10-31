@@ -19,7 +19,7 @@ with tempfile.TemporaryDirectory(prefix='totk-shader-identities-') as tmp:
         subprocess.run(['cmake','-P',str(script)],check=True,capture_output=True)
         return (fixture/'ids').read_text().splitlines()
     baseline=identities();assert len(baseline)==4 and all(re.fullmatch('[a-f0-9]{64}',x) for x in baseline)
-    for name in ['exec.c','compile_budget.c','shader_module_cache.c','shader_artifact_storage.cpp','descriptor_update.c','vk_command_worker.c','pass_clear.c','pipeline_warm.c']:
+    for name in ['exec.c','compile_budget.c','shader_module_cache.c','shader_artifact_storage.cpp','shader_artifact_storage.hpp','shader_warm.cpp','descriptor_update.c','vk_command_worker.c','pass_clear.c','pipeline_warm.c']:
         target=fixture/'runtime/nvn/vulkan'/name;target.write_text('unrelated renderer or scheduling change\n')
         assert identities()==baseline,name
     cases=[('runtime/nvn/maxwell/translate.c',{0,1}),('runtime/nvn/maxwell/shader.h',{0,1}),

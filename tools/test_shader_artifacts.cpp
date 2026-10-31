@@ -1,6 +1,7 @@
 // Independent metadata values, complete identities, strict module loading,
 // malformed files and concurrent publication. No GPU or phone needed.
 #include "../runtime/nvn/vulkan/shader_artifact.h"
+#include "../runtime/nvn/vulkan/shader_artifact_storage.hpp"
 #include "../runtime/nvn/vulkan/shader_prepare.h"
 #include "../runtime/nvn/vulkan/shader_warm_manifest.hpp"
 #include "../runtime/diagnostics_build.h"
@@ -134,5 +135,40 @@ int main(int argc,char** argv){
     assert(vk_shader_artifact_load(last_raw.data(),&key,profile,1,&a));vk_shader_artifact_free(&a);
     unsigned files=0;for(const auto& entry:std::filesystem::directory_iterator(path.parent_path()))if(entry.path().extension()==".bin")++files;
     assert(files==16);
+    assert(shader_artifact_storage::at_capacity());
+    std::map<std::filesystem::path,Bytes> retained;
+    for(const auto& entry:std::filesystem::directory_iterator(path.parent_path()))retained.emplace(entry.path(),read(entry.path()));
+    auto deferred=shader_artifact_storage::stats().deferred;
+    {
+        shader_artifact_storage::BackgroundScope background(true);
+        for(unsigned i=0;i<32;++i) {
+            auto cold=expected;cold[0]=uint8_t(i+40);cold[1]^=0x40;
+            assert(vk_shader_artifact_store(cold.data(),&key,profile,&info));vk_shader_artifact_flush();
+            assert(!vk_shader_artifact_load(cold.data(),&key,profile,1,&a));
+        }
+        assert(shader_artifact_storage::stats().deferred==deferred+32);
+        for(const auto& entry:retained)assert(read(entry.first)==entry.second);
+        // Existing records can still be repaired while full.
+        info.num_insts=72;
+        assert(vk_shader_artifact_store(last_raw.data(),&key,profile,&info));vk_shader_artifact_flush();
+        assert(vk_shader_artifact_load(last_raw.data(),&key,profile,1,&a) && a.info->num_insts==72);vk_shader_artifact_free(&a);
+        auto priority=expected;priority[0]=90;
+        try {
+            shader_artifact_storage::BackgroundScope foreground(false);
+            assert(vk_shader_artifact_store(priority.data(),&key,profile,&info));vk_shader_artifact_flush();
+            throw 7;
+        }catch(int){}
+        assert(vk_shader_artifact_load(priority.data(),&key,profile,1,&a));vk_shader_artifact_free(&a);
+        auto cold=expected;cold[0]=91;
+        assert(vk_shader_artifact_store(cold.data(),&key,profile,&info));vk_shader_artifact_flush();
+        assert(!vk_shader_artifact_load(cold.data(),&key,profile,1,&a));
+        // The producer role is TLS, not an accidental global mode.
+        std::thread foreground([&]{assert(vk_shader_artifact_store(cold.data(),&key,profile,&info));});foreground.join();vk_shader_artifact_flush();
+        assert(vk_shader_artifact_load(cold.data(),&key,profile,1,&a));vk_shader_artifact_free(&a);
+    }
+    assert(read(spvpath)==packed);
+    files=0;for(const auto& entry:std::filesystem::directory_iterator(path.parent_path()))if(entry.path().extension()==".bin")++files;
+    assert(files==16);
+    std::cout<<"PASS: full metadata cache retains exact bytes during background scans; foreground repair, nested cancellation and TLS retain priority without removing SPIR-V\n";
     std::cout<<"PASS: artifact fields, input/state/profile, strict modules, malformed records, diagnostics, atomic publication and failure cleanup\n";
 }

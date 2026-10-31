@@ -22,7 +22,8 @@ clang++ -std=c++17 "${FLAGS[@]}" tools/test_shader_warm_receipt.cpp -Wl,--gc-sec
 "$WARM_PREP_OUT/test-receipt" "$WARM_PREP_OUT/receipt-unit"
 if [[ $# -ge 2 ]]; then
     python tools/build_shader_warm_manifest.py "$WARM_PREP_OUT/manifest.bin"
-    clang++ -std=c++17 "${FLAGS[@]}" tools/test_shader_warm_prepare.cpp runtime/nvn/vulkan/shader_warm.cpp runtime/nvn/vulkan/shader_artifact.cpp runtime/nvn/vulkan/shader_artifact_storage.cpp \
+    retention_flags=();if [[ ${3:-} == --retention ]]; then retention_flags+=(-DVK_SHADER_ARTIFACT_MAX_FILES=512);fi
+    clang++ -std=c++17 "${FLAGS[@]}" "${retention_flags[@]}" tools/test_shader_warm_prepare.cpp runtime/nvn/vulkan/shader_warm.cpp runtime/nvn/vulkan/shader_artifact.cpp runtime/nvn/vulkan/shader_artifact_storage.cpp \
         "$WARM_PREP_OUT/shaders.o" "$WARM_PREP_OUT/compile_budget.o" "$WARM_PREP_OUT/shader_keys.o" "$WARM_PREP_OUT/pipeline_seed.o" "$WARM_PREP_OUT/pipeline_state.o" "$WARM_PREP_OUT/pipeline_warm.o" "$WARM_PREP_OUT/translate.o" "$WARM_PREP_OUT/digest.o" \
         -Wl,--gc-sections -lzstd -ldl -pthread -o "$WARM_PREP_OUT/test-prepare"
     export LARECOMP_NATIVE_LIB_DIR="$WARM_PREP_OUT"

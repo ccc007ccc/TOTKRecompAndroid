@@ -11,9 +11,11 @@
 #include <unordered_set>
 namespace {
 using Bytes=std::vector<uint8_t>;
-std::atomic<uint64_t> stored{},failed{};
+std::atomic<uint64_t> stored{},failed{},deferred{};
+std::atomic<bool> full{};
+thread_local bool background=false;
 std::mutex write_lock;
-struct Publication {std::string path;Bytes bytes;};
+struct Publication {std::string path;Bytes bytes;bool background;};
 struct Publisher {
     std::mutex mutex;
     std::condition_variable changed;
@@ -35,6 +37,7 @@ bool publish(const Publication& task) {
     static std::deque<std::string> order;
     static std::unordered_set<std::string> files;
     if(namespace_path!=directory.string()) {
+        full=false;
         namespace_path=directory.string();order.clear();files.clear();
         for(std::filesystem::directory_iterator it(directory,error),end;!error && it!=end;it.increment(error)) {
             auto name=it->path().filename().string();
@@ -44,6 +47,8 @@ bool publish(const Publication& task) {
         if(error)return false;
     }
     size_t required=files.count(task.path)?0:1;
+    full=files.size()>=VK_SHADER_ARTIFACT_MAX_FILES;
+    if(task.background && required && full) {++deferred;return true;}
     while(files.size()+required>VK_SHADER_ARTIFACT_MAX_FILES && !order.empty()) {
         auto oldest=std::move(order.front());order.pop_front();
         if(oldest==task.path){order.push_back(std::move(oldest));continue;}
@@ -56,6 +61,7 @@ bool publish(const Publication& task) {
     if(ok)ok=rename(tmp.c_str(),task.path.c_str())==0;
     if(!ok){remove(tmp.c_str());return false;}
     if(files.insert(task.path).second)order.push_back(task.path);
+    full=files.size()>=VK_SHADER_ARTIFACT_MAX_FILES;
     ++stored;return true;
 }
 void writer() {
@@ -71,7 +77,14 @@ void writer() {
 bool queue_publication(Publication task) {
     auto& owner=publisher();std::unique_lock<std::mutex> lock(owner.mutex);
     if(!owner.started){try{std::thread(writer).detach();owner.started=true;}catch(...){lock.unlock();return publish(task);}}
-    if(owner.pending.count(task.path))return true;
+    if(owner.pending.count(task.path)) {
+        if(!task.background)for(auto it=owner.queue.begin();it!=owner.queue.end();++it) {
+            if(it->path!=task.path)continue;
+            it->background=false;
+            break;
+        }
+        return true;
+    }
     if(owner.pending.size()>=128)return false;
     auto path=task.path;owner.pending.insert(path);
     try{owner.queue.push_back(std::move(task));}catch(...){owner.pending.erase(path);throw;}
@@ -79,8 +92,10 @@ bool queue_publication(Publication task) {
 }
 }
 namespace shader_artifact_storage {
-bool enqueue(std::string path,std::vector<uint8_t> bytes){return queue_publication({std::move(path),std::move(bytes)});}
+bool exchange_background(bool value){bool previous=background;background=value;return previous;}
+bool at_capacity(){return full.load();}
+bool enqueue(std::string path,std::vector<uint8_t> bytes){return queue_publication({std::move(path),std::move(bytes),background});}
 void wait(const std::string& path){auto& owner=publisher();std::unique_lock<std::mutex> lock(owner.mutex);owner.changed.wait(lock,[&]{return !owner.pending.count(path);});}
 void flush(){auto& owner=publisher();std::unique_lock<std::mutex> lock(owner.mutex);owner.changed.wait(lock,[&]{return owner.pending.empty();});}
-Stats stats(){return {stored.load(),failed.load()};}
+Stats stats(){return {stored.load(),failed.load(),deferred.load()};}
 }

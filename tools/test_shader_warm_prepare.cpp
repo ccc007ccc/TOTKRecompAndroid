@@ -6,6 +6,8 @@
 #include "../runtime/nvn/vulkan/shader_warm_job.hpp"
 #include "../runtime/nvn/vulkan/shader_prepare.h"
 #include "../runtime/nvn/vulkan/shader_artifact.h"
+#include "../runtime/nvn/vulkan/shader_artifact_storage.hpp"
+#include "../runtime/nvn/vulkan/shader_warm_observed.hpp"
 #include "../runtime/nvn/vulkan/pipeline_seed.h"
 #include <cassert>
 #include <cstdarg>
@@ -67,8 +69,93 @@ static void equal_info(const ShaderInfo& a,const ShaderInfo& b) {
     }
 #undef SAME
 }
+static void retention(const std::filesystem::path& manifest,const std::filesystem::path& state) {
+    auto requests=shader_warm::read(manifest.c_str());
+    auto found=std::find_if(requests.begin(),requests.end(),[](const auto& r){return r.title && r.stage==shader_warm::Pair;});
+    assert(found!=requests.end());auto request=*found;
+    auto bytes=shader_warm::encode(request);unsigned char header[16]={'T','K','S','W','A','R','M','1',116,0,0,0,1,0,0,0};
+    {std::ofstream out("retention.bin",std::ios::binary);out.write((char*)header,sizeof header);out.write((char*)bytes.data(),bytes.size());assert(out);}
+    char why[2048]{};
+    assert(shader_warm::prepare("game","retention.bin",false,{},why,sizeof why,{}) || (std::cerr<<why<<'\n',false));
+    auto receipt=state/"common.receipt",log=state/"common.log";
+    std::filesystem::path metadata;
+    for(const auto& entry:std::filesystem::directory_iterator("cache/shader-artifacts"))if(entry.is_directory()){metadata=entry.path();break;}
+    assert(!metadata.empty());
+    // This mode is compiled with a 512-file budget, large enough for the actual
+    // default compute working set. Fill it through the real publisher to evict
+    // the prepared pair, as an oversized unrelated list would.
+    for(unsigned i=0;i<512;++i) {
+        char name[69];snprintf(name,sizeof name,"%064x.bin",i+1);
+        assert(shader_artifact_storage::enqueue((metadata/name).string(),{1,2,3}));shader_artifact_storage::flush();
+    }
+    assert(shader_artifact_storage::at_capacity());
+    setenv("LARECOMP_NATIVE_LIB_DIR","/compiler-disabled-for-retention-audit",1);
+    auto background=[&] {
+        std::filesystem::remove(receipt);
+        return shader_warm::prepare("game","retention.bin",false,{},why,sizeof why,{{},true});
+    };
+    assert(background() || (std::cerr<<why<<'\n',false));
+    assert(background() || (std::cerr<<why<<'\n',false));
+    {std::ifstream in(log);std::string text((std::istreambuf_iterator<char>(in)),{});assert(text.find(" translated=0 ")!=std::string::npos);}
+    shader_archive::Romfs rom("game/romfs.bin");auto catalog=shader_catalog::read(rom,[](const std::string&){});
+    auto selection=shader_warm::select(catalog,{request},false);
+    assert(selection.missing==0 && selection.mismatched==0 && selection.requests.size()==1);
+    std::vector<uint64_t> sources;
+    auto translate=[](const shader_archive::Shader& shader,const ShaderKey& key) {
+        return shader_warm::Info(maxwell_translate_bounded(shader.binary.data(),shader.constants,shader.binary.size()-shader.constants,shader.stage,&key),maxwell_free);
+    };
+    auto verify=[&](bool expected) {
+        shader_warm::plan(catalog,selection,{8,false,true},translate,[&](unsigned record,const ShaderKey& key,const ShaderInfo& info) {
+            sources.push_back(vk_shader_prepare_key(info.msl,info.stage));
+            auto raw=shader_warm::raw_key(catalog.records.at(record).shader);VkShaderArtifact artifact{};
+            assert(vk_shader_artifact_load(raw.data(),&key,vk_shader_artifact_profile(test_profile),info.stage,&artifact)==expected);
+            if(expected)equal_info(info,*artifact.info);vk_shader_artifact_free(&artifact);
+        });
+    };
+    verify(false);assert(!sources.empty());
+    // A mapping and a full metadata directory never waive missing SPIR-V.
+    char name[32];snprintf(name,sizeof name,"%016llx.bin",(unsigned long long)sources.front());
+    auto module=std::filesystem::path("cache/shaders")/vk_shader_cache_namespace()/name;
+    auto held=module;held+=".held";std::filesystem::rename(module,held);
+    assert(!background() && !std::filesystem::exists(receipt));std::filesystem::rename(held,module);
+    // Once actually observed, the same pair receives priority and real metadata
+    // repair, with shaderc still unavailable and the directory still bounded.
+    assert(shader_warm::compact_observed((state/"observed.tsv").string(),{request}));
+    assert(background() || (std::cerr<<why<<'\n',false));verify(true);
+    assert(background());
+    {std::ifstream in(log);std::string text((std::istreambuf_iterator<char>(in)),{});assert(text.find(" translated=0 ")!=std::string::npos);}
+    // Supply the real compute seed required by the warm receipt gate. Both
+    // recent states are already prepared; only their use order changes.
+    assert(shader_warm::prepare("game","retention.bin",true,{},why,sizeof why,{}));
+    auto compute=shader_warm::default_compute_requests(catalog);assert(!compute.empty());
+    assert(shader_warm::compact_observed((state/"observed.tsv").string(),{request,compute.front()}));
+    assert(background());
+    auto receipt_bytes=[&] {std::ifstream in(receipt);return std::string(std::istreambuf_iterator<char>(in),{});};
+    auto before=receipt_bytes();
+    assert(shader_warm::compact_observed((state/"observed.tsv").string(),{compute.front(),request}));
+    bool replanned=false;
+    auto progress=[&](double value,const char*){if(value==0)replanned=true;};
+    assert(shader_warm::prepare("game","retention.bin",false,progress,why,sizeof why,{{},true}));
+    assert(!replanned && receipt_bytes()==before);
+    {std::ifstream in(log);std::string text((std::istreambuf_iterator<char>(in)),{});assert(text.find("result cache_hits=")==0 && text.find("compiler_opened=0")!=std::string::npos);}
+    // The unchanged receipt identity must still verify every recorded module.
+    std::filesystem::rename(module,held);
+    assert(!shader_warm::prepare("game","retention.bin",false,progress,why,sizeof why,{{},true}));
+    assert(replanned);std::filesystem::rename(held,module);replanned=false;
+    // A new binding is still a different coverage set, even if some of its
+    // sources happen to collapse to cached SPIR-V. It must pass the real plan.
+    auto changed=request;changed.mirror=!changed.mirror;
+    assert(shader_warm::compact_observed((state/"observed.tsv").string(),{compute.front(),request,changed}));
+    shader_warm::prepare("game","retention.bin",false,progress,why,sizeof why,{{},true});
+    assert(replanned);
+    vk_shader_artifact_flush();
+    std::cout<<"PASS: recency-only reordering reuses the exact completed receipt without planning; missing modules fail and a new binding still invalidates coverage\n";
+    unsigned files=0;for(const auto& entry:std::filesystem::directory_iterator(metadata))if(entry.path().extension()==".bin")++files;
+    assert(files==512);
+    std::cout<<"PASS: saturated background preparation reuses exact SPIR-V without repeated translation; missing modules fail, observed interfaces repair and remain reusable within 512 files\n";
+}
 int main(int argc,char** argv) {
-    assert(argc==4 || (argc==5 && !strcmp(argv[4],"--cancel-background")));auto image=std::filesystem::absolute(argv[1]),manifest=std::filesystem::absolute(argv[2]);
+    assert(argc==4 || (argc==5 && (!strcmp(argv[4],"--cancel-background") || !strcmp(argv[4],"--retention"))));auto image=std::filesystem::absolute(argv[1]),manifest=std::filesystem::absolute(argv[2]);
     auto output=std::filesystem::absolute(argv[3]);std::filesystem::create_directories(output/"game");assert(!chdir(output.c_str()));
     if(!std::filesystem::exists("game/romfs.bin"))std::filesystem::create_symlink(image,"game/romfs.bin");
     auto state=std::filesystem::path(shader_warm::state_directory("game"));
@@ -82,6 +169,7 @@ int main(int argc,char** argv) {
     maxwell_gmem_map_all=maxwell_gmem_miss_log=maxwell_fp32_double=true;
     maxwell_brx_window=maxwell_static_stacks=maxwell_no_switch=maxwell_no_local_struct=maxwell_explicit_fallthrough=true;
     maxwell_native_half=maxwell_fast_minmax=true;
+    if(argc==5 && !strcmp(argv[4],"--retention")){retention(manifest,state);return 0;}
     char why[2048]{};
     assert(vk_shader_warm_game("game",manifest.c_str(),true,progress,why,sizeof why) || (std::cerr<<why<<'\n',false));
     assert(!std::filesystem::exists("game/.shaders-ready") && std::filesystem::exists(title_receipt));
