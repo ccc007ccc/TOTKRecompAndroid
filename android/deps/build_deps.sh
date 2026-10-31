@@ -113,5 +113,17 @@ if [ ! -f "$P/lib/libzstd.so" ] || [ ! -f "$P/include/zstd_errors.h" ]; then
     cp -L "$W/zstd/build-android/lib/libzstd.so" "$P/lib/libzstd.so"
 fi
 
+# Reuse zstd's pinned, header-only xxHash implementation for transient texture checks.
+# zstd disables XXH3 in its local preamble; enable only that section, retaining the implementation and namespace.
+# Read the verified archive even when libzstd already exists. cmp avoids rebuilding the runtime on every invocation.
+tar --force-local -xOf "$S/zstd-1.5.7.tar.gz" zstd-1.5.7/lib/common/xxhash.h | \
+    awk '!enabled && $0 == "#ifndef XXH_NO_XXH3" { print "#if 0 /* Enable XXH3 for texture content checks. */"; enabled=1; next }
+         { print } END { if (!enabled) exit 1 }' > "$P/include/totk_xxhash.h.tmp"
+if cmp -s "$P/include/totk_xxhash.h.tmp" "$P/include/totk_xxhash.h"; then
+    rm "$P/include/totk_xxhash.h.tmp"
+else
+    mv "$P/include/totk_xxhash.h.tmp" "$P/include/totk_xxhash.h"
+fi
+
 echo "deps: $P"
 ls "$P/lib"

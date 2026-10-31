@@ -2,7 +2,9 @@
 #pragma once
 #include <vulkan/vulkan_core.h>
 
-#define VK_BACKEND_PIPELINE_CACHE_MAX (64u * 1024u * 1024u)
+// TotK's observed pipelines exceed 64 MiB. Keep accepting and saving the full
+// driver snapshot within a finite budget, rather than freezing an older subset.
+#define VK_BACKEND_PIPELINE_CACHE_MAX (256u * 1024u * 1024u)
 static inline uint32_t vk_backend_read_le32(const uint8_t *p) {
     return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
 }

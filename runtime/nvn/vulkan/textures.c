@@ -695,9 +695,13 @@ void vk_textures_reset(void) {
 // ================================================================== uploads (same change detection as metal.m)
 static uint64_t full_hash_budget, full_hash_budget_frame;
 
-// Four independent lanes (one serial multiply chain ran at ~1.5 bytes/cycle; dynamic textures are hashed every
-// frame). Values are only compared within a run.
-static uint64_t hash_full(const uint8_t *p, uint64_t n) {
+// Full content hashes are transient texture change tags, never persisted or used for shader/cache identity.
+#define XXH_INLINE_ALL
+#include <totk_xxhash.h>
+
+#if TOTK_DIAGNOSTICS
+// Previous four-lane implementation, retained only for same-package phone comparisons.
+static uint64_t hash_full_legacy(const uint8_t *p, uint64_t n) {
     uint64_t h0 = 0x9E3779B97F4A7C15ull ^ n, h1 = 0xC2B2AE3D27D4EB4Full, h2 = 0x165667B19E3779F9ull, h3 = 0x27D4EB2F165667C5ull;
     uint64_t i = 0;
     for (; i + 32 <= n; i += 32) {
@@ -711,6 +715,17 @@ static uint64_t hash_full(const uint8_t *p, uint64_t n) {
     uint64_t h = h0 ^ (h1 * 0x9E3779B97F4A7C15ull) ^ (h2 * 0xC2B2AE3D27D4EB4Full) ^ (h3 * 0x165667B19E3779F9ull);
     for (; i < n; i++) h = (h ^ p[i]) * 0x100000001B3ull;
     return h ^ (h >> 31);
+}
+#endif
+
+static uint64_t hash_full(const uint8_t *p, uint64_t n) {
+#if TOTK_DIAGNOSTICS
+    static int legacy = -1;
+    if (legacy < 0) { const char *e = diag_getenv("LARECOMP_TEX_LEGACY_HASH"); legacy = e && atoi(e) != 0; }
+    if (legacy) return hash_full_legacy(p, n);
+#endif
+    // Full range and check frequency are unchanged. No extra texture snapshots or persistent hash identity.
+    return XXH3_64bits(p, n);
 }
 
 // (1024 bytes spread over the texture: without page write tracking (Android) every check samples, and 4096 a texture -

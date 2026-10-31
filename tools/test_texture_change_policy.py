@@ -59,6 +59,14 @@ int main(void) {
     assert(prof_tex_full_bytes==full && uploads==2); // No repeated 17 MiB hashes after a notified update.
     ++t.cpu_write_epoch; upload_texture(&t,&b); assert(uploads==2 && !b.dynamic); // Same bytes: acknowledged, no upload.
     change(&t,&b,data,false); assert(b.dynamic); // Unannounced writes retain the conservative path.
+    // Stable large dynamic textures still read all bytes on every checked frame, including unsampled offsets.
+    for (unsigned i=0;i<3;++i) {
+        ++frame;
+        unsigned old=uploads;
+        size_t offset=i==0 ? (17u<<20)-1 : i==1 ? (8u<<20)+3 : 8193;
+        data[offset]^=1; upload_texture(&t,&b); assert(uploads==old+1);
+        ++frame; old=uploads; upload_texture(&t,&b); assert(uploads==old);
+    }
     change(&t,&b,data,true); assert(b.dynamic); // A later notification cannot erase earlier uncertainty.
     b=(TexBackend){.format=VK_FORMAT_R8_UNORM}; pool.flags=0x22;
     upload_texture(&t,&b); change(&t,&b,data,true); assert(b.dynamic); // CPU uncached memory is not flush-only.

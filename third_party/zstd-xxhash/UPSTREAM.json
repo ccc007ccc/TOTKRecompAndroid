@@ -1,0 +1,15 @@
+{
+  "repository": "https://github.com/facebook/zstd",
+  "commit": "f8745da6ff1ad1e7bab384bd1f9d742439278e99",
+  "tag": "v1.5.7",
+  "path": "lib/common/xxhash.h",
+  "xxhash_version": "0.8.2",
+  "archive": "https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz",
+  "archive_sha256": "eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3",
+  "header_sha256": "8cb837b21a8fe9a6b9dbcd0961ab16e733bfcbfa9e003f3a496ce07ae80aa8ee",
+  "license": "BSD-3-Clause (selected from upstream dual license)",
+  "license_path": "LICENSE",
+  "license_sha256": "7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8",
+  "integration": "android/deps/build_deps.sh extracts the existing verified zstd archive into out/include/totk_xxhash.h. Only the first preamble guard defining XXH_NO_XXH3 becomes #if 0; the algorithm is unchanged. textures.c uses XXH_INLINE_ALL, so no second shared library or exported xxHash API is added.",
+  "purpose": "Transient full-content texture change detection. Not used for persistent shader, cache, game-library or artifact identities."
+}

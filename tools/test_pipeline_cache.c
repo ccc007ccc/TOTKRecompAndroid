@@ -7,14 +7,14 @@
 
 VkG g_vk;
 bool vk_pipeline_warm_save(void) { return true; }
-enum { NORMAL, GROW_ONCE, INCOMPLETE, OVERSIZE, BAD_HEADER };
+enum { NORMAL, GROW_ONCE, INCOMPLETE, OVERSIZE, BAD_HEADER, ABOVE_OLD_LIMIT };
 static unsigned mode, queries, reads;
 static uint8_t tone = 0x31;
 
 static void put(uint8_t *data, unsigned offset, uint32_t word) { memcpy(data + offset, &word, 4); }
 VKAPI_ATTR VkResult VKAPI_CALL vkGetPipelineCacheData(VkDevice device, VkPipelineCache cache, size_t *size, void *data) {
     assert(device == g_vk.dev && cache == g_vk.pcache);
-    size_t needed = mode == GROW_ONCE && reads ? 128 : 64;
+    size_t needed = mode == ABOVE_OLD_LIMIT ? 64u * 1024u * 1024u + 4096u : mode == GROW_ONCE && reads ? 128 : 64;
     if (!data) { ++queries; *size = mode == OVERSIZE ? VK_BACKEND_PIPELINE_CACHE_MAX + 1ull : needed; return VK_SUCCESS; }
     ++reads;
     if (mode == INCOMPLETE || (mode == GROW_ONCE && reads == 1)) return VK_INCOMPLETE;
@@ -64,5 +64,16 @@ int main(int argc, char **argv) {
     setenv("LARECOMP_VK_NO_PIPELINE_CACHE", "1", 1);
     unsigned previous = queries;
     assert(!vk_pipeline_cache_save() && queries == previous); check_file(64, 0x34);
-    puts("PASS: growing cache retry, bounded failures, concurrent saves, write/close errors, atomic replacement, driver identity");
+    unsetenv("LARECOMP_VK_NO_PIPELINE_CACHE");
+    mode = ABOVE_OLD_LIMIT; queries = reads = 0;
+    const size_t large = 64u * 1024u * 1024u + 4096u;
+    assert(vk_pipeline_cache_save() && queries == 1 && reads == 1); check_file(large, 0x34);
+    FILE *file = fopen("cache/vk_pipelines.bin", "rb"); assert(file);
+    uint8_t header[32]; assert(fread(header, 1, sizeof header, file) == sizeof header && !fclose(file));
+    assert(vk_backend_cache_compatible(header, large, &g_vk.props));
+    assert(vk_backend_cache_compatible(header, VK_BACKEND_PIPELINE_CACHE_MAX, &g_vk.props));
+    assert(!vk_backend_cache_compatible(header, VK_BACKEND_PIPELINE_CACHE_MAX + 1ull, &g_vk.props));
+    mode = OVERSIZE; queries = reads = 0;
+    assert(!vk_pipeline_cache_save() && queries == 1 && reads == 0); check_file(large, 0x34);
+    puts("PASS: cache above 64 MiB persists, finite size limit, growing cache retry, concurrent saves, write/close errors, atomic replacement, driver identity");
 }

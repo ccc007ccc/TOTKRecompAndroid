@@ -24,7 +24,16 @@ bool vk_pipeline_cache_save(void) {
         size_t size = 0;
         VkResult result = vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &size, NULL);
         if (result == VK_INCOMPLETE) continue;
-        if (result != VK_SUCCESS || size < 32 || size > VK_BACKEND_PIPELINE_CACHE_MAX) break;
+        if (result != VK_SUCCESS || size < 32) break;
+        if (size > VK_BACKEND_PIPELINE_CACHE_MAX) {
+            static bool reported_limit;
+            if (!reported_limit) {
+                LOG("[vk-cache] snapshot %zu bytes exceeds %u-byte limit; retaining the previous cache\n",
+                    size, VK_BACKEND_PIPELINE_CACHE_MAX);
+                reported_limit = true;
+            }
+            break;
+        }
         size_t capacity = size;
         void *data = malloc(capacity);
         if (!data) break;
