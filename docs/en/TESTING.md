@@ -27,6 +27,10 @@ Frame-timing checks execute generated controller interval/FPS stores and fade co
 and NVN window state. Add `test_totk_framepace.py --image <private main-image.bin>` for real instruction guards;
 see the [2026-10-30 record](../FRAMEPACE-20261030.md) for evidence and gameplay limits.
 Shader checks also need `cc`, `glslangValidator` and `spirv-val` in `dev`.
+`test_shader_control_flow.py --gpu` additionally executes lane-varying inputs on Vulkan against independent expected values.
+It requires `glslc`, Vulkan and validation layers and fails when validation is unavailable. Cases include next-block jumps,
+nested shared joins, conservative fallback, and local-memory zero initialization, constant sizing, dynamic windows and wrapping.
+CPU/SPIR-V checks do not replace GPU numeric or game-image acceptance.
 
 Prepared interface metadata and production handoff checks run with `bash tools/test_shader_artifacts.sh <isolated-output>`.
 Use `TOTK_ARTIFACT_TSAN=1` for the separate storage concurrency run and
@@ -59,6 +63,7 @@ GPU equivalence of legacy writes, templates and templates plus the recording wor
 see the [descriptor record (Chinese)](../PERFORMANCE-DESCRIPTOR-UPDATES-20261030.md) for remaining performance/gameplay acceptance.
 
 For the automatic phone benchmark, `--gpu-profile-frame 1150` timestamps one absolute frame and
+`--gpu-profile-frames 1000,1080,1160,1240` selects several instead (mutually exclusive, at most 64).
 `--timing-trace` records queue waits and GPU counter pairs. Both enable profiling; timestamp readback changes
 timing, so keep these results separate from ordinary FPS measurements. `--render-split-us 0..20000` overrides
 the long-pass submission interval without enabling profiling; 0 disables mid-pass splitting. All three options
@@ -69,12 +74,16 @@ Shared-list parsing, deduplication, game/stage filtering and type preservation, 
 ```bash
 bash tools/test_shader_warm_list.sh
 bash tools/test_shader_warm_prepare.sh .work/shader-warm-check .work/totk-port/game/romfs.bin
+bash tools/test_shader_warm_prepare.sh .work/shader-retention-check .work/totk-port/game/romfs.bin --retention
 bash tools/test_shader_warm_background.sh .work/shader-background-check .work/totk-port/game/romfs.bin
 bash tools/test_shader_runtime.sh
 ```
 
 The first command optionally takes an output directory and a local RomFS image to check the complete production inventory.
 The second compiles real title requests, disables compiler access, strictly reloads the cache, and checks numeric interfaces and linked varying masks.
+`--retention` uses actual compute inputs and a material pair with an isolated 512-file budget: repeated background preparation
+must avoid translation, missing SPIR-V must still fail, and newly observed states must recover their real interfaces. It does not modify phone caches.
+It also checks that recency-only reordering reuses a completed receipt, while missing modules still fail and new bindings still enter preparation.
 The background test covers lifecycle, recency, cancellation/profile changes and cache retention against real requests.
 See the [balanced preparation work](../SHADER-BALANCED.md). These checks do not establish full Android game startup or frame-time performance.
 
@@ -82,6 +91,32 @@ See the [balanced preparation work](../SHADER-BALANCED.md). These checks do not 
 
 See [phone performance sessions](PHONE-PERFORMANCE.md) for direct save selection, automatic timed 60-target measurements
 and exit, explicit interactive diagnostics, and the current device-validation status and limitations.
+Use `--camera-turn --move-forward` for simultaneous right camera turn and forward movement.
+For stalls, record 1% low, p99, maximum frame time and counts above 200 ms, separately for first and repeat routes.
+The current sky-island route adds `--attack-jump` to full-strength camera turn/forward movement; older half-stick or action-unaware APKs are refused.
+`frame_times_ms` preserves frame order starting at `first_frame` and is written only after measurement, for locating slow intervals.
+`LARECOMP_LOG_RENDER_FRAMES=1` separates render requests from inter-request time using completed frame numbers; see the phone workflow.
+`test_async_memory.c` checks attribution, numbering, filtering, limits and reset; `test_vk_command_worker.sh` also runs the actual queue and GPU validation.
+`bash tools/test_pipeline_cache.sh` checks snapshots above the former 64 MiB cap, the current 256 MiB limit, growth retries,
+concurrent saves and preserving the old file on failure.
+
+The kernel wait probe regression uses real condition waits to check wake attribution, unrelated wakes, thread isolation and reset. Run in `dev`:
+
+```bash
+mkdir -p .work/kernel-wait-tests
+clang -O1 -g -DTOTK_DIAGNOSTICS=1 -fsanitize=address,undefined \
+  -ffunction-sections -fdata-sections tools/test_kernel_wait_probe.c \
+  -Wl,--gc-sections -pthread -o .work/kernel-wait-tests/test
+ASAN_OPTIONS=detect_leaks=0 .work/kernel-wait-tests/test
+```
+
+Run `bash tools/test_kernel_scheduling.sh` for the complete suite in both diagnostic modes: 100 affinity migrations,
+40 real equal-priority FIFO handoffs without an extra host yield, default/override/disabled-core0/other-game policy, and wait attribution.
+Priority regressions cover selection, safe preemption, interrupted-owner resumption, live priority changes and reset.
+Mutex tests cover actual owner progress, transitive inheritance, cancellation, handoff, condition reacquisition/timeouts,
+allocation failure/overflow and unique IDs/TLS for 120 concurrently created threads. TotK defaults on; ordinary Release must
+retain the fix even with a diagnostic disable parameter, while other games retain their existing policy.
+Queue ownership checks do not replace device routes, thermal records or frame-time measurements.
 
 Record the commit/APK, driver and version, environment, scene, user feedback, valid frame range and logs for each run.
 Always select the correct OnePlus ADB target. The log tag is `TOTKRecompAndroid`.
@@ -264,13 +299,18 @@ The GPU upload-layout test executes production `deswizzle.c` and its built-in GL
 ```bash
 bash tools/test_vk_deswizzle.sh .work/totk-port/tests/deswizzle
 "$PYTHON" tools/test_texture_change_policy.py .work/totk-port/tests/texture-change
+"$PYTHON" tools/test_texture_hash.py .work/totk-port/tests/texture-hash
 ```
 
 It covers BC/ASTC block shapes, mips, array layers, 3D, a large atlas, dispatch limits, rejected bounds,
 partial initialization failure and reset. Mutating and freeing the source before submission verifies upload snapshots.
 Synchronization validation must report no warnings or errors. The change-policy test executes production decisions
 for notified/unannounced writes, cached/uncached pools, linear textures, periodic checks, restyling, diagnostic lifetime
-and the disabled comparison switch. These tests do not prove phone performance or long-session visual correctness.
+and the disabled comparison switch. The full-hash regression uses the production implementation with known XXH3 vectors,
+0–17 MiB inputs, 32 alignments, guard pages, content mutations and tail-byte changes. Both diagnostic build policies verify
+the legacy comparison switch and production ignoring that override. Run `bash android/deps/build_deps.sh` first to generate
+the header from pinned zstd sources; the game library does not need rebuilding.
+These tests do not prove phone performance or long-session visual correctness.
 See the [texture investigation (Chinese)](../PERFORMANCE-TEXTURES-20261030.md) for experimental switches and device results.
 
 The default Tegra tile-height regression uses synthetic 160x160 BC3 data at independent fixed GOB addresses.

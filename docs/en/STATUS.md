@@ -1,5 +1,42 @@
 # Status and known issues
 
+Latest 2026-10-31 request: continue optimization on the previously tested sky-island grass save (slot_00), at 1×/60,
+using full right-stick turn and forward movement with intermittent normal attacks and jumps. Low frames remain the priority.
+The controller checks stick strength and supports `--attack-jump`; reports preserve frame times after measurement.
+The underground results below describe the previous workload and do not prove the new sky-island route is complete.
+
+The sky-island investigation confirmed that the old 64 MiB driver pipeline-cache limit prevented newer snapshots from being saved.
+A bounded 256 MiB limit now persists an 86.9 MiB cache; a repeat launch prepared all 3,616 recorded pipelines before gameplay.
+Ordinary first/repeat results were 31.34/26.36 FPS and 1% low 14.68/12.06 under different power/temperature conditions;
+overall low-frame stability remains unresolved. Shared-mapping on/off/on lows were 13.16/11.04/10.97, so it remains off by default.
+New diagnostics identified about 76 ms between render requests in two slow frames; investigation continues through main-thread,
+worker and GPU synchronization. New pipeline waits also remain possible.
+Further interval traces place some gaps before the game enters its fence wait; the actual GPU check took only 0.04–0.14 ms.
+Later off-CPU and holder traces identified low-priority PlacementMgr/AutoPlacementMgr core-0 holds, with main-thread reacquisition waits up to about 59 ms.
+Priority selection, safe-point preemption and transitive mutex inheritance produced same-package on/off/on lows of
+**19.21/14.46/17.41**, with 13/50/29 frames above 50 ms. Average FPS was 31.37/32.64/29.73, so average speedup is not established.
+Both diagnostic-mode concurrency suites and an in-process game reboot passed. The policy now defaults on for TotK 1.4.3;
+final runs without experiment parameters reached 30.47/29.51 FPS and lows of 18.30/18.08, with no completed frames above 100 ms.
+The old global 2 ms slice remains disabled. The ordinary Oryon Release has been built, audited and installed on OnePlus 13;
+see the [delivery record (Chinese)](../RELEASE-CLOSEOUT-20261031.md).
+See the [sky-island record (Chinese)](../PHONE-LOW-FRAMES-20261031.md#切回空岛管线缓存越过旧上限).
+
+2026-10-31: the current route is the user's verified underground slot 1, 1×/60 target, forward movement plus right camera turn.
+The shader fix reduced one draw from 144.66 to 0.99 ms. A subsequent fix preserves the core-0 FIFO handoff while avoiding
+redundant host yields for TotK threads restricted to that guest core; the same-APK on/off comparison reached 50.43/20.71 FPS.
+The default baseline after that fix reached 54.95 FPS, 1% low 28.71 and maximum 160.86 ms.
+A subsequent fix prevents background metadata repair from continually evicting the full interface cache, while retaining title/recent interfaces.
+That stage's default runs, with normal warm-up and no diagnostic parameters, reached **53.98/53.45 FPS, 1% low 33.05/31.04,
+maximum 65.32/55.39 ms and no frames above 100 ms**. Same-APK reversal confirmed metadata writes falling from about 15,600 to 600;
+average FPS differences were small and do not establish a stable gain. Canonical recent-state set identity subsequently reduced
+repeated preparation from 56.3 to 18.0 seconds. Post-ready CPU sampling identified full texture checks; reusing bundled XXH3
+with unchanged scan ranges, frequency and synchronization reached **56.95/53.07/57.16 FPS and 1% low 38.56/34.23/38.43**
+in a same-package new/old/new comparison. No frames exceeded 100 ms; maximum frames remained about 49–56 ms.
+Host and phone ARM64 content checks passed. Worker remains off and split remains 1000 µs; temperatures and GPU boundary evidence
+are recorded in the linked report. First-use compilation, remaining rendering costs,
+stable 60 FPS and longer play remain unverified. See the [full record (Chinese)](../PHONE-LOW-FRAMES-20261031.md).
+Older 2× results and water-related hypotheses below are historical; water is no longer the required reproduction route.
+
 2026-10-30 shader implementation: after the D2R Mobile / Eden review, prepared interfaces/SPIR-V now enter the runtime
 directly, with bounded module reuse, shared compilation budgets, a metadata writer, actual pipeline seeds and separate identities.
 Host concurrency/real-input/GPU checks and both Android Release builds passed; see the [implementation (Chinese)](../SHADER-RUNTIME-20261030.md).

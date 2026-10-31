@@ -1,17 +1,40 @@
 # Phone performance sessions
 
+`--diagnostic-env LARECOMP_LOG_BUILD_WAITS=1` logs foreground program/pipeline waits of at least 20 ms;
+`--diagnostic-env LARECOMP_BUILD_WAIT_FRAME=1000` excludes earlier loading. At most 128 records are logged per game session.
+Each record identifies the graphics-program, graphics-pipeline or compute path, accurate source keys, and the completed
+presentation count (`presented`). Waits include queueing and dependencies, not only compiler execution.
+This probe is compiled only into diagnostic packages and preserves first-use waiting; account for its results separately.
+
+`--diagnostic-env LARECOMP_LOG_RENDER_FRAMES=1` separates requests from inter-request time for frames above 50 ms;
+use `--diagnostic-env LARECOMP_RENDER_TRACE_FRAME=1200` to select a starting completed frame. Logging is capped at 128 records per game.
+`[render-frame] frame` matches `frame_times_ms`; the older `[hitch] frame` needs a +1 offset.
+The `ns` endpoints use the monotonic clock, allowing interval overlap with kernel wait traces.
+`exec/present/fence/write/call/driver` are request wall times; `work` is their sum and `gap` includes queue waits and bookkeeping.
+`cpu` is render-thread CPU time in the same interval, not an additional duration. The gap is not a measure of pure GPU idle time.
+This diagnostic-only probe preserves ordering, synchronization and ADPF; disabled tracing adds no thread CPU clock reads.
+
 The 2026-10-30 shader/worker/descriptor/clear phone comparisons, including first/repeated runs, warm-up controls and
 temperature limits, are in the [phone record (Chinese)](../PHONE-SHADER-EXPERIMENTS-20261030.md). A 60 target and successful exit do not establish actual 2×60.
 
 The benchmark now respects the selected resolution (`--texture-scaling settings`) and normal runtime dynamic-resolution policy
 (`--game-dynres default`). Earlier runs forced `LARECOMP_NO_SCALE=1` and `LARECOMP_GAME_DYNRES=1`; their FPS numbers
 do not represent normal 2× gameplay. Use `--texture-scaling native` only for an explicitly labelled unscaled comparison.
-`benchmark --camera-turn` turns the camera right at half stick only during measurement; an older APK without this route is refused.
+`benchmark --camera-turn` turns the camera right at full stick (32767) only during measurement; the runtime must report `camera_turn_x=32767`, so older half-strength APKs are refused.
 Report first and repeated routes separately, including long frames and compilation waits.
+Add `--move-forward` to hold the left stick fully forward during the same interval. Both sticks stop outside the
+timed sample, and the controller rejects runtimes without forward-route support. `launch.json` records both
+route switches, the save seed and slot. The user's latest 2026-10-30 reproduction baseline is **1× / 60 FPS**,
+their newly updated first underground save in the game menu, and `--camera-turn --move-forward`. Confirm the
+live game's save directory and actual slot; menu order does not necessarily mean file `slot_00`. Freeze a copy of that latest save;
+the user-confirmed seed is slot_01 in the castle underground corridor, with full-heart Link and Zelda carrying a torch.
+An older seed cannot substitute just because its region or slot number matches. These results do not represent 2× performance.
 
 Use `benchmark` for routine measurements: automatically load an isolated save, measure continuously with a **60 FPS target**, then close the game. The default measurement lasts 15 seconds after loading. It requires no pause, screenshot or step-by-step confirmation. The older paused, fixed-frame-count session remains available for explicit diagnostics.
 
-Direct loading is verified on OnePlus 13 / Adreno 830: TotK 1.4.3 slot_00 loads the sky-island cliff without button input. Historical cached startup times were about 45–49 seconds for O0, 30–38 seconds for O1 and 31 seconds for full O3/8 Elite. These are loading times, not FPS gains.
+Save selection is verified on OnePlus 13 / Adreno 830. The current route retains the title, list and confirmation flow,
+automatically confirms it, then stops menu input when the selected save is read. Historical sky-island slot_00 cached
+startup times were about 45–49 seconds for O0, 30–38 seconds for O1 and 31 seconds for full O3/8 Elite. These are loading times, not FPS gains.
 
 ## Isolated test package
 
@@ -45,6 +68,62 @@ The default seed is the test package's `files/performance/seed`; override it wit
 The runtime starts its timer after the existing readiness heuristic: 90 consecutive frames with a scene G-buffer and sufficient draws. This is not the game's internal playable-state flag. On expiry, it atomically publishes `sample-0001.json` and final status, then requests process exit. Startup beyond 120 seconds or leaving the foreground also ends the run. If rendering stops producing frames, the event thread can still end the timer; that wait remains part of elapsed time. The controller collects results, logs, temperatures and battery state, and closes the test package after errors or failure to exit. The native timer continues if the host disconnects.
 
 `launch.json` records APK/library hashes, environment and which side closed the process. Results include target rate, actual FPS, elapsed time and frame-time percentiles. Routine benchmarks disable per-frame diagnostic counters and GPU capture, without the manual warm-up/pause workflow. All four 30/45/60/120 game options remain available; benchmarks use 60.
+
+Tail statistics include `p99_ms`, `max_ms`, `low_1pct_fps` and completed-frame counts above 50/100/200 ms.
+`frame_times_ms` in `sample-0001.json` preserves completed frames in their original order; index `i` maps to absolute frame `first_frame+i`.
+It is written with the result after measurement, adding no logging or GPU readback during sampling. Use it to locate slow intervals and recompute percentiles.
+It is empty when no frame completed; unfinished waits remain part of elapsed time only. Older APK summaries remain readable without this array.
+
+The latest 2026-10-31 route returns to the previously tested sky-island grass save, slot_00, at 1×/60.
+Use its verified complete seed with `--camera-turn --move-forward --attack-jump`: both sticks are full strength;
+Y is pressed at 2 seconds and X at 6 seconds of each 8-second cycle, for 120 ms each (normal attack/jump with default game controls).
+Actions use time relative to sampling and stop outside it. The manifest and runtime status report the action mode and stick strength;
+unsupported APKs are refused. Keep the earlier underground half-stick route as a separate historical workload.
+The 1% low is the reciprocal of the mean duration of the slowest `ceil(frames/100)` completed frames, not `1000/p99_ms`.
+An unfinished frame at shutdown affects elapsed time/FPS but is not added to the completed-frame percentiles.
+Older APK results remain readable without these fields. Report first and repeat routes separately;
+see the [underground low-frame investigation (Chinese)](../PHONE-LOW-FRAMES-20261031.md).
+
+`benchmark --gpu-profile-frame 1150` timestamps one absolute frame. For intermittent stalls, use
+`--gpu-profile-frames 1000,1080,1160,1240` instead: 1–64 frame numbers in 1–1000000, sorted and deduplicated.
+Both options are mutually exclusive and enable profiling; `--timing-trace` also enables profiling and records queue waits.
+All are recorded in `launch.json`. Timestamp readback affects timing, so keep these runs separate from ordinary FPS results.
+Add `--diagnostic-env LARECOMP_GPUPROF_DRAWS=1` for individual draws. The leading draw label describes the preceding draw;
+use the appended `first fs ... vs=... fs=...` fields for the measured interval.
+Add `--diagnostic-env LARECOMP_GPUPROF_DISPATCHES=1` to separate compute setup, descriptors, execution, publication
+and the interval after dispatch. Each row measures from its mark to the next; the interval from `after dispatch`
+to the next submission is not shader execution. Identify compute shaders by their source key because guest addresses can change.
+Main-CB start/end markers carry a submission sequence; the end marker's `upload-cb` flag describes that submission.
+Main start executes after its upload CB, so inspect the next submission's flag before interpreting the gap between main CBs.
+`prof_gpu` also excludes preceding uploads; CPU, GPU and waits overlap and must not be added.
+`--diagnostic-env LARECOMP_TEX_LEGACY_HASH=1` restores the former four-lane texture hash in the same test package for an XXH3 comparison.
+Both scan the same full range at the same frequency with the same synchronization. Ordinary Release ignores this override.
+`--diagnostic-env LARECOMP_LOG_SHADER_WARM_REUSE=1` separates request-map, interface-metadata and SPIR-V misses,
+and counts deferred background metadata repairs at capacity. Its extra SPIR-V reads make this a diagnostic run.
+`artifact_miss` includes missing files and failed validation; the counter alone does not distinguish them.
+`LARECOMP_SHADER_WARM_RETAIN=0` restores the former shared-list metadata repair/eviction policy in diagnostic builds only.
+Both policies keep exact keys, SPIR-V checks and full runtime interface validation.
+`--diagnostic-env LARECOMP_LOG_KERNEL_WAITS=1` reports SVC/core0/host waits for the presenting thread, its latest producer and the signaler of that producer's longest address wait every two seconds,
+with thread CPU time, host TID, and the longest address wait's caller and signaler. It does not change scheduling.
+Add `--diagnostic-env LARECOMP_KERNEL_WAIT_BT_FRAME=1400` to trace producer address waits above 30 ms from that absolute frame,
+at most four distinct addresses per thread. Stack tracing adds overhead and is diagnostic only.
+Add `--diagnostic-env LARECOMP_KERNEL_WAIT_TRACE_FRAME=1500` to record condition waits above 50 ms after that frame:
+the longest wait per SVC, at most 128 records per thread. `[kernel-long-wait]` logs outside service locks;
+address-waker identities are captured under the original lock, with 0 for unrelated wakes or other wait kinds.
+Its monotonic `ns` interval includes condition-lock reacquisition, excluding the later core-0 handoff.
+Match interval overlap with `[render-frame]`; its `frame` field is the last published game presentation count,
+not a render-completion frame ID. This trace does not cover computation or all host waits.
+The same switch logs ordinary core-0 holds above 10 ms when another thread is queued (`[kernel-core0-hold]`),
+including the holder and next candidate IDs, at most 128 records per game. Migration and forced-slice releases are not all covered.
+TotK 1.4.3 now selects core-0 threads by effective guest priority, preempting only at existing safe points.
+Equal-priority peers remain FIFO; an interrupted owner retains its position among peers. Mutex owners inherit priority
+through waiting chains, with old donations removed after handoff, cancellation or timeout.
+`--diagnostic-env LARECOMP_C0_PRIORITY=0` compares the legacy FIFO in diagnostic builds. Ordinary Release retains the fix
+and ignores this override; other games keep their existing policy.
+`kernel-service` reports the whole SVC wall time, including lock entry, handoff and yielding; `body` reports the service body.
+Both are per-frame values and overlap with the narrow wait buckets and thread CPU time; do not add them.
+`LARECOMP_C0_GUEST_YIELD=0` restores the old host-yield path in diagnostic builds only. See the [low-frame record](../PHONE-LOW-FRAMES-20261031.md) for the production default and its affinity restrictions.
+A presenting thread waiting for another game thread does not establish that game CPU work is low.
 
 ## Explicit interactive diagnostics
 

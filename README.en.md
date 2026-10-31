@@ -21,6 +21,7 @@ The user also confirmed the latest fix for torch-halo clipping and large-area sc
 profile, have been deployed. Target rates and achieved frame rates are validated separately. See [phone performance tests](docs/en/PHONE-PERFORMANCE.md)
 for measurements and their limits. Routine tests load automatically, measure at the 60 target and exit on time.
 See [status and known issues](docs/en/STATUS.md) and the [detailed investigation record, in Chinese](docs/TOTK-PORT.md).
+The [low-frame investigation (Chinese)](docs/PHONE-LOW-FRAMES-20261031.md) records underground and sky-island 1×/60 routes, shader/scheduler fixes and same-APK comparisons. See the [Oryon Release closeout (Chinese)](docs/RELEASE-CLOSEOUT-20261031.md) for delivery and remaining work.
 
 ## Build and run
 

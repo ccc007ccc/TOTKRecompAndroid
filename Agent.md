@@ -181,6 +181,9 @@ TOTK_STAGE=.work/totk-port/packages/debug-dev
 换包/档位时同时改目录、variant、profile、package 和 APK；部署器检查实际 manifest、运行时和库身份。
 `android/push_game.sh <game> ...` 仅推送配套数据，不能替代 APK 安装。
 日常运行时更新先用 `build_totk.sh` 重新打包，再安装 packages 中的确切 APK。
+只更新 APK 前核对**目标包默认加载的手机游戏库**身份；测试包用 `LARECOMP_GAME_LIB` 指向的私有库匹配，
+不代表普通包 `extracted/totkgame.so` 和内部 `res/totkgame.so` 已同步。身份不匹配时同时部署已验证的配套库和真实 `.id`，
+保留旧库备份，验收普通启动的实际加载路径；不得仅凭 APK 安装成功宣布可以游玩。
 `android/run_boot.sh` 会停止/重启所选包，只限时收日志、结束后保留游戏；它不是自动退出的性能测试入口，
 且通过 `TOTK_BUILD_VARIANT/PROFILE/PERFORMANCE_TEST` 环境选择包，缺省是 Debug/dev。
 
@@ -196,6 +199,7 @@ TOTK_STAGE=.work/totk-port/packages/debug-dev
 | --- | --- |
 | 输入/生成器 | `"$PYTHON" tools/test_totk.py`、`"$PYTHON" tools/test_romfs_build.py`、`"$PYTHON" tools/test_exclusive_pair.py`、`"$PYTHON" tools/test_local_branches.py` |
 | 游戏计时/呈现间隔 | `"$PYTHON" tools/test_totk_framepace.py`（可传 `--image <私有 main-image.bin>`）、`bash tools/test_present_interval.sh` |
+| 内核亲和性、优先级、主动让步、等待诊断 | `bash tools/test_kernel_scheduling.sh`（同级 FIFO、安全抢占、互斥锁传递继承、并发线程注册、迁移/关闭回退、两种诊断档位与唤醒归属） |
 | APK/库身份、端侧参数 | `"$PYTHON" tools/test_android_packages.py`；`"$PYTHON" tools/test_gamebuild_flags.py`；实际构建相关 variant/profile |
 | 诊断构建隔离 | `"$PYTHON" tools/check_android_diagnostics.py <实际 APK> --expect off\|on`；Release 的 off 和 Debug/测试包的 on 都须验收；编译运行 `tools/test_release_diagnostics.c` 验证调度抢占未被裁掉 |
 | 着色器缓存/编译 | `bash tools/test_shader_runtime.sh`；`bash tools/test_shader_cache_compat.sh`；`bash tools/test_shader_dictionaries.sh` |
@@ -209,6 +213,7 @@ TOTK_STAGE=.work/totk-port/packages/debug-dev
 | 描述符更新模板/分类比较 | `bash tools/test_descriptor_updates.sh`（实际 stage_set、失败/生命周期与原写入/模板/worker 组合的真实 GPU 值；实验仅诊断包且默认关闭） |
 | 首次完整清除合入 loadOp / 深度统计 | `bash tools/test_pass_clear.sh <输出目录> [自己的 romfs.bin]`（实际 pass/scissor/clear 的 ASan/UBSan、传统/动态 pass 与 worker 的 GPU 比较；强制验证层；实验仅诊断包且默认关闭） |
 | GPU 纹理排布转换 / 写通知策略 | `bash tools/test_vk_deswizzle.sh`（真实 Vulkan、同步验证、快照与回收）；`"$PYTHON" tools/test_texture_change_policy.py <输出目录>` |
+| 纹理完整内容哈希 | `"$PYTHON" tools/test_texture_hash.py <输出目录>`（正式实现、诊断两档、未对齐/保护页/尾部改写）；依赖头由 `bash android/deps/build_deps.sh` 从固定 zstd 生成 |
 | 可变图像格式列表（UBWC） | `"$PYTHON" tools/test_image_format_lists.py <输出目录>`（按独立尺寸表核对整类视图格式、E5B9G9R9 排除和默认设备条件） |
 | 清单/准备/生命周期 | `bash tools/test_shader_warm_list.sh`；`bash tools/test_shader_warm_prepare.sh`；`bash tools/test_shader_warm_background.sh` |
 | 管线 | `bash tools/test_pipeline_cache.sh`；`bash tools/test_pipeline_warm.sh`；GPU：`bash tools/test_vk_pipeline_warm.sh` |
@@ -242,7 +247,7 @@ TOTK_STAGE=.work/totk-port/packages/release-snapdragon-8elite-perftest
 指定槽位保留正常菜单确认流程，实际读取目标进度文件后停止自动按键；不要改写标题入口跳过界面初始化。
 默认 15 秒，可选 1–60 秒。就绪条件是连续 90 帧场景 G-buffer/绘制量启发式，不是内部“已可操作”标志。
 `--profile` 是诊断计数开关，和构建脚本的 `--profile <编译档>` 含义不同；诊断/回读结果单独记账。
-`--gpu-profile-frame` / `--timing-trace` / `--shader-stats` 自动启用诊断；`--render-split-us` 只覆盖提交阈值。
+`--gpu-profile-frame` / `--gpu-profile-frames` / `--timing-trace` / `--shader-stats` 自动启用诊断；`--render-split-us` 只覆盖提交阈值。
 `--diagnostic-env NAME=VALUE` 只接受 `LARECOMP_*` 测量开关和 Turnip 的 `TU_DEBUG` / `TU_AUTOTUNE_*`，
 不能覆盖控制器自身设置；它不自动启用诊断计数，但结果属于开关对照，不能当作默认配置成绩。
 这些参数记录在 `launch.json`，用法与时间戳回读的影响见 [手机性能测试](docs/PHONE-PERFORMANCE.md)。
@@ -256,6 +261,10 @@ TOTK_STAGE=.work/totk-port/packages/release-snapdragon-8elite-perftest
 存档场景、冷热缓存、温度、电源状态、有效区间及退出原因。
 常规测试必须尊重分辨率设置，禁止暗中传 `LARECOMP_NO_SCALE=1`。`--texture-scaling native` 仅用于明确标注的原始尺寸对照。
 静止短测不代表正常游玩；转视角问题至少另跑 `--camera-turn` 并记录首次/重复路线，不能用平均 FPS 掩盖长帧。
+`--move-forward` 可在同一采样区间加上左摇杆全幅前进；与 `--camera-turn` 合用为持续前进并右转路线。
+`--camera-turn` 当前为全幅右转（32767），控制器核对运行时幅度并拒绝旧半幅包。
+`--attack-jump` 在每 8 秒的第 2/6 秒分别按 Y/X 各 120 ms，加载和退出阶段不输入。
+2026-10-31 后续优化基准为已核对的历史空岛草地 slot_00、1×/60、全幅双摇杆加攻击/跳跃；地下半幅路线保留作历史对照。
 分别报告构建、合成测试、真实 GPU 数值、手机启动、画面/路线验收；不能互相代替。
 CPU 渲染墙钟含等待，GPU 时间可能与它重叠；复制字节占比不是耗时占比；60 档不是实测 60 FPS。
 超时、身份不匹配、被另一个任务停止或装包的运行不计为通过。
@@ -299,6 +308,8 @@ Turnip 对带 `MUTABLE_FORMAT` 却没有格式列表的颜色图像一律关闭 
 
 运行时编译关闭后使用严格完整准备门禁；部分预热清单不能满足该门禁。
 后台顺序是最近使用状态、当前版本 257 个计算输入的默认状态、共享清单；不恢复旧百万级全变体任务。
+准备收据对近期状态的完整集合计算身份，不因同一集合的使用顺序变化而失效；实际准备仍按近期优先顺序执行。
+新增/移除状态、绑定类型、真实配置与清单变化仍参与身份，复用收据时仍逐项校验所记录的 SPIR-V。
 
 | 身份/记录 | 约束 |
 | --- | --- |
@@ -316,6 +327,10 @@ Turnip 对带 `MUTABLE_FORMAT` 却没有格式列表的颜色图像一律关闭 
 损坏/缺失回退、原子落盘、取消/重启和旧缓存保留是必须维护的行为。
 接口元数据按完整 NVN 输入、状态、实际译码配置和编译 namespace 匹配；不持久化源码、guest 地址或 Vulkan handle。
 元数据独立写入线程最多排队 128 项，每个当前 namespace 最多保留 32,768 个文件；它是可重建的加速层，收据仍只证明所列 SPIR-V 完整。
+标题、近期实际状态和默认计算输入优先补齐接口元数据；普通后台共享清单只填空余容量，不驱逐已有元数据。
+容量满时，后台可凭完整请求映射和有效的准确 SPIR-V 继续准备，不反复译码只为补写无法保留的接口；
+这不提供运行时 ShaderInfo，也不豁免缺失 SPIR-V 的编译。实际绘制/计算仍完整校验接口并在需要时正常修复。
+后台角色在准备任务的生产线程设置并在退出/取消时恢复，不能借用编译 worker 的 TLS 判断。
 设备内模块/反射缓存最多保留 128 项、64 MiB SPIR-V；引用保护在途对象，超过保留预算的临时模块不额外留住 SPIR-V。
 shaderc、接口派生、shader module 和管线创建共用编译预算。8 核设备加载阶段最多 4 项、普通后台最多 3 项；游玩阶段最多 2 项、普通后台最多 1 项。
 前台所需的模块依赖/管线可提升优先级；取消后台依赖时前台接着构建。Maxwell 译码保持串行，不因预算改变而删除其锁。
@@ -377,6 +392,14 @@ UI 只查询收据身份，独立可取消任务逐项检查模块和字典；�
 - Android 生命周期在 SDL event watch 中先发布状态；不能等默认阻塞的 `SDL_PollEvent` 返回后才暂停后台工作。
   watch 中只请求取消，不 join worker。游戏帧边界等待使用 `app_lifecycle`，释放 kernel core-0 所有权；
   teardown 在 join guest 前唤醒等待者。前台恢复、窗口重建和连续切换都需实机验证，不能仅证明画面隐藏。
+- TotK 1.4.3 的 guest core 0 默认按有效 guest 优先级选择可运行线程，同级 FIFO；更高优先级到达时只请求既有
+  函数入口/SVC 安全点交接，旧持有者确认之前不放行第二持有者。被抢占者保留同级位置，显式让步进同级队尾。
+  mutex 等待沿真实持有者链传递优先级，交接、取消、超时及基础优先级变化后重新计算并撤销旧继承。
+  私有继承状态每次 boot 重置，不改游戏库 ABI；写入持 `g_klock → c0_m`，读取持其中任一锁。
+  诊断包可用 `LARECOMP_C0_PRIORITY=0` 对照旧 FIFO；普通 Release 保留修复且不接受覆盖，其他游戏仍走原策略。
+- TotK 1.4.3 的 guest core 0 单核线程（`core_mask==1`）在 `SleepThread(0/-1)` 时默认释放/按同级 FIFO 重新排队让步，
+  不再额外调用宿主 `sched_yield`。保留 core-0 所有权、抢占安全点与亲和性校验；其他核心、可迁移线程、`-2`、
+  正休眠和关闭 core-0 保护时仍走原路径。诊断包可用 `LARECOMP_C0_GUEST_YIELD=0` 对照；普通 Release 保留修复且不接受该诊断覆盖。
 
 ## 9. 上游、提交和文档
 

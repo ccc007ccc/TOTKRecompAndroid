@@ -37,6 +37,9 @@ bash tools/test_present_interval.sh
 帧率检查覆盖生成控制器保存的间隔/FPS、实测时钟、过场超时/重启、淡入淡出转换及 NVN 窗口一致性；
 追加 `test_totk_framepace.py --image <自己的 main-image.bin>` 才包含真实输入位置校验，见 [本轮记录](FRAMEPACE-20261030.md)。
 着色器测试还需要 `cc`、`glslangValidator`、`spirv-val`；它们应安装在 `dev`。
+`test_shader_control_flow.py --gpu` 另用真实 Vulkan 执行随 lane 变化的输入，对比独立期望值；
+需要 `glslc`、Vulkan 和验证层，验证层不可用时失败。覆盖紧邻跳转、嵌套共有出口、保守回退、
+局部内存零初始化/常量缩减/动态窗口/向量和负偏移回绕；CPU/SPIR-V 通过不代替 GPU 数值或游戏画面验收。
 服务、LDC、gather、打包纹理和局部纹理更新另有 `tools/test_*.c` 合成测试，历史结果见 [适配记录](TOTK-PORT.md)。
 上游 RomFS 测试中的 BOTW 版本检查是继承代码的回归验证，不能代替 TOTK 资源验收。
 
@@ -68,6 +71,7 @@ GPU 要求 Vulkan 1.3 与验证层成功，不会退回无验证模式。`LARECO
 ```bash
 bash tools/test_shader_warm_list.sh
 bash tools/test_shader_warm_prepare.sh .work/shader-warm-check .work/totk-port/game/romfs.bin
+bash tools/test_shader_warm_prepare.sh .work/shader-retention-check .work/totk-port/game/romfs.bin --retention
 bash tools/test_shader_warm_background.sh .work/shader-background-check .work/totk-port/game/romfs.bin
 bash tools/test_shader_runtime.sh
 bash tools/test_shader_cache_compat.sh .work/shader-cache-check
@@ -76,15 +80,43 @@ bash tools/test_vk_pipeline_warm.sh .work/pipeline-warm-gpu
 ```
 
 第一条可再传输出目录和本地 RomFS 路径，检查完整真实目录；第二条编译真实标题请求并关闭编译入口后严格加载，核对接口类型和配对掩码。
+`--retention` 使用真实计算输入和材质配对，在独立的 512 文件预算内模拟饱和：验证后台重复运行不再重译、
+缺失 SPIR-V 仍失败，以及加入近期记录后恢复真实接口。测试数据与手机缓存分离。
+同一用例还核对近期状态仅重排时直接复用完成收据、缺失模块仍失败、新绑定仍进入准备流程。
 工具与当前匹配结果见[均衡准备方案](SHADER-BALANCED.md)。
 后台测试覆盖生命周期、最近记录、取消/配置变化和真实任务缓存保留；这些检查不代替完整 Android 游戏启动与帧时间验收。
 缓存兼容测试检查编译器身份、审核白名单、跨目录字典依赖和新变体写入；同格式旧库可读不等于当前源码键命中。
 管线预热另有记录/线程竞争检查及跨进程 GPU 数值检查，覆盖传统/动态渲染、EDS 和计算工作组特殊化；不能代替游戏帧时间验收。
+`bash tools/test_pipeline_cache.sh` 验证超过旧 64 MiB 的缓存仍可保存、当前 256 MiB 上限、增长重试、并发保存及失败保留旧文件。
 
 ## 实机证据
 
 指定存档启动、保留场景降温和固定帧数采样见[手机性能测试会话](PHONE-PERFORMANCE.md)。
 该入口的实机状态和限制以该文档为准。
+自动测试支持 `--camera-turn --move-forward`；低帧排查同时记录 1% low、p99、最大帧耗时和 >200 ms 次数。
+当前空岛路线再加 `--attack-jump`，全幅双摇杆和 Y/X 脉冲只在采样中生效；控制器拒绝旧半幅/缺动作支持的包。
+结果中的 `frame_times_ms` 按 `first_frame` 起保留逐帧顺序；测量结束后才落盘，用于定位低帧时段。
+`--gpu-profile-frames 1000,1080,1160,1240` 可在一轮中诊断多帧，与 `--gpu-profile-frame` 互斥；
+时间戳回读和 CPU 采样的运行单独记账，不能混入普通 FPS 对照。
+`LARECOMP_LOG_RENDER_FRAMES=1` 另按完成帧拆分请求/请求间时间；参数和编号对应关系见手机性能文档。
+`test_async_memory.c` 覆盖诊断分类、帧编号、过滤、上限和重启；`test_vk_command_worker.sh` 同时运行实际请求队列与 GPU 验证。
+
+地址等待探针使用真实条件等待验证唤醒归属、无关唤醒、线程隔离和重启清理（在 `dev` 中）：
+
+```bash
+mkdir -p .work/kernel-wait-tests
+clang -O1 -g -DTOTK_DIAGNOSTICS=1 -fsanitize=address,undefined \
+  -ffunction-sections -fdata-sections tools/test_kernel_wait_probe.c \
+  -Wl,--gc-sections -pthread -o .work/kernel-wait-tests/test
+ASAN_OPTIONS=detect_leaks=0 .work/kernel-wait-tests/test
+```
+
+完整内核调度回归使用 `bash tools/test_kernel_scheduling.sh`：在两种诊断档位下验证 100 次亲和性迁移、
+40 次没有额外宿主 yield 的同级 FIFO 交接、默认/诊断覆盖/关闭 core-0/其他游戏回退，并运行上述等待探针。
+优先级回归覆盖队列选择、安全抢占、同级持有者恢复、动态优先级和重启；互斥锁回归覆盖实际持有者进度、
+传递继承、取消、交接、condition 重新争锁/超时、分配失败与溢出，以及 120 个并发创建线程的 ID/TLS 唯一性。
+TotK 默认开启；普通 Release 即使收到关闭诊断参数也须保留修复，其他游戏仍按原策略。
+它验证所有权和顺序，不能替代游戏路线、温度及长帧实测。
 
 每轮保存提交或 APK 标识、驱动及版本、环境变量、场景、用户反馈、有效帧号和日志。
 ADB 必须明确指定一加设备，日志标签为 `TOTKRecompAndroid`。上游设备记录不算本分支结果。
@@ -253,12 +285,16 @@ GPU 纹理排布转换执行正式 `deswizzle.c` 和内置 GLSL，逐字节对�
 ```bash
 bash tools/test_vk_deswizzle.sh .work/totk-port/tests/deswizzle
 "$PYTHON" tools/test_texture_change_policy.py .work/totk-port/tests/texture-change
+"$PYTHON" tools/test_texture_hash.py .work/totk-port/tests/texture-hash
 ```
 
 GPU 测试覆盖 BC/ASTC 块尺寸、mip、数组层、3D、大图集、派发上限、越界、初始化失败清理与重复 reset，
 并在提交前改写、释放原始内存，验证 GPU 使用上传时的快照。同步验证须无警告/错误。
 变化检测测试执行正式上传决策，覆盖通知/无通知、CPU 缓存/非缓存、线性纹理、周期校验、贴图重载与诊断对象寿命，
-另验证关闭通知优化保留原行为。它们不代替手机帧率、画面或长期运行验收。
+另验证关闭通知优化保留原行为。完整哈希回归执行正式实现，含已知 XXH3 向量、0–17 MiB 输入、32 种对齐、
+保护页边界、逐字节或分散改写和尾字节改写；诊断两档验证旧算法开关及普通 Release 忽略覆盖。
+首次运行前用 `bash android/deps/build_deps.sh` 生成固定 zstd 中的头文件，无需重建游戏库。
+它们不代替手机帧率、画面或长期运行验收。
 实验开关与实机进度见 [纹理优化记录](PERFORMANCE-TEXTURES-20261030.md)。
 
 默认 Tegra 分块高度回归使用独立固定地址的 160×160 BC3 数据，检查临界高度、全部1600块、mip偏移及显式布局／3D覆盖：

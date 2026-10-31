@@ -29,6 +29,7 @@ See [building](docs/en/BUILD.md) and [testing](docs/en/TESTING.md).
 - Investigate source and existing captures before restarting. F9 can trigger another capture in an appropriately configured process.
 - Record the APK/commit, driver, environment, scene and valid frame range. Readback diagnostics are not performance tests.
 - Reset per-boot state when the game restarts; follow `RT_ON_RESET` and backend reset handling.
+- For scheduling changes, run `bash tools/test_kernel_scheduling.sh` and preserve equal-priority FIFO, safe-point handoff, mutex inheritance, affinity fallbacks and production behavior in ordinary Release builds.
 
 ## Issues and pull requests
 
